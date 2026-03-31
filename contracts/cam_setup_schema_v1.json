@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aria/contracts/cam_setup_schema_v1.json",
+  "title": "ARIA CAM Setup Sheet",
+  "description": "Schema for setup_sheet.json written by aria_os/cam_setup.py. All linear dimensions are millimetres; times are minutes.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "part_id",
+    "machine_name",
+    "tools",
+    "stock_dims",
+    "cycle_time_min_estimate",
+    "second_op_required",
+    "work_offset_recommendation",
+    "fixturing_suggestion",
+    "generated_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Schema version; must be '1.0' for this contract."
+    },
+    "part_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Slug identifier for the part (stem of the STEP filename)."
+    },
+    "machine_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "CNC machine name used for cycle-time and spindle-power calculations (e.g. 'Tormach 1100', 'HAAS VF2')."
+    },
+    "tools": {
+      "type": "array",
+      "description": "Ordered list of cutting tools used in the CAM program.",
+      "items": {
+        "type": "object",
+        "required": ["name", "dia_mm", "flutes"],
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Human-readable tool name."
+          },
+          "dia_mm": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Tool cutting diameter, mm."
+          },
+          "flutes": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Number of cutting flutes."
+          },
+          "type": {
+            "type": "string",
+            "description": "Tool type (e.g. 'flat_endmill', 'ball_endmill', 'drill')."
+          },
+          "material": {
+            "type": "string",
+            "description": "Tool substrate material (e.g. 'carbide', 'hss')."
+          },
+          "max_doc_mm": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Maximum recommended axial depth of cut, mm."
+          },
+          "sfm": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Surface feet per minute rating for this tool."
+          }
+        }
+      }
+    },
+    "stock_dims": {
+      "type": "object",
+      "description": "Raw stock block dimensions (part bbox + machining allowance), mm.",
+      "required": ["x_mm", "y_mm", "z_mm"],
+      "additionalProperties": false,
+      "properties": {
+        "x_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Stock X dimension (part width + 6 mm allowance), mm."
+        },
+        "y_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Stock Y dimension (part depth + 6 mm allowance), mm."
+        },
+        "z_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Stock Z dimension (part height + 4 mm allowance), mm."
+        }
+      }
+    },
+    "cycle_time_min_estimate": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Estimated machining cycle time, minutes. Computed from MRR and stock removal volume; zero if unknown."
+    },
+    "second_op_required": {
+      "type": "boolean",
+      "description": "True if a flip/second setup is needed to machine bottom features."
+    },
+    "work_offset_recommendation": {
+      "type": "string",
+      "description": "Human-readable G-code work offset instruction (e.g. 'G54: bottom-left-top corner of stock')."
+    },
+    "fixturing_suggestion": {
+      "type": "string",
+      "description": "Recommended workholding method (e.g. '6-inch vise', 'fixture plate', 'V-blocks')."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC ISO-8601 timestamp when this file was generated."
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "passed": true,
+  "warnings": [],
+  "failures": [],
+  "suggested_fixes": [],
+  "machinable_with": [
+    "3axis"
+  ],
+  "details": {
+    "radii": [
+      {
+        "radius_mm": null,
+        "location": null,
+        "violation": false,
+        "message": "Could not load STEP: STEP File could not be loaded"
+      }
+    ],
+    "depth": [
+      {
+        "depth_mm": null,
+        "tool_dia_mm": 12.0,
+        "aspect_ratio": null,
+        "violation": false,
+        "message": "Could not load STEP: STEP File could not be loaded"
+      }
+    ],
+    "walls": [
+      {
+        "z_mm": null,
+        "width_mm": null,
+        "violation": false,
+        "message": "Could not load STEP: STEP File could not be loaded"
+      }
+    ],
+    "undercuts": [
+      {
+        "face_index": null,
+        "normal": null,
+        "reachable_from": [],
+        "is_undercut": false,
+        "message": "cadquery/OCC not available \u2014 undercut check skipped"
+      }
+    ]
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aria/contracts/ecad_bom_schema_v1.json",
+  "title": "ARIA ECAD Bill of Materials",
+  "description": "Schema for <board_name>_bom.json written by aria_os/ecad_generator.py. Positions are in millimetres from board origin.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "components"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Schema version; must be '1.0' for this contract."
+    },
+    "components": {
+      "type": "array",
+      "description": "All components placed on the PCB.",
+      "items": {
+        "type": "object",
+        "required": ["ref", "value", "footprint", "description", "qty", "x_mm", "y_mm"],
+        "additionalProperties": true,
+        "properties": {
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Reference designator (e.g. 'U1', 'C3', 'R12')."
+          },
+          "value": {
+            "type": "string",
+            "description": "Component value or part number (e.g. 'ESP32-WROOM-32', '10k', '100nF')."
+          },
+          "footprint": {
+            "type": "string",
+            "description": "KiCad footprint library:name string."
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable component description."
+          },
+          "qty": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Quantity of this component on the board."
+          },
+          "x_mm": {
+            "type": "number",
+            "description": "Component centroid X position from board origin, mm."
+          },
+          "y_mm": {
+            "type": "number",
+            "description": "Component centroid Y position from board origin, mm."
+          }
+        }
+      }
+    },
+    "firmware_pins": {
+      "type": "object",
+      "description": "GPIO pin assignments extracted from STM32/ESP32 firmware source. Keys are #define names; values are pin numbers or port/pin strings.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "validation": {
+      "type": "object",
+      "description": "ERC/DRC validation results appended after component placement.",
+      "additionalProperties": true,
+      "properties": {
+        "passed": {
+          "type": "boolean",
+          "description": "True if all ERC and DRC checks passed."
+        },
+        "erc_pass": {
+          "type": "boolean",
+          "description": "True if ERC passed with no errors."
+        },
+        "drc_pass": {
+          "type": "boolean",
+          "description": "True if DRC passed with no errors."
+        },
+        "erc": {
+          "type": "object",
+          "description": "Electrical rules check results.",
+          "additionalProperties": true,
+          "properties": {
+            "errors": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "ERC error messages."
+            },
+            "warnings": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "ERC warning messages."
+            }
+          }
+        },
+        "simulation": {
+          "type": "object",
+          "description": "Electrical simulation results (current draw, voltage levels).",
+          "additionalProperties": true
+        },
+        "pin_conflicts": {
+          "type": "object",
+          "description": "Results of firmware pin assignment conflict check.",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

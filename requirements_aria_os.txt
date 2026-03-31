@@ -1,0 +1,11 @@
+# ARIA-OS: CadQuery-based CAD generation. Install in .venv: pip install -r requirements_aria_os.txt
+cadquery==2.7.0
+cadquery-ocp==7.8.1.1.post1
+numpy==2.4.3
+rich==14.3.3
+anthropic>=0.39.0
+pandas==3.0.1
+trimesh>=4.0.0       # 3D mesh ops: generate_map.py, post_gen_validator.py
+requests>=2.31.0     # generate_map.py OSM/elevation API calls
+anthropic>=0.39.0    # LLM backend (primary)
+scipy>=1.11.0        # trimesh body_count + physics_analyzer FEA

@@ -1,0 +1,4 @@
+pyserial
+plotly
+firebase-admin  # optional, only needed for Firebase session push
+

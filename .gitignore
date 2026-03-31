@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv/
+*.egg-info/
+
+# Outputs (regenerable)
+outputs/cad/step/
+outputs/cad/stl/
+outputs/cad/generated_code/
+outputs/cad/dxf/
+outputs/cam/
+outputs/drawings/
+outputs/ecad/
+outputs/screenshots/
+!outputs/**/.gitkeep
+
+# Workspace
+workspace/scratchpad/
+!workspace/**/.gitkeep
+data/memory/raw_log*.jsonl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Private
+.millforge/
