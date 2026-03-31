@@ -212,7 +212,7 @@ class QuoteAgent:
         quote_result["breakdown"]["margin_usd"] = round(margin, 2)
 
         # LLM review for cost risks and optimizations
-        llm_review = self._llm_review(quote_result, geom)
+        llm_review = None  # LLM review available in Pro  # self._llm_review(quote_result, geom)
         if llm_review:
             quote_result["optimizations"] = llm_review.get("optimizations", [])
             quote_result["confidence"] = llm_review.get("confidence", "medium")

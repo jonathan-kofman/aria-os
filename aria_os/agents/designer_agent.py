@@ -26,7 +26,7 @@ class DesignerAgent(BaseAgent):
             max_context_tokens=CONTEXT_LIMITS["designer"],
             fallback_to_cloud=True,  # designer is the most critical agent
         )
-        self._prefer_cloud = True  # For code gen, cloud LLMs are far better than 7b
+        self._prefer_cloud = False  # For code gen, cloud LLMs are far better than 7b
 
     def generate(self, state: DesignState) -> None:
         """Generate code and populate state.code, state.output_path, state.bbox.

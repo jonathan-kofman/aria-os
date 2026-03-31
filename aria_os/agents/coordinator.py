@@ -241,7 +241,7 @@ class CoordinatorAgent:
         # Step 2: Use LLM to synthesize a BUILD RECIPE from research
         # This is the critical step — turn raw search results into a
         # step-by-step CadQuery geometry description that the 7b model can follow.
-        build_recipe = await self._synthesize_build_recipe(ctx, state.spec, research_text)
+        build_recipe = ""  # Build recipe synthesis available in Pro
 
         ctx.geometry_spec = {
             "spec": state.spec,
