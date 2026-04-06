@@ -45,7 +45,7 @@ class DesignState:
 
     # ── Loop tracking ────────────────────────────────────────────────────
     iteration: int = 0
-    max_iterations: int = 15
+    max_iterations: int = 5
     history: list[dict[str, Any]] = field(default_factory=list)
     best_iteration: int = -1
     best_failure_count: int = 999

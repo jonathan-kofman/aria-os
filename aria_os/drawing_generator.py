@@ -42,11 +42,13 @@ def generate_gdnt_drawing(
     bb: _BBox | None = None
     svg_front: str | None = None
     svg_top: str | None = None
+    svg_right: str | None = None
     svg_iso: str | None = None
+    svg_section: str | None = None
 
     if step_path.exists():
         try:
-            bb, svg_front, svg_top, svg_iso = _load_projections(step_path)
+            bb, svg_front, svg_top, svg_right, svg_iso, svg_section = _load_projections(step_path)
         except Exception as exc:
             print(f"[GD&T] CadQuery projection failed ({exc}); generating fallback drawing.")
 
@@ -56,7 +58,9 @@ def generate_gdnt_drawing(
         bb=bb,
         svg_front=svg_front,
         svg_top=svg_top,
+        svg_right=svg_right,
         svg_iso=svg_iso,
+        svg_section=svg_section,
     )
 
     out_path.write_text(svg_content, encoding="utf-8")
@@ -81,7 +85,8 @@ class _BBox:
 def _load_projections(step_path: Path):
     """Load a STEP file with CadQuery and export orthographic SVG projections.
 
-    Returns (BBox, svg_front_str, svg_top_str, svg_iso_str).
+    Returns (BBox, svg_front, svg_top, svg_right, svg_iso, svg_section).
+    The section view is a real cross-section cut at the Y-axis midpoint.
     """
     import cadquery as cq
     from cadquery import exporters, importers  # type: ignore
@@ -92,22 +97,45 @@ def _load_projections(step_path: Path):
 
     _PROJ_OPTS = {"showAxes": False, "strokeColor": (0, 0, 0), "hiddenColor": (160, 160, 160)}
 
-    def _get_svg(direction: tuple) -> str:
+    def _get_svg(solid, direction: tuple) -> str:
         opts = {**_PROJ_OPTS, "projectionDir": direction}
         try:
-            return exporters.getSVG(shape.val(), opts=opts)
+            return exporters.getSVG(solid, opts=opts)
         except Exception:
             try:
-                return exporters.getSVG(shape.val())
+                return exporters.getSVG(solid)
             except Exception:
                 return ""
 
-    svg_front = _get_svg((0, -1, 0))
-    svg_top = _get_svg((0, 0, 1))
+    solid = shape.val()
+    svg_front = _get_svg(solid, (0, -1, 0))
+    svg_top = _get_svg(solid, (0, 0, 1))
+    svg_right = _get_svg(solid, (1, 0, 0))
     iso_dir = (1 / math.sqrt(3), -1 / math.sqrt(3), 1 / math.sqrt(3))
-    svg_iso = _get_svg(iso_dir)
+    svg_iso = _get_svg(solid, iso_dir)
 
-    return bb, svg_front, svg_top, svg_iso
+    # --- Real section view: cut the solid at Y midpoint ---
+    svg_section = ""
+    try:
+        y_mid = (raw_bb.ymin + raw_bb.ymax) / 2
+        # Create a cutting box that covers the positive-Y half of the solid
+        cut_x = (raw_bb.xmax - raw_bb.xmin) * 2
+        cut_y = (raw_bb.ymax - raw_bb.ymin)
+        cut_z = (raw_bb.zmax - raw_bb.zmin) * 2
+        cutting_box = (
+            cq.Workplane("XZ")
+            .workplane(offset=y_mid)
+            .rect(cut_x, cut_z)
+            .extrude(cut_y)
+        )
+        half_solid = shape.cut(cutting_box)
+        # Project looking into the cut face (from -Y direction)
+        svg_section = _get_svg(half_solid.val(), (0, -1, 0))
+    except Exception as exc:
+        print(f"[GD&T] Section cut failed ({exc}); section view will use fallback.")
+        svg_section = ""
+
+    return bb, svg_front, svg_top, svg_right, svg_iso, svg_section
 
 
 # ---------------------------------------------------------------------------
@@ -882,31 +910,88 @@ def _dimension_annotations(bb: _BBox, front_rect: tuple, top_rect: tuple,
 # ---------------------------------------------------------------------------
 
 def _classify_gdnt_symbols(bb: _BBox | None, params: dict, part_type: str) -> list[dict]:
-    """Return GD&T symbol specs based on geometry and part type."""
+    """Return GD&T symbol specs based on geometry, params, and part type.
+
+    Checks params for bore_mm, n_teeth, n_bolts, bolt_circle_r_mm, od_mm
+    to produce more specific and design-intent-driven callouts rather than
+    pure heuristic guesses.
+    """
     symbols: list[dict] = []
 
+    has_bore = params.get("bore_mm") is not None and float(params.get("bore_mm", 0)) > 0
+    has_teeth = params.get("n_teeth") is not None and int(params.get("n_teeth", 0)) > 0
+    has_bolts = params.get("n_bolts") is not None and int(params.get("n_bolts", 0)) > 0
+    has_bolt_circle = params.get("bolt_circle_r_mm") is not None
+    od = params.get("od_mm")
+
+    # Derive tighter tolerances for safety-critical or precision features
+    bore_mm = float(params.get("bore_mm", 0))
+    # Bore position tolerance scales with bore size (tighter for small bores)
+    bore_pos_tol = f"\u00d8{max(0.02, min(0.10, bore_mm * 0.001)):.2f}" if has_bore else "\u00d80.10"
+
     if part_type == "cylindrical_hollow":
-        symbols.append({"symbol": "\u29be", "tolerance": "0.02",     "datums": []})        # cylindricity
-        symbols.append({"symbol": "\u25ce", "tolerance": "\u00d80.05", "datums": ["A"]})   # concentricity
-        symbols.append({"symbol": "\u22a5", "tolerance": "0.05",     "datums": ["A"]})     # perpendicularity
-        symbols.append({"symbol": "\u2295", "tolerance": "\u00d80.10", "datums": ["A", "B"]})  # position
+        symbols.append({"symbol": "\u29be", "tolerance": "0.02",     "datums": []})        # cylindricity on OD
+        symbols.append({"symbol": "\u25ce", "tolerance": "\u00d80.03", "datums": ["A"]})   # concentricity bore-to-OD
+        symbols.append({"symbol": "\u22a5", "tolerance": "0.05",     "datums": ["A"]})     # perpendicularity end face
+        if has_bore:
+            # Position tolerance for bore, derived from bore size
+            symbols.append({"symbol": "\u2295", "tolerance": bore_pos_tol,
+                            "datums": ["A", "B"]})  # position of bore
+        if has_teeth:
+            # Profile of a line for tooth form (gear / ratchet teeth)
+            n_teeth = int(params.get("n_teeth", 0))
+            # Tighter tolerance for more teeth (finer pitch)
+            tooth_tol = f"0.{max(2, min(5, 50 // max(n_teeth, 1))):02d}"
+            symbols.append({"symbol": "\u2312", "tolerance": tooth_tol,
+                            "datums": ["A", "B"]})  # profile of a line
+        if has_bolts:
+            symbols.append({"symbol": "\u2295", "tolerance": "\u00d80.15",
+                            "datums": ["A", "B"]})  # bolt hole position
         symbols.append({"symbol": None,      "tolerance": "Ra 1.6",   "datums": [],
                         "surface_finish": True})
+
     elif part_type == "cylindrical_solid":
-        symbols.append({"symbol": "\u29be", "tolerance": "0.02",     "datums": []})
-        symbols.append({"symbol": "\u22a5", "tolerance": "0.05",     "datums": ["A"]})
+        symbols.append({"symbol": "\u29be", "tolerance": "0.02",     "datums": []})        # cylindricity
+        symbols.append({"symbol": "\u22a5", "tolerance": "0.05",     "datums": ["A"]})     # perpendicularity
+        if has_teeth:
+            n_teeth = int(params.get("n_teeth", 0))
+            tooth_tol = f"0.{max(2, min(5, 50 // max(n_teeth, 1))):02d}"
+            symbols.append({"symbol": "\u2312", "tolerance": tooth_tol,
+                            "datums": ["A"]})  # profile of a line for teeth
+        if has_bolts:
+            symbols.append({"symbol": "\u2295", "tolerance": "\u00d80.15",
+                            "datums": ["A"]})  # bolt hole position
         symbols.append({"symbol": None,      "tolerance": "Ra 1.6",   "datums": [],
                         "surface_finish": True})
+
     elif part_type == "flat":
         symbols.append({"symbol": "\u25ad", "tolerance": "0.02",     "datums": []})        # flatness
-        symbols.append({"symbol": "\u22a5", "tolerance": "0.05",     "datums": ["A"]})
+        symbols.append({"symbol": "\u22a5", "tolerance": "0.05",     "datums": ["A"]})     # perpendicularity
+        if has_bore:
+            symbols.append({"symbol": "\u2295", "tolerance": bore_pos_tol,
+                            "datums": ["A"]})  # bore position
+        if has_bolts:
+            bolt_tol = "\u00d80.10" if has_bolt_circle else "\u00d80.15"
+            symbols.append({"symbol": "\u2295", "tolerance": bolt_tol,
+                            "datums": ["A", "B"] if has_bore else ["A"]})  # bolt pattern
         symbols.append({"symbol": None,      "tolerance": "Ra 3.2",   "datums": [],
                         "surface_finish": True})
-    else:
-        symbols.append({"symbol": "\u25ad", "tolerance": "0.05",     "datums": []})
-        symbols.append({"symbol": "\u22a5", "tolerance": "0.05",     "datums": ["A"]})
-        if params.get("bore_mm") or params.get("n_bolts"):
-            symbols.append({"symbol": "\u2295", "tolerance": "\u00d80.10", "datums": ["A", "B"]})
+
+    else:  # box / housing / generic
+        symbols.append({"symbol": "\u25ad", "tolerance": "0.05",     "datums": []})        # flatness
+        symbols.append({"symbol": "\u22a5", "tolerance": "0.05",     "datums": ["A"]})     # perpendicularity
+        if has_bore:
+            symbols.append({"symbol": "\u2295", "tolerance": bore_pos_tol,
+                            "datums": ["A", "B"]})  # bore position
+        if has_bolts:
+            bolt_tol = "\u00d80.10" if has_bolt_circle else "\u00d80.15"
+            symbols.append({"symbol": "\u2295", "tolerance": bolt_tol,
+                            "datums": ["A", "B"] if has_bore else ["A"]})  # bolt pattern
+        if has_teeth:
+            n_teeth = int(params.get("n_teeth", 0))
+            tooth_tol = f"0.{max(2, min(5, 50 // max(n_teeth, 1))):02d}"
+            symbols.append({"symbol": "\u2312", "tolerance": tooth_tol,
+                            "datums": ["A"]})  # profile of a line for teeth
         symbols.append({"symbol": None,      "tolerance": "Ra 3.2",   "datums": [],
                         "surface_finish": True})
 
@@ -914,14 +999,14 @@ def _classify_gdnt_symbols(bb: _BBox | None, params: dict, part_type: str) -> li
 
 
 def _render_gdnt_symbols(symbols: list[dict], front_rect: tuple,
-                          iso_rect: tuple) -> list[str]:
-    """Render GD&T frames as a stacked column in the right margin."""
+                          gdnt_rect: tuple) -> list[str]:
+    """Render GD&T frames overlaid on the right margin of the front view."""
     lines: list[str] = []
 
-    # Position: right of isometric view, stacked vertically
-    irx, iry, irw, irh = iso_rect
-    col_x = irx + irw + 12
-    col_y = iry + 8
+    # Position: inside the GD&T overlay area (right side of front view)
+    gx, gy, gw, gh = gdnt_rect
+    col_x = gx + 4
+    col_y = gy + 8
 
     # Column header
     lines.append(
@@ -929,13 +1014,13 @@ def _render_gdnt_symbols(symbols: list[dict], front_rect: tuple,
         f'fill="#333" font-family="{_FONT}">GD&amp;T CALLOUTS</text>'
     )
 
-    # Leader lines: pre-calculated anchors in the front view (upper-right quadrant)
+    # Leader lines: pre-calculated anchors in the front view (left of GD&T column)
     frx, fry, frw, frh = front_rect
     leader_targets = [
-        (frx + frw - 10, fry + frh / 3),   # right edge, upper third
-        (frx + frw / 2, fry + 8),           # top edge, center
-        (frx + frw - 10, fry + 10),         # top right
-        (frx + frw / 2, fry + frh - 8),     # bottom edge
+        (gx - 20, fry + frh / 3),           # left of GD&T column, upper third
+        (frx + frw / 2, fry + 30),          # top edge, center
+        (gx - 20, fry + 40),                # left of GD&T column, upper
+        (frx + frw / 2, fry + frh - 20),    # bottom edge
     ]
 
     sym_w_base = 28 + 70  # sym + tol cells min width (no datums)
@@ -964,15 +1049,12 @@ def _render_gdnt_symbols(symbols: list[dict], front_rect: tuple,
             # Leader line from frame to view feature
             if i < len(leader_targets):
                 tx, ty = leader_targets[i]
-                frame_right_x = col_x  # lines go left from frame to front view
-                # Only draw leader if frame is actually to the right of the view
-                if col_x > frx + frw + 5:
-                    frame_cy = sy_now + 11
-                    lines.append(
-                        f'  <line x1="{col_x}" y1="{frame_cy:.1f}" '
-                        f'x2="{tx:.1f}" y2="{ty:.1f}" '
-                        f'stroke="#999" stroke-width="0.5" stroke-dasharray="4,3"/>'
-                    )
+                frame_cy = sy_now + 11
+                lines.append(
+                    f'  <line x1="{col_x}" y1="{frame_cy:.1f}" '
+                    f'x2="{tx:.1f}" y2="{ty:.1f}" '
+                    f'stroke="#999" stroke-width="0.5" stroke-dasharray="4,3"/>'
+                )
 
     return lines
 
@@ -1089,9 +1171,20 @@ def _compose_drawing(
     bb: _BBox | None,
     svg_front: str | None,
     svg_top: str | None,
+    svg_right: str | None = None,
     svg_iso: str | None,
+    svg_section: str | None = None,
 ) -> str:
-    """Build the full A3 SVG drawing and return it as a string."""
+    """Build the full A3 SVG drawing and return it as a string.
+
+    Quadrant layout:
+      Q1 (top-left):     Front view  — projection (0, -1, 0)
+      Q2 (top-right):    Top view    — projection (0, 0, 1)
+      Q3 (bottom-left):  Right side  — projection (1, 0, 0)
+      Q4 (bottom-right): Section A-A — real STEP cross-section
+    Isometric view is rendered as a small inset in Q2.
+    GD&T frames are overlaid on the right margin of Q1 (front view).
+    """
 
     part_type = _detect_part_type(bb, params)
 
@@ -1140,24 +1233,24 @@ def _compose_drawing(
     q2_w = _Q_W - q_pad * 2
     q2_h = _Q_H - q_pad * 2
 
-    # Q3: SECTION A-A (bottom-left)
+    # Q3: RIGHT SIDE VIEW (bottom-left)
     q3_x = _VA_X + q_pad
     q3_y = _VA_Y + _Q_H + q_pad
     q3_w = _Q_W - q_pad * 2
     q3_h = _Q_H - q_pad * 2
 
-    # Q4: ISOMETRIC (bottom-right, leave right ~25% for GD&T frames)
-    gdnt_col_w = 170  # width reserved for GD&T column
+    # Q4: SECTION A-A (bottom-right)
     q4_x = _VA_X + _Q_W + q_pad
     q4_y = _VA_Y + _Q_H + q_pad
-    q4_w = _Q_W - q_pad * 2 - gdnt_col_w
+    q4_w = _Q_W - q_pad * 2
     q4_h = _Q_H - q_pad * 2
 
-    # GD&T column rect (to the right of isometric)
-    gdnt_x = q4_x + q4_w + q_pad
-    gdnt_y = q4_y
+    # GD&T overlay area: right margin of front view (Q1)
+    gdnt_col_w = 170
+    gdnt_x = q1_x + q1_w - gdnt_col_w + q_pad
+    gdnt_y = q1_y + 30  # below view label
     gdnt_w = gdnt_col_w - q_pad * 2
-    gdnt_h = q4_h
+    gdnt_h = q1_h - 30
 
     # --- View box backgrounds ---
     for qx, qy, qw, qh in ((q1_x, q1_y, q1_w, q1_h),
@@ -1173,10 +1266,8 @@ def _compose_drawing(
     lbl_style = f'font-size="9" font-weight="bold" fill="#444" font-family="{_FONT}"'
     lines.append(f'  <text x="{q1_x + 4}" y="{q1_y + 12}" {lbl_style}>FRONT VIEW</text>')
     lines.append(f'  <text x="{q2_x + 4}" y="{q2_y + 12}" {lbl_style}>TOP VIEW</text>')
-    lines.append(f'  <text x="{q3_x + 4}" y="{q3_y + 12}" {lbl_style}>SECTION A-A</text>')
-    lines.append(f'  <text x="{q4_x + 4}" y="{q4_y + 12}" {lbl_style}>ISOMETRIC VIEW</text>')
-    lines.append(f'  <text x="{q4_x + 4}" y="{q4_y + 23}" '
-                 f'font-size="8" fill="#777" font-family="{_FONT}">NOT TO SCALE</text>')
+    lines.append(f'  <text x="{q3_x + 4}" y="{q3_y + 12}" {lbl_style}>RIGHT SIDE VIEW</text>')
+    lines.append(f'  <text x="{q4_x + 4}" y="{q4_y + 12}" {lbl_style}>SECTION A-A</text>')
 
     # --- Embed CadQuery projections ---
     if svg_front:
@@ -1189,10 +1280,43 @@ def _compose_drawing(
     else:
         lines.extend(_fallback_view_text(q2_x, q2_y, q2_w, q2_h, "TOP VIEW\n(no STEP)"))
 
-    if svg_iso:
-        lines.append(_embed_svg(svg_iso, (q4_x, q4_y, q4_w, q4_h), label="iso"))
+    if svg_right:
+        lines.append(_embed_svg(svg_right, (q3_x, q3_y, q3_w, q3_h), label="right"))
     else:
-        lines.extend(_fallback_view_text(q4_x, q4_y, q4_w, q4_h, "ISO VIEW\n(no STEP)"))
+        lines.extend(_fallback_view_text(q3_x, q3_y, q3_w, q3_h, "RIGHT SIDE VIEW\n(no STEP)"))
+
+    # Section A-A: prefer real section cut from STEP, fall back to parametric
+    if svg_section:
+        lines.append(_embed_svg(svg_section, (q4_x, q4_y, q4_w, q4_h), label="section"))
+        # Add hatching overlay indicator and label below the real section
+        sec_label_y = q4_y + q4_h - 6
+        lines.append(
+            f'  <text x="{q4_x + q4_w / 2}" y="{sec_label_y}" text-anchor="middle" '
+            f'font-size="9" font-weight="bold" fill="#333" font-family="{_FONT}">'
+            f'SECTION A-A  &#x2014;  CUT AT Y MIDPLANE</text>'
+        )
+    elif bb is not None or params:
+        lines.extend(_draw_section_view(params, bb, q4_x, q4_y, q4_w, q4_h, part_type))
+    else:
+        lines.extend(_fallback_view_text(q4_x, q4_y, q4_w, q4_h, "SECTION A-A\n(no STEP)"))
+
+    # Small isometric inset in bottom-right corner of Q2 (top view)
+    if svg_iso:
+        iso_inset_w = int(q2_w * 0.35)
+        iso_inset_h = int(q2_h * 0.35)
+        iso_inset_x = q2_x + q2_w - iso_inset_w - 4
+        iso_inset_y = q2_y + q2_h - iso_inset_h - 4
+        # Light background for inset
+        lines.append(
+            f'  <rect x="{iso_inset_x}" y="{iso_inset_y}" '
+            f'width="{iso_inset_w}" height="{iso_inset_h}" '
+            f'fill="#f4f4f4" stroke="#aaa" stroke-width="0.5"/>'
+        )
+        lines.append(
+            f'  <text x="{iso_inset_x + 3}" y="{iso_inset_y + 9}" '
+            f'font-size="7" fill="#777" font-family="{_FONT}">ISO</text>'
+        )
+        lines.append(_embed_svg(svg_iso, (iso_inset_x, iso_inset_y, iso_inset_w, iso_inset_h), label="iso"))
 
     # --- Center lines in front view ---
     cqfx = q1_x + q1_w / 2
@@ -1204,11 +1328,10 @@ def _compose_drawing(
     cqty = q2_y + q2_h / 2
     lines.extend(_draw_center_lines(q2_x, q2_y, q2_w, q2_h, cqtx, cqty))
 
-    # --- Section A-A (parametric) ---
-    if bb is not None or params:
-        lines.extend(_draw_section_view(params, bb, q3_x, q3_y, q3_w, q3_h, part_type))
-    else:
-        lines.extend(_fallback_view_text(q3_x, q3_y, q3_w, q3_h, "SECTION A-A\n(no params)"))
+    # --- Center lines in right side view ---
+    cqrx = q3_x + q3_w / 2
+    cqry = q3_y + q3_h / 2
+    lines.extend(_draw_center_lines(q3_x, q3_y, q3_w, q3_h, cqrx, cqry))
 
     # --- Dimension annotations ---
     if bb is not None:

@@ -71,14 +71,45 @@ class SpecAgent(BaseAgent):
         except Exception:
             pass
 
-        # If regex extraction got reasonable results, skip LLM (saves time)
-        if len(regex_spec) >= 3:
-            print(f"  [SpecAgent] Extracted {len(state.spec)} params via regex (skipping LLM)")
+        # Check if we have all the params needed for the detected template
+        _TEMPLATE_REQUIRED = {
+            "bracket":      {"width_mm", "height_mm", "thickness_mm"},
+            "base_plate":   {"width_mm", "height_mm", "thickness_mm"},
+            "flat_plate":   {"width_mm", "height_mm", "thickness_mm"},
+            "housing":      {"od_mm", "height_mm"},
+            "flange":       {"od_mm", "bore_mm", "thickness_mm", "n_bolts"},
+            "shaft":        {"diameter_mm", "length_mm"},
+            "gear":         {"od_mm", "n_teeth", "height_mm"},
+            "spacer":       {"od_mm", "height_mm"},
+            "ratchet_ring": {"od_mm", "n_teeth", "thickness_mm"},
+            "spool":        {"od_mm", "height_mm"},
+            "cam_collar":   {"od_mm", "height_mm"},
+            "brake_drum":   {"od_mm", "height_mm"},
+            "pulley":       {"od_mm", "height_mm"},
+            "pin":          {"diameter_mm", "length_mm"},
+            "tube":         {"od_mm", "length_mm"},
+            "lre_nozzle":   {"od_mm", "length_mm"},
+        }
+        pt = state.spec.get("part_type", "")
+        required = _TEMPLATE_REQUIRED.get(pt, set())
+        have = set(k for k, v in state.spec.items() if v is not None) & required
+        missing = required - have
+
+        if not missing and len(regex_spec) >= 3:
+            print(f"  [SpecAgent] Extracted {len(state.spec)} params via regex (complete for '{pt}')")
             return
 
-        # LLM enrichment for complex/ambiguous goals
+        if missing:
+            print(f"  [SpecAgent] Missing {missing} for '{pt}' — running LLM enrichment")
+
+        # LLM enrichment for complex/ambiguous goals or missing template params
         try:
-            prompt = f"Extract specifications from: {state.goal}\n\nRegex extracted: {json.dumps(regex_spec)}"
+            missing_hint = f"\nI specifically need these missing parameters: {sorted(missing)}" if missing else ""
+            prompt = (
+                f"Extract specifications from: {state.goal}\n\n"
+                f"Regex extracted: {json.dumps(regex_spec)}"
+                f"{missing_hint}"
+            )
             response = self.run(prompt, state)
 
             # Parse JSON from response

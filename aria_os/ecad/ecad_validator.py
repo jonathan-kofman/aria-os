@@ -69,11 +69,11 @@ def _parse_resistor_ohms(value_str: str) -> float | None:
     Returns None if the pattern is not recognised.
 
     Examples:
-        "330R"    → 330.0
-        "10k"     → 10_000.0
-        "4.7K"    → 4_700.0
-        "1M"      → 1_000_000.0
-        "100 kΩ"  → 100_000.0
+        "330R"    -> 330.0
+        "10k"     -> 10_000.0
+        "4.7K"    -> 4_700.0
+        "1M"      -> 1_000_000.0
+        "100 kΩ"  -> 100_000.0
     """
     m = _RESISTOR_VALUE_RE.search(value_str)
     if not m:
@@ -84,7 +84,7 @@ def _parse_resistor_ohms(value_str: str) -> float | None:
         return mantissa * 1_000.0
     if suffix == "M":
         return mantissa * 1_000_000.0
-    # "R", "Ω", "OHM" → direct ohms
+    # "R", "Ω", "OHM" -> direct ohms
     return mantissa
 
 
@@ -211,7 +211,7 @@ def run_erc(
         errors.append("ERC: no GND reference — board has zero components")
 
     # ── 3. GPIO conflicts ──────────────────────────────────────────────────────
-    # Map: net_name → list[ref] of output-type components driving it
+    # Map: net_name -> list[ref] of output-type components driving it
     # We model each MCU module as driving all its listed pins as outputs.
     net_drivers: dict[str, list[str]] = {}
     for c in comps:
@@ -244,7 +244,7 @@ def run_erc(
 
     # ── 5. Trace width vs current (IPC-2221) ───────────────────────────────────
     # Estimate supply current from known loads present on the board.
-    current_map: dict[str, float] = {}  # net_label → expected current A
+    current_map: dict[str, float] = {}  # net_label -> expected current A
 
     if any("esp32" in c.value.lower() for c in comps):
         current_map["3V3"] = current_map.get("3V3", 0.0) + 0.5   # ESP32 peak ~500 mA
@@ -550,7 +550,7 @@ def run_full_check(
             out_dir.mkdir(parents=True, exist_ok=True)
             validation_json = out_dir / "validation.json"
             validation_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
-            print(f"[ERC] Validation written → {validation_json}")
+            print(f"[ERC] Validation written -> {validation_json}")
         except OSError as exc:
             print(f"[ERC] Warning: could not write validation.json — {exc}")
 

@@ -4,6 +4,7 @@
   --validate            Re-validate all existing STEP outputs (size + re-import)
   --modify              Modify existing part: --modify <path_to_.py> \"modification description\"
   --assemble            Create assembly from JSON: --assemble assembly_configs/foo.json
+  --assembly            Describe a multi-part assembly: --assembly \"baseplate with bracket bolted to it\"
   --scenario            Interpret a real-world situation and generate all needed parts
   --scenario-dry-run    Show parts list for a scenario without generating
   --system              Two-pass whole-machine design: decompose to subsystems, expand to parts, generate all
@@ -905,7 +906,7 @@ def main():
         if len(sys.argv) < 3:
             print("Usage: python run_aria_os.py --cam-validate <step_file> [--retries 2]")
             sys.exit(1)
-        from aria_os.cam_validator import check_machinability
+        # from aria_os.cam_validator import check_machinability
         _cv_step = sys.argv[2]
         _cv_retries = 2
         if "--retries" in sys.argv:
@@ -1143,6 +1144,21 @@ def main():
             sys.exit(1)
         run_assemble(sys.argv[2])
         return
+
+    # --- --assembly: describe a multi-part assembly and generate all parts ---
+    if len(sys.argv) >= 2 and sys.argv[1] == "--assembly":
+        if len(sys.argv) < 3:
+            print('Usage: python run_aria_os.py --assembly "motor mount assembly: baseplate with holes and vertical bracket"')
+            sys.exit(1)
+        _assembly_goal = " ".join(sys.argv[2:])
+        from aria_os.agents.assembly_agent import run_assembly_agent_sync
+        _result = run_assembly_agent_sync(_assembly_goal, repo_root=ROOT)
+        if _result.get("config_path"):
+            print(f"\nAssembly config: {_result['config_path']}")
+        if _result.get("assembly_step"):
+            print(f"Combined STEP:   {_result['assembly_step']}")
+        return
+
     if len(sys.argv) >= 2 and sys.argv[1] == "--print-scale":
         if len(sys.argv) < 4:
             print("Usage: python run_aria_os.py --print-scale <part_stub> --scale <factor>")
@@ -1392,6 +1408,7 @@ def main():
         print("       python run_aria_os.py --validate")
         print("       python run_aria_os.py --modify <path_to_.py> \"modification\"")
         print("       python run_aria_os.py --assemble <config.json>")
+        print('       python run_aria_os.py --assembly "baseplate assembly with bracket bolted to it"')
         print("       python run_aria_os.py --constrain <config.json> [--proximity 50]")
         print("       python run_aria_os.py --draw <step_file>")
         print("       python run_aria_os.py --autocad \"drainage plan\" [--state TX] [--discipline drainage] [--out path/]")
@@ -1415,7 +1432,7 @@ def main():
     _no_agent = "--no-agent" in _args
     _agent_mode_flag = "--agent-mode" in _args
     _coordinator_mode = "--coordinator" in _args
-    _max_agent_iter = 15
+    _max_agent_iter = 5
     for i, a in enumerate(_args):
         if a == "--max-agent-iterations" and i + 1 < len(_args):
             try:
@@ -1456,7 +1473,7 @@ def main():
             "step_path": ctx.geometry_path,
             "stl_path": ctx.stl_path,
             "validation_passed": ctx.validation_passed,
-            "cam": ctx.cam_result,
+            # cam removed
             "millforge_job": ctx.millforge_job,
             "total_time_s": ctx.total_time_s,
         }

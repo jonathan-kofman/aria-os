@@ -93,7 +93,7 @@ def _prompt_gdnt_drawing() -> bool:
         return False
 
 
-def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, preview: bool = False, auto_draw: bool = False, agent_mode: bool | None = None, max_agent_iterations: int = 15):
+def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, preview: bool = False, auto_draw: bool = False, agent_mode: bool | None = None, max_agent_iterations: int = 5):
     """Run the ARIA-OS pipeline: plan → route → generate artifacts → validate → log.
 
     agent_mode: None = auto (use agents if Ollama available), True = force, False = disable.
@@ -456,7 +456,7 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
 
     # ── CHECKPOINT: ROUTE (legacy path only) ─────────────────────────────────
     if not _use_agents:
-        _VALID_TOOLS = {"cadquery", "grasshopper", "blender", "fusion360", "sdf", "autocad"}
+        _VALID_TOOLS = {"cadquery", "grasshopper", "blender", "fusion360", "sdf", "autocad", "zoo"}
         _checkpoint("ROUTE", [
             ("tool_valid",       cad_tool in _VALID_TOOLS,            f"unknown tool '{cad_tool}'; valid: {_VALID_TOOLS}"),
             ("has_rationale",    bool(plan.get("cad_tool_rationale")), "no routing rationale — decision may be arbitrary"),
@@ -586,70 +586,100 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
             print(f"[SDF ERROR] {exc}")
 
     if cad_tool == "cadquery":
+        # --- Zoo.dev shortcut: when no CQ template exists, try Zoo before LLM ---
+        _zoo_used = False
         try:
-            from .cadquery_generator import write_cadquery_artifacts
+            from .cadquery_generator import _find_template_fn as _cq_find_tpl
+            _has_template = _cq_find_tpl(part_id) is not None
+        except Exception:
+            _has_template = True  # assume template exists on import error — skip Zoo
 
-            # Build a generate_fn compatible with run_validation_loop protocol:
-            #   generate_fn(plan, step_path, stl_path, repo_root, previous_failures=None) -> dict
-            def _cq_generate_fn(p, sp, st, rr, previous_failures=None):
-                return write_cadquery_artifacts(
-                    p if isinstance(p, dict) else {},
-                    goal,
-                    str(sp),
-                    str(st),
-                    repo_root=rr,
-                    previous_failures=previous_failures,
+        if not _has_template:
+            try:
+                from .zoo_bridge import is_zoo_available, generate_step_from_zoo
+                if is_zoo_available(repo_root):
+                    zoo_result = generate_step_from_zoo(goal, str(step_path.parent), repo_root=repo_root)
+                    if zoo_result.get("status") == "ok":
+                        _zoo_step = Path(zoo_result["step_path"])
+                        if _zoo_step.exists():
+                            # Zoo produced a STEP — use it directly
+                            session["step_path"] = str(_zoo_step)
+                            session["zoo_result"] = zoo_result
+                            session["cad_tool"] = "zoo"
+                            artifacts = {"step_path": str(_zoo_step), "status": "success"}
+                            _zoo_used = True
+                            event_bus.emit("complete", "Zoo.dev generation complete", {"part_id": part_id})
+                            print(f"[Zoo] Using Zoo.dev STEP — skipping CadQuery LLM fallback.")
+                    elif zoo_result.get("status") == "error":
+                        print(f"[Zoo] Failed ({zoo_result.get('error', 'unknown')}), falling back to CadQuery.")
+            except Exception as _zoo_exc:
+                print(f"[Zoo] Skipped: {_zoo_exc}")
+
+        if not _zoo_used:
+            try:
+                from .cadquery_generator import write_cadquery_artifacts
+
+                # Build a generate_fn compatible with run_validation_loop protocol:
+                #   generate_fn(plan, step_path, stl_path, repo_root, previous_failures=None) -> dict
+                def _cq_generate_fn(p, sp, st, rr, previous_failures=None):
+                    return write_cadquery_artifacts(
+                        p if isinstance(p, dict) else {},
+                        goal,
+                        str(sp),
+                        str(st),
+                        repo_root=rr,
+                        previous_failures=previous_failures,
+                    )
+
+                _val_plan = {"part_id": part_id, "params": plan.get("params", {}), "text": goal}
+
+                val_result = run_validation_loop(
+                    generate_fn=_cq_generate_fn,
+                    goal=goal,
+                    plan=_val_plan,
+                    step_path=str(step_path),
+                    stl_path=str(stl_path),
+                    max_attempts=max_attempts,
+                    repo_root=repo_root,
+                    skip_visual=True,
+                    check_quality=True,
                 )
 
-            _val_plan = {"part_id": part_id, "params": plan.get("params", {}), "text": goal}
+                # Extract results from validation loop
+                gen_result = val_result.get("generate_result", {})
+                artifacts = gen_result if isinstance(gen_result, dict) else {}
 
-            val_result = run_validation_loop(
-                generate_fn=_cq_generate_fn,
-                goal=goal,
-                plan=_val_plan,
-                step_path=str(step_path),
-                stl_path=str(stl_path),
-                max_attempts=max_attempts,
-                repo_root=repo_root,
-                skip_visual=True,
-                check_quality=True,
-            )
+                if gen_result.get("step_path"):
+                    session["step_path"] = gen_result["step_path"]
+                if gen_result.get("stl_path"):
+                    session["stl_path"] = gen_result["stl_path"]
+                if gen_result.get("bbox"):
+                    session["bbox"] = gen_result["bbox"]
+                if gen_result.get("script_path"):
+                    session["script_path"] = gen_result["script_path"]
+                    artifacts["script_path"] = gen_result["script_path"]
+                if gen_result.get("error"):
+                    session["cq_error"] = gen_result["error"]
 
-            # Extract results from validation loop
-            gen_result = val_result.get("generate_result", {})
-            artifacts = gen_result if isinstance(gen_result, dict) else {}
+                session["validation"] = {
+                    "geo":  val_result.get("geo_result", {}),
+                    "vis":  val_result.get("vis_result", {}),
+                    "quality": val_result.get("quality_result", {}),
+                    "attempts": val_result.get("attempts", 1),
+                    "status": val_result.get("status"),
+                    "validation_failures": val_result.get("validation_failures", []),
+                }
 
-            if gen_result.get("step_path"):
-                session["step_path"] = gen_result["step_path"]
-            if gen_result.get("stl_path"):
-                session["stl_path"] = gen_result["stl_path"]
-            if gen_result.get("bbox"):
-                session["bbox"] = gen_result["bbox"]
-            if gen_result.get("script_path"):
-                session["script_path"] = gen_result["script_path"]
-                artifacts["script_path"] = gen_result["script_path"]
-            if gen_result.get("error"):
-                session["cq_error"] = gen_result["error"]
+                if val_result.get("status") == "success":
+                    event_bus.emit("complete", "CadQuery generation complete", {"part_id": part_id})
+                else:
+                    _val_failures = val_result.get("validation_failures", [])
+                    print(f"[CQ VALIDATION FAIL] {val_result.get('attempts', 0)} attempts exhausted. Failures: {_val_failures}")
+                    event_bus.emit("error", f"CQ validation failed after {val_result.get('attempts', 0)} attempts", {"part_id": part_id})
 
-            session["validation"] = {
-                "geo":  val_result.get("geo_result", {}),
-                "vis":  val_result.get("vis_result", {}),
-                "quality": val_result.get("quality_result", {}),
-                "attempts": val_result.get("attempts", 1),
-                "status": val_result.get("status"),
-                "validation_failures": val_result.get("validation_failures", []),
-            }
-
-            if val_result.get("status") == "success":
-                event_bus.emit("complete", "CadQuery generation complete", {"part_id": part_id})
-            else:
-                _val_failures = val_result.get("validation_failures", [])
-                print(f"[CQ VALIDATION FAIL] {val_result.get('attempts', 0)} attempts exhausted. Failures: {_val_failures}")
-                event_bus.emit("error", f"CQ validation failed after {val_result.get('attempts', 0)} attempts", {"part_id": part_id})
-
-        except Exception as exc:
-            event_bus.emit("error", f"CadQuery failed: {exc}", {"part_id": part_id})
-            print(f"[CADQUERY ERROR] {exc}")
+            except Exception as exc:
+                event_bus.emit("error", f"CadQuery failed: {exc}", {"part_id": part_id})
+                print(f"[CADQUERY ERROR] {exc}")
 
     elif cad_tool == "fusion360":
         try:

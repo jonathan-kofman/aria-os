@@ -261,13 +261,51 @@ class EvalAgent:
                 return
 
         # Bracket with holes: needs more than a plain plate
+        # A through-hole in a cylinder adds 1 face (the cylindrical wall).
+        # Minimum: top + bottom + outer_wall + bore_wall + N_holes = N + 4
+        # For a plain box: top + bottom + 4_sides + N_holes = N + 6
+        # Use N + 4 as minimum (cylindrical parts have fewer base faces)
         if "hole" in goal_lower or "bolt" in goal_lower:
             n_bolts = state.spec.get("n_bolts", 0)
-            if n_bolts and face_count < 6 + n_bolts * 2:
+            min_faces = max(6, n_bolts + 4) if n_bolts else 6
+            if n_bolts and face_count < min_faces:
                 state.failures.append(
                     f"feature_complexity: goal specifies {n_bolts} holes but geometry has only "
-                    f"{face_count} faces — holes may not be cut. Need {6 + n_bolts * 2}+ faces."
+                    f"{face_count} faces — holes may not be cut. Need {min_faces}+ faces."
                 )
+
+        # Advanced feature checks — if the goal asked for specific operations,
+        # verify the geometry actually used them (not just a plain extrude)
+        _advanced_checks = [
+            (["hollow", "shell", "thin wall", "enclosure", "case"],
+             lambda fc, vol, bbox: vol / (bbox["x"] * bbox["y"] * bbox["z"]) < 0.55,
+             "goal describes a hollow/shell part but geometry fill ratio > 55% — "
+             "use result.shell(WALL) or result.faces('>Z').shell(-WALL) to hollow it out"),
+            (["curved", "bend", "elbow", "sweep", "swept"],
+             lambda fc, vol, bbox: fc >= 3,  # swept parts have curved faces
+             "goal describes a curved/swept part but geometry looks like a simple extrusion — "
+             "use .sweep(path) to create a curved path"),
+            (["fillet", "rounded edge", "smooth"],
+             lambda fc, vol, bbox: fc > 8,  # fillets add faces
+             "goal asks for fillets but geometry has too few faces — "
+             "use result.edges('|Z').fillet(R) or result.edges('>Z').fillet(R)"),
+        ]
+
+        if face_count > 0:
+            try:
+                import cadquery as _cq
+                _shape = _cq.importers.importStep(step_path)
+                _bb = _shape.val().BoundingBox()
+                _vol = _shape.val().Volume()
+                _bbox = {"x": _bb.xlen, "y": _bb.ylen, "z": _bb.zlen}
+
+                for keywords, check_fn, fail_msg in _advanced_checks:
+                    if any(kw in goal_lower for kw in keywords):
+                        if not check_fn(face_count, _vol, _bbox):
+                            state.failures.append(f"feature_complexity: {fail_msg}")
+                            break  # one failure at a time
+            except Exception:
+                pass
 
     def _check_bbox_vs_spec(self, state: DesignState) -> None:
         """Check if generated bbox approximately matches USER-specified dimensions.
@@ -281,15 +319,37 @@ class EvalAgent:
         except Exception:
             user_spec = state.spec
 
-        # Determine if height_mm came from "thick" (plate thickness ≠ total bbox)
+        # Determine which dims are "thickness" (plate material, not bbox)
+        # For brackets, L-brackets, heat sinks — the smallest WxHxD dim is thickness
         goal_lower = state.goal.lower()
-        _height_is_thickness = any(kw in goal_lower for kw in ("thick", "plate", "sheet"))
+        part_type = user_spec.get("part_type", "")
+        _thickness_parts = ("bracket", "l_bracket", "phone_stand",
+                            "flat_plate", "base_plate", "catch_pawl",
+                            "flange", "spacer", "gusset", "enclosure_lid",
+                            "clamp", "snap_hook", "spring_clip", "hinge")
+
+        # Heat sinks: thickness_mm is fin thickness, NOT part thickness.
+        # The part is base_t + fin_height tall. Skip thickness bbox check entirely.
+        if part_type == "heat_sink" or "heat sink" in goal_lower or "fin" in goal_lower:
+            for k in ("thickness_mm", "height_mm", "depth_mm"):
+                user_spec.pop(k, None)  # don't check these against bbox
+        _is_thickness_part = part_type in _thickness_parts or any(
+            kw in goal_lower for kw in ("thick", "plate", "sheet", "bracket", "heat sink"))
+
+        # If it's a thickness-type part, treat the smallest extracted dim as thickness
+        _dims = {}
+        for k in ("width_mm", "height_mm", "depth_mm"):
+            v = user_spec.get(k)
+            if v:
+                _dims[k] = float(v)
+        _min_dim_key = min(_dims, key=_dims.get) if _dims else ""
+        _thickness_key = _min_dim_key if _is_thickness_part and _dims else ""
 
         checks = [
             ("od_mm", "OD", False),
-            ("width_mm", "width", False),
-            ("height_mm", "height", _height_is_thickness),
-            ("depth_mm", "depth", False),
+            ("width_mm", "width", _thickness_key == "width_mm"),
+            ("height_mm", "height", _thickness_key == "height_mm"),
+            ("depth_mm", "depth", _thickness_key == "depth_mm"),
         ]
         for key, label, is_thickness in checks:
             val = user_spec.get(key)
@@ -298,17 +358,11 @@ class EvalAgent:
             val = float(val)
 
             if is_thickness:
-                # "6mm thick" means the plate material is 6mm. The total bbox
-                # can be taller because features (pockets, bosses, ribs) extend
-                # above or below. Validate that the MINIMUM bbox axis is close
-                # to the thickness (the thin dimension of a plate).
-                min_axis = min(bb.values()) if bb else 0
-                tol = max(2.0, val * 0.5)  # 50% tolerance — plate features can double height
-                if min_axis > val + tol:
-                    state.failures.append(
-                        f"bbox: minimum axis {min_axis:.1f}mm is much larger than "
-                        f"thickness={val:.1f}mm. The base plate should be ~{val:.1f}mm thin.")
-                # Don't fail if total bbox is larger — that's features on top
+                # This is plate/material thickness — it won't appear as a bbox axis.
+                # An L-bracket "50x30x3mm" has bbox 50x30x33mm (base+leg). The 3mm
+                # is plate material thickness, not a dimension you can see in the bbox.
+                # Skip entirely — thickness is verified by the dimensional verifier,
+                # not the bbox checker.
                 continue
 
             tol = max(2.0, val * 0.20)

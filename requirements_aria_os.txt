@@ -8,4 +8,6 @@ pandas==3.0.1
 trimesh>=4.0.0       # 3D mesh ops: generate_map.py, post_gen_validator.py
 requests>=2.31.0     # generate_map.py OSM/elevation API calls
 anthropic>=0.39.0    # LLM backend (primary)
+google-genai>=1.0.0  # Gemini 2.5 Flash (visual verification, code gen fallback)
+kittycad>=1.0.0      # Zoo.dev text-to-CAD API (STEP generation)
 scipy>=1.11.0        # trimesh body_count + physics_analyzer FEA

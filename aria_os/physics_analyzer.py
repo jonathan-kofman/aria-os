@@ -64,9 +64,13 @@ MATERIALS: dict[str, dict[str, float]] = {
     # ── Titanium alloys ───────────────────────────────────────────────────
     "titanium":        {"E_GPa": 116.0, "yield_MPa": 880.0,  "density": 4430.0, "poisson": 0.34},
     "ti_6al4v":        {"E_GPa": 114.0, "yield_MPa": 880.0,  "density": 4430.0, "poisson": 0.34},
+    "titanium_grade2": {"E_GPa": 103.0, "yield_MPa": 345.0,  "density": 4510.0, "poisson": 0.34},
     "titanium_grade5": {"E_GPa": 114.0, "yield_MPa": 880.0,  "density": 4430.0, "poisson": 0.34},
     # ── Superalloys ───────────────────────────────────────────────────────
     "inconel_718":     {"E_GPa": 200.0, "yield_MPa": 1100.0, "density": 8190.0, "poisson": 0.29},
+    "inconel_625":     {"E_GPa": 205.0, "yield_MPa": 490.0,  "density": 8440.0, "poisson": 0.28},
+    "hastelloy_c276":  {"E_GPa": 205.0, "yield_MPa": 355.0,  "density": 8890.0, "poisson": 0.31},
+    "kovar":           {"E_GPa": 138.0, "yield_MPa": 345.0,  "density": 8360.0, "poisson": 0.32},
     "x1_420i":         {"E_GPa": 190.0, "yield_MPa": 620.0,  "density": 7860.0, "poisson": 0.30},
     # ── Copper & brass alloys ─────────────────────────────────────────────
     "copper":          {"E_GPa": 117.0, "yield_MPa": 210.0,  "density": 8960.0, "poisson": 0.34},
@@ -95,19 +99,39 @@ MATERIALS: dict[str, dict[str, float]] = {
     "teflon":          {"E_GPa":   0.5, "yield_MPa":  23.0,  "density": 2150.0, "poisson": 0.46},
     "acrylic":         {"E_GPa":   3.2, "yield_MPa":  73.0,  "density": 1190.0, "poisson": 0.37},
     "pmma":            {"E_GPa":   3.2, "yield_MPa":  73.0,  "density": 1190.0, "poisson": 0.37},
+    "pei":             {"E_GPa":   3.3, "yield_MPa": 100.0,  "density": 1270.0, "poisson": 0.36},
+    "ultem":           {"E_GPa":   3.3, "yield_MPa": 100.0,  "density": 1270.0, "poisson": 0.36},
+    "pps":             {"E_GPa":   3.8, "yield_MPa":  90.0,  "density": 1350.0, "poisson": 0.36},
     "peek":            {"E_GPa":   4.1, "yield_MPa": 100.0,  "density": 1300.0, "poisson": 0.38},
+    "peek_30gf":       {"E_GPa":  11.0, "yield_MPa": 160.0,  "density": 1510.0, "poisson": 0.35},
+    "garolite":        {"E_GPa":  18.0, "yield_MPa": 250.0,  "density": 1850.0, "poisson": 0.20},
     # ── Elastomers ────────────────────────────────────────────────────────
     "tpu":             {"E_GPa":  0.025, "yield_MPa":  25.0,  "density": 1210.0, "poisson": 0.48},
     "tpu_95a":         {"E_GPa":  0.025, "yield_MPa":  25.0,  "density": 1210.0, "poisson": 0.48},
+    "tpu_80a":         {"E_GPa":  0.010, "yield_MPa":  12.0,  "density": 1150.0, "poisson": 0.49},
     "silicone":        {"E_GPa":  0.005, "yield_MPa":   7.0,  "density": 1150.0, "poisson": 0.49},
     "rubber":          {"E_GPa":  0.005, "yield_MPa":   7.0,  "density": 1150.0, "poisson": 0.49},
+    "neoprene":        {"E_GPa":  0.007, "yield_MPa":  10.0,  "density": 1240.0, "poisson": 0.49},
+    "viton":           {"E_GPa":  0.008, "yield_MPa":  12.0,  "density": 1800.0, "poisson": 0.49},
     # ── Composites ────────────────────────────────────────────────────────
     "carbon_fiber":    {"E_GPa": 70.0,  "yield_MPa": 600.0,  "density": 1600.0, "poisson": 0.10},
     "cf":              {"E_GPa": 70.0,  "yield_MPa": 600.0,  "density": 1600.0, "poisson": 0.10},
+    "cfrp":            {"E_GPa": 70.0,  "yield_MPa": 600.0,  "density": 1600.0, "poisson": 0.10},
     "fiberglass":      {"E_GPa": 20.0,  "yield_MPa": 200.0,  "density": 1800.0, "poisson": 0.22},
+    "gfrp":            {"E_GPa": 20.0,  "yield_MPa": 200.0,  "density": 1800.0, "poisson": 0.22},
+    "kevlar":          {"E_GPa": 60.0,  "yield_MPa": 500.0,  "density": 1440.0, "poisson": 0.36},
     # ── Ceramics & specialty ──────────────────────────────────────────────
+    "alumina":         {"E_GPa": 370.0, "yield_MPa": 300.0,  "density": 3960.0, "poisson": 0.22},
+    "zirconia":        {"E_GPa": 200.0, "yield_MPa": 900.0,  "density": 6050.0, "poisson": 0.31},
+    "tungsten":        {"E_GPa": 411.0, "yield_MPa": 750.0,  "density": 19250.0,"poisson": 0.28},
     "tungsten_carbide":{"E_GPa": 620.0, "yield_MPa": 500.0,  "density": 15630.0,"poisson": 0.24},
+    "magnesium_az31":  {"E_GPa":  45.0, "yield_MPa": 200.0,  "density": 1770.0, "poisson": 0.35},
+    "zinc_zamak3":     {"E_GPa":  86.0, "yield_MPa": 221.0,  "density": 6600.0, "poisson": 0.30},
     # ── Wood (for model/prototype reference) ──────────────────────────────
+    "wood_oak":        {"E_GPa":  12.0, "yield_MPa":  50.0,  "density":  700.0, "poisson": 0.35},
+    "wood_pine":       {"E_GPa":   9.0, "yield_MPa":  35.0,  "density":  500.0, "poisson": 0.35},
+    "plywood":         {"E_GPa":  10.0, "yield_MPa":  40.0,  "density":  600.0, "poisson": 0.30},
+    "mdf":             {"E_GPa":   4.0, "yield_MPa":  20.0,  "density":  750.0, "poisson": 0.25},
 }
 
 # Map common goal-string keywords to material keys

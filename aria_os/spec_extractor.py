@@ -49,8 +49,98 @@ _PART_TYPE_KEYWORDS: list[tuple[str, str]] = [
     ("face plate",    "base_plate"),
     ("torch bracket", "base_plate"),   # welding torch mount is a flat plate with bore
     ("torch mount",   "base_plate"),
+    ("motor mount",   "flange"),       # circular plate + bolt holes + center bore
+    ("servo mount",   "flange"),
+    ("stepper mount", "flange"),
+    ("nema mount",    "flange"),
+    ("adapter plate", "flange"),
+    ("standoff",      "spacer"),
+    ("cable clamp",   "clamp"),
+    ("pipe clamp",    "clamp"),
+    ("tube clamp",    "clamp"),
+    ("c-clamp",       "clamp"),
+    ("c clamp",       "clamp"),
+    ("snap hook",     "snap_hook"),
+    ("snap-fit hook", "snap_hook"),
+    ("snap fit hook", "snap_hook"),
+    ("snap clip",     "snap_hook"),
+    ("snap-fit clip", "snap_hook"),
+    ("snap fit",      "snap_hook"),
+    ("threaded insert","thread_insert"),
+    ("thread insert", "thread_insert"),
+    ("knurled insert","thread_insert"),
+    ("heat set insert","thread_insert"),
+    ("heat-set insert","thread_insert"),
+    ("door hinge",    "hinge"),
+    ("butt hinge",    "hinge"),
+    ("enclosure lid", "enclosure_lid"),
+    ("box lid",       "enclosure_lid"),
+    ("snap lid",      "enclosure_lid"),
+    ("gusset plate",  "gusset"),
+    ("corner brace",  "gusset"),
+    ("corner bracket","gusset"),
+    ("triangle brace","gusset"),
+    ("spoked wheel",  "spoked_wheel"),
+    ("handwheel",     "spoked_wheel"),
+    ("hand wheel",    "spoked_wheel"),
+    ("steering wheel","spoked_wheel"),
+    ("t-slot plate",  "t_slot_plate"),
+    ("t slot plate",  "t_slot_plate"),
+    ("fixture plate", "t_slot_plate"),
+    ("tooling plate", "t_slot_plate"),
+    ("spring clip",   "spring_clip"),
+    ("retaining clip","spring_clip"),
+    ("circlip",       "spring_clip"),
+    ("clamp",         "clamp"),
+    ("fixture",       "bracket"),
+    ("holder",        "bracket"),
+    ("manifold",      "housing"),
+    ("cover",         "flat_plate"),
+    ("lid",           "enclosure_lid"),
+    ("platform",      "flat_plate"),
+    ("l-bracket",     "l_bracket"),
+    ("l bracket",     "l_bracket"),
+    ("angle bracket", "l_bracket"),
+    ("heat sink",     "heat_sink"),
+    ("heatsink",      "heat_sink"),
+    ("phone stand",   "phone_stand"),
+    ("tablet stand",  "phone_stand"),
+    ("gopro mount adapter", "gopro_mount"),
+    ("gopro mount",   "gopro_mount"),
+    ("action camera mount", "gopro_mount"),
+    ("camera mount adapter", "gopro_mount"),
     ("arm link",      "hollow_rect"),  # structural arm link → hollow rectangular tube
+    ("involute gear", "involute_gear"),
+    ("involute spur gear", "involute_gear"),
+    ("cam profile",   "cam_profile"),
+    ("eccentric cam", "cam_profile"),
+    ("cam disc",      "cam_profile"),
+    ("bellows",       "bellows"),
+    ("corrugated bellows", "bellows"),
+    ("compression spring", "compression_spring"),
+    ("coil spring",   "compression_spring"),
+    ("helical spring","compression_spring"),
+    ("keyway shaft",  "keyway_shaft"),
+    ("keyed shaft",   "keyway_shaft"),
+    ("dovetail joint","dovetail_joint"),
+    ("dovetail slide","dovetail_joint"),
+    ("dovetail rail", "dovetail_joint"),
+    ("dovetail",      "dovetail_joint"),
+    ("slot plate",    "slot_plate"),
+    ("slotted plate", "slot_plate"),
+    ("pcb enclosure", "pcb_enclosure"),
+    ("pcb box",       "pcb_enclosure"),
+    ("electronics enclosure", "pcb_enclosure"),
+    ("electronics box","pcb_enclosure"),
+    ("pillow block",  "bearing_pillow_block"),
+    ("plummer block", "bearing_pillow_block"),
+    ("bearing pillow block", "bearing_pillow_block"),
+    ("cable gland",   "cable_gland"),
+    ("strain relief", "cable_gland"),
+    ("cord grip",     "cable_gland"),
     ("ratchet ring",  "ratchet_ring"),
+    ("gear carrier",  "flange"),     # planetary carrier = disc with pin holes
+    ("planet carrier","flange"),
     ("gear wheel",    "gear"),
     ("gear train",    "gear"),
     ("spur gear",     "gear"),
@@ -96,6 +186,13 @@ _PART_TYPE_KEYWORDS: list[tuple[str, str]] = [
     ("cam",           "cam"),
     ("pin",           "pin"),
     ("pillar",        "spacer"),
+    ("hinge",         "hinge"),
+    ("handle",        "handle"),
+    ("grip",          "handle"),
+    ("knob",          "handle"),
+    ("gusset",        "gusset"),
+    ("insert",        "thread_insert"),
+    ("retainer",      "spring_clip"),
 ]
 
 # Sorted descending by keyword length so multi-word phrases always beat single words.
@@ -319,6 +416,8 @@ def extract_spec(description: str) -> dict[str, Any]:
         r"(\d+)-bolt",
         r"bolt[s]?\s*[=:]\s*(\d+)",
         r"(\d+)\s+holes?\b",                        # "4 holes"
+        r"(\d+)\s*[xX]\s+\w+\s+\w*\s*holes?\b",   # "3x planet pin holes"
+        r"(\d+)\s*[xX]\s+\w+\s+holes?\b",          # "3x mounting holes"
     ])
     if n_bolts and "n_bolts" not in spec:
         spec["n_bolts"] = n_bolts
@@ -327,6 +426,12 @@ def extract_spec(description: str) -> dict[str, Any]:
     _bc_rad = re.search(r"bolt\s+circle\s+(\d+(?:\.\d+)?)\s*mm\s+radius\b", text, re.I)
     if _bc_rad:
         spec.setdefault("bolt_circle_r_mm", float(_bc_rad.group(1)))
+
+    # "bolts at 16mm" / "holes at 16mm" — value IS a radius (distance from center)
+    if "bolt_circle_r_mm" not in spec:
+        _at_rad = re.search(r"(?:bolt|hole)s?\s+at\s+(\d+(?:\.\d+)?)\s*mm", text, re.I)
+        if _at_rad:
+            spec["bolt_circle_r_mm"] = float(_at_rad.group(1))
 
     if "bolt_circle_r_mm" not in spec:
         bolt_pcd = _find([
@@ -367,6 +472,46 @@ def extract_spec(description: str) -> dict[str, Any]:
     ])
     if wall:
         spec["wall_mm"] = wall
+
+    # --- Fin / feature dimensions (heat sinks, etc.) ---
+    fin_h = _find([
+        r"fins?\s+(\d+(?:\.\d+)?)\s*mm\s+tall",
+        r"(\d+(?:\.\d+)?)\s*mm\s+tall\s+fins?",
+        r"fin\s+height\s*[=:]\s*(\d+(?:\.\d+)?)\s*mm",
+    ])
+    if fin_h:
+        spec["fin_height_mm"] = fin_h
+
+    fin_t = _find([
+        r"fins?\s+(\d+(?:\.\d+)?)\s*mm\s+thick",
+        r"(\d+(?:\.\d+)?)\s*mm\s+thick\s+fins?",
+        r"fin\s+thickness\s*[=:]\s*(\d+(?:\.\d+)?)\s*mm",
+    ])
+    if fin_t:
+        spec["fin_thickness_mm"] = fin_t
+
+    fin_spacing = _find([
+        r"(\d+(?:\.\d+)?)\s*mm\s+spacing",
+        r"spacing\s*[=:]\s*(\d+(?:\.\d+)?)\s*mm",
+    ])
+    if fin_spacing:
+        spec["fin_spacing_mm"] = fin_spacing
+
+    n_fins = _find([
+        r"(\d+)\s+(?:parallel\s+)?fins?",
+        r"(\d+)\s+(?:parallel\s+)?blades?",
+    ])
+    if n_fins:
+        spec["n_fins"] = int(n_fins)
+
+    # --- Angle ---
+    angle = _find([
+        r"angled?\s+(\d+(?:\.\d+)?)\s*(?:deg|degrees?|°)",
+        r"(\d+(?:\.\d+)?)\s*(?:deg|degrees?|°)\s+angle",
+        r"at\s+(\d+(?:\.\d+)?)\s*(?:deg|degrees?|°)",
+    ])
+    if angle:
+        spec["angle_deg"] = angle
 
     return spec
 

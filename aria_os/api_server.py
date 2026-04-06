@@ -142,13 +142,29 @@ def _check_fusion360() -> dict:
     return {"available": True, "note": "Script generation only; Fusion 360 must run locally"}
 
 
+def _check_zoo() -> dict:
+    """Check if Zoo.dev (KittyCAD) text-to-CAD backend is available."""
+    try:
+        from .zoo_bridge import is_zoo_available
+        if is_zoo_available():
+            return {"available": True, "note": "Zoo.dev text-to-CAD API"}
+        # Distinguish missing SDK vs missing token
+        try:
+            import kittycad  # noqa: F401
+            return {"available": False, "reason": "ZOO_API_TOKEN not set"}
+        except ImportError:
+            return {"available": False, "reason": "kittycad SDK not installed"}
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
 def health() -> dict:
-    """Report availability of all four CAD backends."""
+    """Report availability of all CAD backends."""
     return {
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -157,6 +173,7 @@ def health() -> dict:
             "grasshopper":  _check_grasshopper(),
             "blender":      _check_blender(),
             "fusion360":    _check_fusion360(),
+            "zoo":          _check_zoo(),
         },
     }
 

@@ -26,7 +26,7 @@ class DesignerAgent(BaseAgent):
             max_context_tokens=CONTEXT_LIMITS["designer"],
             fallback_to_cloud=True,  # designer is the most critical agent
         )
-        self._prefer_cloud = False  # For code gen, cloud LLMs are far better than 7b
+        self._prefer_cloud = True  # For code gen, cloud LLMs are far better than 7b
 
     def generate(self, state: DesignState) -> None:
         """Generate code and populate state.code, state.output_path, state.bbox.
@@ -38,12 +38,34 @@ class DesignerAgent(BaseAgent):
         The agent is still agentic: SpecAgent extracts params, EvalAgent validates.
         """
         if self.domain == "cad" and state.iteration <= 1 and not state.refinement_instructions:
-            # Iteration 1: try template first (instant, reliable).
-            # Even with a build recipe — template geometry + agent params
-            # beats LLM-generated geometry every time.
-            template_used = self._try_template(state)
-            if template_used:
-                return
+            # Check if the goal requires operations that templates can't do.
+            # Templates only produce box/cylinder/extrude/cut — if the user
+            # needs sweep, loft, revolve, shell, fillet, etc., skip template
+            # and let the LLM generate with the full operations reference.
+            _goal_lower = state.goal.lower()
+            _NEEDS_LLM_FEATURES = [
+                "sweep", "swept", "curved pipe", "pipe elbow", "bend",
+                "loft", "lofted", "transition", "taper",
+                "fillet", "round edge", "rounded edge", "smooth edge",
+                "chamfer", "bevel",
+                "shell", "thin wall", "hollow",  # shell != housing template
+                "split", "hinge", "clamp", "snap fit", "living hinge",
+                "spline", "organic", "sculpted", "freeform",
+                "helical", "helix", "spiral", "thread",
+                "rib", "stiffener", "gusset",
+                "boss", "standoff",
+                "pocket", "recess", "counterbore", "countersink",
+                "mirror", "symmetric",
+                "text", "engrave", "emboss",
+            ]
+            _needs_llm = any(kw in _goal_lower for kw in _NEEDS_LLM_FEATURES)
+
+            if _needs_llm:
+                print(f"  [{self.name}] Goal needs advanced features — skipping template, using LLM")
+            else:
+                template_used = self._try_template(state)
+                if template_used:
+                    return
 
         # LLM-based generation
         # Build the user prompt from state
@@ -59,8 +81,42 @@ class DesignerAgent(BaseAgent):
                 f"## BUILD RECIPE (follow these steps EXACTLY)\n"
                 f"The Coordinator Agent analyzed research and created this step-by-step recipe.\n"
                 f"Translate each step into CadQuery Python code:\n\n"
-                f"{build_recipe[:3000]}\n"
+                f"{build_recipe[:6000]}\n"
             )
+
+        # Inject CadQuery operations reference (goal-specific)
+        try:
+            from ..cad_operations_reference import get_operations_for_goal
+            ops_ref = get_operations_for_goal(state.goal)
+            if ops_ref:
+                prompt_parts.append(ops_ref)
+        except Exception:
+            pass
+
+        # Inject closest template as reference (highest ROI for LLM quality)
+        ref_code = state.plan.get("_reference_template_code", "")
+        ref_name = state.plan.get("_reference_template_name", "")
+        if not ref_code:
+            try:
+                from ..generators.cadquery_generator import _get_closest_template_source
+                ref_name, ref_code = _get_closest_template_source(
+                    state.goal, state.part_id or "", state.spec)
+            except Exception:
+                pass
+        if ref_code:
+            prompt_parts.append(
+                f"## REFERENCE TEMPLATE (adapt this working code for your part)\n"
+                f"This is a TESTED CadQuery script for a similar part type ('{ref_name}').\n"
+                f"Use the SAME CadQuery patterns and structure — modify dimensions and features:\n\n"
+                f"```python\n{ref_code}\n```\n\n"
+                f"IMPORTANT: This reference code WORKS. Keep the same patterns:\n"
+                f"- All dimensions as named constants at the top\n"
+                f"- Build solid first, then cuts/holes\n"
+                f"- result = ... as the final variable\n"
+                f"- bb = result.val().BoundingBox() at the end\n"
+                f"- NEVER use .cylinder() — use .circle(r).extrude(h)\n"
+            )
+            print(f"  [{self.name}] Injecting reference template: {ref_name}")
 
         # Include web research context if available
         research = state.plan.get("research_context", "")
@@ -103,8 +159,22 @@ class DesignerAgent(BaseAgent):
         code = _extract_code(response)
         if not code:
             state.generation_error = f"No code block found in DesignerAgent response"
-            state.code = response  # store raw for debugging
+            # Do NOT store raw response as state.code — it poisons the RefinerAgent
+            # which tries to "fix" a non-code string as if it were Python
             return
+
+        # Post-process: Gemini/Gemma sometimes define functions but never call them,
+        # or build geometry without assigning to `result`. Fix common patterns.
+        if "result" not in code and self.domain == "cad":
+            # Try to find the last CadQuery variable assignment and alias it
+            import re as _re
+            # Match patterns like: solid = cq.Workplane... or base = base.union(...)
+            _assignments = _re.findall(r'^(\w+)\s*=\s*(?:cq\.|.*\.union|.*\.cut|.*\.shell|.*\.fillet)', code, _re.MULTILINE)
+            if _assignments:
+                last_var = _assignments[-1]
+                code += f"\nresult = {last_var}\n"
+                code += 'bb = result.val().BoundingBox()\n'
+                code += 'print(f"BBOX:{bb.xlen:.3f},{bb.ylen:.3f},{bb.zlen:.3f}")\n'
 
         state.code = code
         state.generation_error = ""
@@ -114,39 +184,72 @@ class DesignerAgent(BaseAgent):
             self._execute_cad(state, code)
 
     def _call_llm(self, prompt: str) -> str | None:
-        """Override: for CAD code generation, try cloud LLM first (Claude/Gemini).
-        Local 7b models can't write complex CadQuery geometry reliably.
-        Ollama handles non-code tasks (spec, refinement, routing) fine."""
+        """Override: for CAD code generation, try cloud LLMs first, then Gemma 4.
+        Local 7b models can't write complex CadQuery geometry reliably, but
+        Gemma 4 31B is large enough to produce working CadQuery.
+        Priority: Anthropic → Gemini → Gemma 4 31B → None.
+        Ollama default (7b) is still skipped for CAD — too unreliable."""
         if self._prefer_cloud and self.domain == "cad":
-            # Cloud first for geometry code
+            # Try Anthropic first (best code quality)
             try:
-                from ..llm_client import call_llm
-                response = call_llm(prompt, system=self.system_prompt)
+                from ..llm_client import _try_anthropic
+                response = _try_anthropic(prompt, self.system_prompt)
                 if response:
                     return response
             except Exception:
                 pass
-            # Fall back to Ollama if cloud unavailable
-            from .base_agent import _call_ollama
-            return _call_ollama(prompt, self.system_prompt, self.model)
+            # Try Gemini (fast, good code gen, rarely overloaded)
+            try:
+                from ..llm_client import _try_gemini
+                response = _try_gemini(prompt, self.system_prompt)
+                if response:
+                    return response
+            except Exception:
+                pass
+            # Try Gemma 4 31B via Ollama (strong enough for CadQuery at 31B params)
+            try:
+                from ..llm_client import _try_gemma
+                response = _try_gemma(prompt, self.system_prompt)
+                if response:
+                    return response
+            except Exception:
+                pass
+            # Do NOT use Ollama default (7b) for CadQuery — produces broken geometry
+            # (.cylinder() calls, missing features, syntax errors).
+            # Return None so caller falls back to deterministic template generation.
+            print(f"  [{self.name}] Cloud LLMs + Gemma 4 unavailable — falling back to template")
+            return None
         # Non-CAD domains: use Ollama (standard path)
         return super()._call_llm(prompt)
 
     def _try_template(self, state: DesignState) -> bool:
         """Try to generate using a CadQuery template with agent-extracted params.
-        Returns True if successful (state populated), False to fall back to LLM."""
+        Returns True if successful (state populated), False to fall back to LLM.
+        For fuzzy matches, stores closest template as LLM reference (not executed directly)."""
         try:
-            from ..generators.cadquery_generator import _find_template_fn
+            from ..generators.cadquery_generator import _find_template_fuzzy, _get_closest_template_source
 
-            # Check if a template matches the part type from spec
             part_type = state.spec.get("part_type", "")
             part_id = state.part_id or ""
 
             print(f"  [{self.name}] Template check: part_id='{part_id}', part_type='{part_type}'")
 
-            # Try part_type first (more specific), then part_id
-            template_fn = _find_template_fn(part_type) or _find_template_fn(part_id)
+            # Fuzzy matching: exact/keyword matches get direct execution,
+            # goal/fuzzy matches store reference for LLM prompt
+            template_fn, match_type = _find_template_fuzzy(
+                part_type or part_id, goal=state.goal, spec=state.spec)
+
             if not template_fn:
+                return False
+
+            # Fuzzy matches are unreliable for direct execution — use as LLM reference only
+            if match_type == "fuzzy":
+                ref_name, ref_code = _get_closest_template_source(
+                    state.goal, part_id, state.spec)
+                if ref_code:
+                    state.plan["_reference_template_name"] = ref_name
+                    state.plan["_reference_template_code"] = ref_code
+                    print(f"  [{self.name}] Fuzzy match → storing '{ref_name}' as LLM reference")
                 return False
 
             # Generate code using the template with agent-extracted params

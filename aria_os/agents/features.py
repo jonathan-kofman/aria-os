@@ -20,6 +20,7 @@ class ARIAFeatures:
     DEBUG_GEOMETRY: bool = False
     OLLAMA_AGENTS: bool = True
     CLOUD_LLM_FALLBACK: bool = True
+    ONSHAPE_INTEGRATION: bool = True
 
 
 PROFILES: dict[str, dict[str, bool]] = {

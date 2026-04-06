@@ -128,6 +128,15 @@ def select_cad_tool(goal: str, plan: dict[str, Any]) -> str:
     return "cadquery"
 
 
+def is_zoo_backend_available() -> bool:
+    """Check if Zoo.dev (KittyCAD) text-to-CAD is available as a backend."""
+    try:
+        from .zoo_bridge import is_zoo_available
+        return is_zoo_available()
+    except Exception:
+        return False
+
+
 def get_output_formats(tool: str) -> list[str]:
     """Return expected output file extensions for each tool."""
     return {
@@ -135,4 +144,5 @@ def get_output_formats(tool: str) -> list[str]:
         "fusion":      ["step", "stl"],
         "grasshopper": ["step", "stl"],
         "blender":     ["stl"],
+        "zoo":         ["step"],
     }.get(tool, ["stl"])

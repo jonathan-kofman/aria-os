@@ -68,8 +68,6 @@ def make_tools(domain: str, repo_root: Path) -> dict[str, Callable]:
     """Return domain-specific tool callables for agent use."""
     if domain == "cad":
         return _cad_tools(repo_root)
-    elif domain == "cam":
-        return _cam_tools(repo_root)
     elif domain == "ecad":
         return _ecad_tools(repo_root)
     elif domain == "civil":
@@ -151,31 +149,6 @@ def _cad_tools(repo_root: Path) -> dict[str, Callable]:
     }
 
 
-def _cam_tools(repo_root: Path) -> dict[str, Callable]:
-    from .cam_tools import (
-        analyze_step as _agent_analyze,
-        select_tools as _agent_select,
-        calc_feeds as _agent_calc,
-        validate_cam_physics as _agent_validate,
-    )
-
-    def analyze_step_wrapper(step_path: str) -> dict:
-        return _agent_analyze(step_path)
-
-    def select_tools_wrapper(min_feature_mm: str = "10", max_dim_mm: str = "100",
-                              holes: str = "") -> dict:
-        return _agent_select(min_feature_mm, max_dim_mm, holes)
-
-    def calc_feeds_wrapper(tool_dia_mm: str = "10", material: str = "aluminium_6061",
-                            n_flutes: str = "3", depth_mm: str = "0") -> dict:
-        return _agent_calc(tool_dia_mm, material, n_flutes, depth_mm)
-
-    def check_machinability(step_path: str) -> dict:
-        try:
-            from ..cam_validator import check_machinability as _check
-            return _check(step_path)
-        except Exception as exc:
-            return {"error": str(exc)}
 
     def get_machine_profile(name: str = "tormach_1100") -> dict:
         try:

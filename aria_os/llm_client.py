@@ -1,14 +1,21 @@
 """
 aria_os/llm_client.py
 
-Unified LLM client. Priority order:
-1. Google Gemini  — if GOOGLE_API_KEY is set (primary; free/cheap tier used first)
-2. Anthropic API  — if ANTHROPIC_API_KEY is set (fallback; used when Gemini fails)
-3. Ollama local   — if Ollama is running on OLLAMA_HOST (default localhost:11434)
-4. Returns None   — caller falls back to heuristics
+Unified LLM client. Two priority chains depending on task type:
 
-Gemini is tried first to preserve Anthropic quota.  Anthropic is the high-quality
-fallback when Gemini is unavailable, rate-limited, or returns an empty response.
+Code generation tasks (call_llm):
+1. Anthropic Claude  — if ANTHROPIC_API_KEY is set (best code quality)
+2. Google Gemini     — if GOOGLE_API_KEY is set (fast, good code gen)
+3. Gemma 4 31B      — if pulled in Ollama (strong local code gen)
+4. Ollama default    — if Ollama is running (fallback local model)
+5. Returns None      — caller falls back to heuristics
+
+Non-code tasks (call_llm_local_first):
+1. Gemma 4 31B      — if pulled in Ollama (free, fast, good reasoning)
+2. Google Gemini     — if GOOGLE_API_KEY is set
+3. Anthropic Claude  — if ANTHROPIC_API_KEY is set
+4. Ollama default    — if Ollama is running
+5. Returns None
 
 Never raises. Logs which backend was used on every call.
 
@@ -17,6 +24,7 @@ Environment variables
 GOOGLE_API_KEY     — Google Gemini API key (optional; enables Gemini backend)
 ANTHROPIC_API_KEY  — Anthropic API key (optional; enables Anthropic backend)
 GEMINI_MODEL       — Gemini model name (default: gemini-2.0-flash)
+GEMMA_MODEL        — Gemma 4 model name for Ollama (default: gemma4:31b)
 OLLAMA_HOST        — Ollama base URL (default: http://localhost:11434)
 OLLAMA_MODEL       — Model name for Ollama (default: deepseek-coder)
 """
@@ -37,6 +45,7 @@ from typing import Any
 _DEFAULT_OLLAMA_HOST   = "http://localhost:11434"
 _DEFAULT_OLLAMA_MODEL  = "qwen2.5-coder:7b"
 _DEFAULT_GEMINI_MODEL  = "gemini-2.0-flash"
+_DEFAULT_GEMMA_MODEL   = "gemma4:31b"
 
 # Note injected into system prompt when using a local model
 _LOCAL_MODEL_NOTE = (
@@ -132,6 +141,94 @@ def _ollama_host() -> str:
 
 def _ollama_model() -> str:
     return _read_env_var("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
+
+
+def _gemma_model() -> str:
+    return _read_env_var("GEMMA_MODEL", _DEFAULT_GEMMA_MODEL)
+
+
+def _ensure_lightning_tunnel() -> None:
+    """Auto-reconnect the Lightning AI SSH tunnel if it's down.
+
+    Reads the session ID from .lightning_session file and re-establishes
+    the SSH tunnel to the remote GPU. No-op if tunnel is already alive
+    or if no session file exists.
+    """
+    import subprocess
+    repo_root = Path(__file__).resolve().parent.parent
+    session_file = repo_root / ".lightning_session"
+    key_file = Path.home() / ".ssh" / "lightning_rsa"
+
+    if not session_file.exists() or not key_file.exists():
+        return
+
+    # Check if tunnel is already alive
+    host = _ollama_host()
+    try:
+        req = urllib.request.Request(f"{host}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            json.loads(resp.read())
+        return  # tunnel is fine
+    except Exception:
+        pass
+
+    # Read session and reconnect
+    session = session_file.read_text().strip()
+    if not session:
+        return
+
+    print(f"[LLM] Reconnecting Lightning AI tunnel (session: {session[:16]}...)")
+    try:
+        # Parse port from OLLAMA_HOST
+        port = 11435
+        if ":" in host.rsplit(":", 1)[-1]:
+            try:
+                port = int(host.rsplit(":", 1)[-1])
+            except ValueError:
+                pass
+
+        subprocess.run([
+            "ssh", "-i", str(key_file),
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=10",
+            "-N", "-f",
+            "-L", f"{port}:localhost:11434",
+            f"s_{session}@ssh.lightning.ai",
+        ], capture_output=True, timeout=15)
+
+        import time
+        time.sleep(2)
+        # Verify
+        try:
+            req = urllib.request.Request(f"{host}/api/tags", method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                json.loads(resp.read())
+            print("[LLM] Lightning AI tunnel reconnected")
+        except Exception:
+            print("[LLM] Lightning AI tunnel failed to reconnect")
+    except Exception as exc:
+        print(f"[LLM] Lightning AI reconnect error: {exc}")
+
+
+def is_gemma_available() -> bool:
+    """Check if Gemma 4 is pulled in Ollama.
+
+    Queries Ollama's /api/tags endpoint and checks if any pulled model
+    matches the configured GEMMA_MODEL (default: gemma4:31b).
+    Returns False if Ollama is not running or Gemma 4 is not pulled.
+    """
+    host = _ollama_host()
+    model = _gemma_model()
+    model_base = model.split(":")[0]  # e.g. "gemma4" from "gemma4:31b"
+    try:
+        req = urllib.request.Request(f"{host}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        models = [m.get("name", "") for m in data.get("models", [])]
+        return any(model_base in m for m in models)
+    except Exception:
+        return False
 
 
 def get_ollama_status() -> dict[str, Any]:
@@ -325,6 +422,63 @@ def _try_ollama(prompt: str, system: str) -> str | None:
             return None
         except Exception as exc:
             print(f"[LLM] ollama failed: {exc}")
+            return None
+    return None
+
+
+def _try_gemma(prompt: str, system: str) -> str | None:
+    """Try Gemma 4 via Ollama. Returns text or None.
+
+    Gemma 4 31B (Apache 2.0) is a strong local model for both code generation
+    and reasoning tasks. It runs via Ollama: ``ollama pull gemma4:31b``
+
+    Uses the same Ollama /api/chat endpoint but targets the Gemma model
+    specifically, separate from the default Ollama model configuration.
+    Falls through gracefully if Gemma 4 is not pulled or Ollama is down.
+    """
+    if not is_gemma_available():
+        # Try auto-reconnecting the Lightning AI tunnel
+        _ensure_lightning_tunnel()
+        if not is_gemma_available():
+            return None
+
+    host = _ollama_host()
+    model = _gemma_model()
+
+    # Inject local-model note into system prompt
+    effective_system = (system + _LOCAL_MODEL_NOTE) if system else _LOCAL_MODEL_NOTE.strip()
+    messages: list[dict[str, str]] = []
+    if effective_system:
+        messages.append({"role": "system", "content": effective_system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "stream": False,
+    }).encode("utf-8")
+
+    for attempt in range(2):  # retry once on transient 500 (OOM/crash)
+        try:
+            req = urllib.request.Request(
+                f"{host}/api/chat",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            text = data.get("message", {}).get("content", "")
+            print(f"[LLM] gemma/{model}")
+            return text if text else None
+        except urllib.error.HTTPError as exc:
+            if exc.code == 500 and attempt == 0:
+                print(f"[LLM] gemma HTTP 500 (likely OOM) — retrying once...")
+                continue
+            print(f"[LLM] gemma failed: HTTP {exc.code}")
+            return None
+        except Exception as exc:
+            print(f"[LLM] gemma failed: {exc}")
             return None
     return None
 
@@ -632,12 +786,11 @@ def call_llm(
     repo_root: Path | None = None,
 ) -> str | None:
     """
-    Call the best available LLM backend.
+    Call the best available LLM backend for code generation tasks.
 
-    Priority: Gemini → Anthropic (fallback) → Ollama → None
+    Priority: Anthropic Claude → Gemini 2.5 Flash → Gemma 4 31B (Ollama) → Ollama default → None
 
-    Gemini is tried first to conserve Anthropic quota.  Anthropic kicks in
-    only when Gemini is unavailable or rate-limited.
+    Cloud models are tried first for code generation quality.
 
     Parameters
     ----------
@@ -650,15 +803,7 @@ def call_llm(
     Response text, or None if all backends unavailable.
     Never raises.
     """
-    # 1. Try Gemini (primary — free/cheap quota)
-    try:
-        result = _try_gemini(prompt, system, repo_root)
-        if result is not None:
-            return result
-    except Exception as exc:
-        print(f"[LLM] gemini unexpected error: {exc}")
-
-    # 2. Try Anthropic (fallback — preserves paid quota)
+    # 1. Try Anthropic (best code quality)
     try:
         result = _try_anthropic(prompt, system, repo_root)
         if result is not None:
@@ -666,7 +811,23 @@ def call_llm(
     except Exception as exc:
         print(f"[LLM] anthropic unexpected error: {exc}")
 
-    # 3. Try Ollama
+    # 2. Try Gemini (fast, good code gen)
+    try:
+        result = _try_gemini(prompt, system, repo_root)
+        if result is not None:
+            return result
+    except Exception as exc:
+        print(f"[LLM] gemini unexpected error: {exc}")
+
+    # 3. Try Gemma 4 31B via Ollama (strong local code gen)
+    try:
+        result = _try_gemma(prompt, system)
+        if result is not None:
+            return result
+    except Exception as exc:
+        print(f"[LLM] gemma unexpected error: {exc}")
+
+    # 4. Try Ollama default model
     try:
         result = _try_ollama(prompt, system)
         if result is not None:
@@ -674,6 +835,68 @@ def call_llm(
     except Exception as exc:
         print(f"[LLM] ollama unexpected error: {exc}")
 
-    # 4. All backends down
+    # 5. All backends down
+    print("[LLM] no backend available — returning None")
+    return None
+
+
+def call_llm_local_first(
+    prompt: str,
+    system: str = "",
+    *,
+    repo_root: Path | None = None,
+) -> str | None:
+    """
+    Call the best available LLM backend, preferring local models.
+
+    For non-code tasks (spec extraction, routing, refinement) where local
+    models are adequate and free. Uses expensive cloud models only as fallback.
+
+    Priority: Gemma 4 31B (Ollama) → Gemini Flash → Anthropic → Ollama default → None
+
+    Parameters
+    ----------
+    prompt     : user message / prompt
+    system     : system prompt (optional)
+    repo_root  : repo root for .env lookup (optional)
+
+    Returns
+    -------
+    Response text, or None if all backends unavailable.
+    Never raises.
+    """
+    # 1. Try Gemma 4 31B via Ollama (free, fast, good reasoning)
+    try:
+        result = _try_gemma(prompt, system)
+        if result is not None:
+            return result
+    except Exception as exc:
+        print(f"[LLM] gemma unexpected error: {exc}")
+
+    # 2. Try Gemini (free/cheap quota)
+    try:
+        result = _try_gemini(prompt, system, repo_root)
+        if result is not None:
+            return result
+    except Exception as exc:
+        print(f"[LLM] gemini unexpected error: {exc}")
+
+    # 3. Try Anthropic (fallback — preserves paid quota)
+    try:
+        result = _try_anthropic(prompt, system, repo_root)
+        if result is not None:
+            return result
+    except Exception as exc:
+        print(f"[LLM] anthropic unexpected error: {exc}")
+
+    # 4. Try Ollama default model
+    try:
+        result = _try_ollama(prompt, system)
+        if result is not None:
+            return result
+    except Exception as exc:
+        print(f"[LLM] ollama unexpected error: {exc}")
+
+    # 5. All backends down
     print("[LLM] no backend available — returning None")
     return None
