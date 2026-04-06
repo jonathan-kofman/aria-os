@@ -1393,6 +1393,38 @@ def main():
         print("Done.")
         return
 
+    # --- --scan: reverse pipeline (3D scan → features → catalog) ---
+    if len(sys.argv) >= 2 and sys.argv[1] == "--scan":
+        if len(sys.argv) < 3:
+            print("Usage: python run_aria_os.py --scan <file.stl|.obj|.ply> [--material X] [--tags tag1,tag2]")
+            sys.exit(1)
+        _scan_file = sys.argv[2]
+        _scan_mat = "unknown"
+        if "--material" in sys.argv:
+            _scan_mat = sys.argv[sys.argv.index("--material") + 1]
+        _scan_tags = []
+        if "--tags" in sys.argv:
+            _scan_tags = sys.argv[sys.argv.index("--tags") + 1].split(",")
+        from aria_os.scan_pipeline import run_scan_pipeline
+        run_scan_pipeline(_scan_file, material=_scan_mat, tags=_scan_tags)
+        print("Done.")
+        return
+
+    # --- --catalog: list/search scanned parts catalog ---
+    if len(sys.argv) >= 2 and sys.argv[1] == "--catalog":
+        _cat_topo = None
+        _cat_tags = None
+        _cat_dims = None
+        if "--topology" in sys.argv:
+            _cat_topo = sys.argv[sys.argv.index("--topology") + 1]
+        if "--tags" in sys.argv:
+            _cat_tags = sys.argv[sys.argv.index("--tags") + 1].split(",")
+        if "--search" in sys.argv:
+            _cat_dims = sys.argv[sys.argv.index("--search") + 1]
+        from aria_os.scan_pipeline import list_catalog
+        list_catalog(topology=_cat_topo, tags=_cat_tags, search_dims=_cat_dims)
+        return
+
     if len(sys.argv) < 2:
         print("Usage: python run_aria_os.py \"describe the part you want\"")
         print("       python run_aria_os.py \"part description\" --fea   # force FEA after export")
@@ -1420,6 +1452,8 @@ def main():
         print("       python run_aria_os.py \"part description\" --render")
         print("       python run_aria_os.py --quote <step_file> [--material aluminium_6061] [--process cnc] [--qty 10]")
         print("       python run_aria_os.py --full \"part description\"  # generate+FEA+draw+render+CAM+setup+quote in one shot")
+        print("       python run_aria_os.py --scan <file.stl> [--material X] [--tags tag1,tag2]  # reverse: scan → features → catalog")
+        print("       python run_aria_os.py --catalog [--topology prismatic] [--search 50x30x20] [--tags bracket]")
         print("Example: python run_aria_os.py \"generate the ARIA housing shell\"")
         sys.exit(1)
 

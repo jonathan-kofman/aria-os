@@ -7,8 +7,12 @@ from typing import Optional, List, Dict, Any
 import json
 
 from ..context_loader import get_mechanical_constants
-from aria_models import static_tests as _st_mod
 from .. import event_bus
+
+try:
+    from aria_models import static_tests as _st_mod
+except ImportError:
+    _st_mod = None  # aria_models not available in this repo; physics checks degrade gracefully
 
 
 @dataclass
@@ -37,7 +41,10 @@ def _load_meta(meta_path: Path) -> Dict[str, Any]:
 
 def _run_static_checks(part_id: str, meta: Dict[str, Any], context: dict) -> tuple[Optional[bool], Optional[float], Optional[str]]:
     """Run static checks with dimensions mapped from meta JSON and mechanical defaults."""
-    from aria_models import static_tests as st
+    try:
+        from aria_models import static_tests as st
+    except ImportError:
+        return None, None, None
 
     lid = part_id.lower()
     applies = any(
@@ -89,7 +96,8 @@ def _run_static_checks(part_id: str, meta: Dict[str, Any], context: dict) -> tup
             housing_wall_mm=housing_wall,
         )
     elif any(x in lid for x in ("ratchet", "ring", "gear", "tooth")):
-        sf = _ratchet_tooth_shear_sf(dims, _st_mod.YIELD_RATCHET_MPA)
+        yield_ratchet = getattr(_st_mod, "YIELD_RATCHET_MPA", 600.0) if _st_mod else 600.0
+        sf = _ratchet_tooth_shear_sf(dims, yield_ratchet)
         # Ratchet ring tooth shear is safety-critical — requires SF >= 8.0
         return (sf >= 8.0), float(sf), "tooth_shear"
     elif any(x in lid for x in ("housing", "shell", "enclosure")):
@@ -121,7 +129,10 @@ def _run_static_checks(part_id: str, meta: Dict[str, Any], context: dict) -> tup
 
 def _run_dynamic_checks() -> tuple[Optional[bool], Optional[float], Optional[float]]:
     """Run system-level dynamic drop test once."""
-    from aria_models import dynamic_drop as dd
+    try:
+        from aria_models import dynamic_drop as dd
+    except ImportError:
+        return None, None, None
     _, summary = dd.simulate_drop_test()
     return (
         bool(summary.get("passed")),
@@ -191,7 +202,7 @@ def _body_bending_sf(dims: Dict[str, Any], yield_mpa: float, load_n: float = 160
     pivot_offset = get(["PIVOT_OFFSET", "PIVOT"], 8.0)    # mm from end
     b = get(["WIDTH"], 12.0)                              # mm
     h = get(["THICKNESS"], 6.0)                           # mm
-    n = float(_st_mod.N_PAWLS)
+    n = float(getattr(_st_mod, "N_PAWLS", 3)) if _st_mod else 3.0
 
     # Moment arm from pivot to tooth tip
     moment_arm_mm = total_length - pivot_offset
@@ -284,9 +295,11 @@ def run_static_check_with_material(part_id: str, meta: dict, yield_mpa: float, c
     shaft_d = get_dim(dims, "SHAFT", "BORE", "ID", default=shaft_d_default)
 
     load_steps = [2000, 4000, 8000, 12000, 16000]
-    y_pawl = _st_mod.YIELD_PAWL_MPA
-    y_housing = _st_mod.YIELD_HOUSING_MPA
-    y_shaft = _st_mod.YIELD_SHAFT_MPA
+    if _st_mod is None:
+        return None, "unavailable"
+    y_pawl = getattr(_st_mod, "YIELD_PAWL_MPA", 600.0)
+    y_housing = getattr(_st_mod, "YIELD_HOUSING_MPA", 250.0)
+    y_shaft = getattr(_st_mod, "YIELD_SHAFT_MPA", 500.0)
     if any(x in lid for x in ("pawl", "lever", "trip", "blocker")):
         y_pawl = yield_mpa
     elif any(x in lid for x in ("housing", "shell", "enclosure")):

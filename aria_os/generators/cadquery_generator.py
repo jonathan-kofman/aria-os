@@ -3194,6 +3194,597 @@ print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 """
 
 
+# ── Tier 1 expansion templates (April 2026) ──────────────────────────────────
+
+
+def _cq_hex_bolt(params: dict[str, Any]) -> str:
+    import math as _m
+    d = float(params.get("diameter_mm", params.get("bolt_dia_mm", 8.0)))
+    l = float(params.get("length_mm", 30.0))
+    af = float(params.get("head_af_mm", round(d * 1.5, 1)))
+    hh = float(params.get("head_height_mm", round(d * 0.7, 1)))
+    r = af / (2.0 * _m.cos(_m.pi / 6))
+    hex_pts = [(r * _m.cos(_m.pi / 3 * i), r * _m.sin(_m.pi / 3 * i)) for i in range(6)]
+    pts_str = repr(hex_pts)
+    return f"""
+import cadquery as cq
+SHANK_D  = {d}
+LENGTH   = {l}
+HEAD_H   = {hh}
+result = cq.Workplane("XY").circle(SHANK_D / 2.0).extrude(LENGTH)
+hex_pts = {pts_str}
+head = (cq.Workplane("XY").workplane(offset=LENGTH).polyline(hex_pts).close().extrude(HEAD_H))
+result = result.union(head)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_hex_nut(params: dict[str, Any]) -> str:
+    import math as _m
+    bore = float(params.get("bore_mm", params.get("bolt_dia_mm", params.get("diameter_mm", 8.0))))
+    af = float(params.get("head_af_mm", round(bore * 1.7, 1)))
+    h = float(params.get("thickness_mm", params.get("height_mm", round(bore * 0.8, 1))))
+    r = af / (2.0 * _m.cos(_m.pi / 6))
+    hex_pts = [(r * _m.cos(_m.pi / 3 * i), r * _m.sin(_m.pi / 3 * i)) for i in range(6)]
+    pts_str = repr(hex_pts)
+    return f"""
+import cadquery as cq
+BORE_D = {bore}
+THICKNESS = {h}
+hex_pts = {pts_str}
+result = (cq.Workplane("XY").polyline(hex_pts).close().circle(BORE_D / 2.0).extrude(THICKNESS))
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_socket_cap_screw(params: dict[str, Any]) -> str:
+    d = float(params.get("diameter_mm", params.get("bolt_dia_mm", 6.0)))
+    l = float(params.get("length_mm", 25.0))
+    head_d = float(params.get("head_diameter_mm", round(d * 1.5, 1)))
+    head_h = float(params.get("head_height_mm", round(d * 1.0, 1)))
+    socket_af = round(d * 0.6, 1)
+    socket_depth = round(head_h * 0.6, 1)
+    return f"""
+import cadquery as cq
+import math
+SHANK_D = {d}; LENGTH = {l}; HEAD_D = {head_d}; HEAD_H = {head_h}
+SOCKET_AF = {socket_af}; SOCKET_DEPTH = {socket_depth}
+result = cq.Workplane("XY").circle(SHANK_D / 2.0).extrude(LENGTH)
+head = cq.Workplane("XY").workplane(offset=LENGTH).circle(HEAD_D / 2.0).extrude(HEAD_H)
+result = result.union(head)
+socket_r = SOCKET_AF / (2.0 * math.cos(math.pi / 6))
+socket = cq.Workplane("XY").workplane(offset=LENGTH + HEAD_H).polygon(6, socket_r * 2).extrude(-SOCKET_DEPTH)
+result = result.cut(socket)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_set_screw(params: dict[str, Any]) -> str:
+    d = float(params.get("diameter_mm", params.get("bolt_dia_mm", 6.0)))
+    l = float(params.get("length_mm", 10.0))
+    socket_af = round(d * 0.5, 1)
+    socket_depth = round(d * 0.5, 1)
+    return f"""
+import cadquery as cq
+import math
+SHANK_D = {d}; LENGTH = {l}; SOCKET_AF = {socket_af}; SOCKET_DEPTH = {socket_depth}
+result = cq.Workplane("XY").circle(SHANK_D / 2.0).extrude(LENGTH)
+socket_r = SOCKET_AF / (2.0 * math.cos(math.pi / 6))
+socket = cq.Workplane("XY").workplane(offset=LENGTH).polygon(6, socket_r * 2).extrude(-SOCKET_DEPTH)
+result = result.cut(socket)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_timing_pulley(params: dict[str, Any]) -> str:
+    import math as _m
+    n_teeth = int(params.get("n_teeth", 20))
+    pitch = float(params.get("pitch_mm", 2.0))
+    bore = float(params.get("bore_mm", 5.0))
+    width = float(params.get("thickness_mm", params.get("width_mm", 7.0)))
+    pitch_d = n_teeth * pitch / _m.pi
+    od = pitch_d + 1.0
+    hub_d = max(bore + 4.0, od * 0.6)
+    hub_h = max(2.0, width * 0.4)
+    return f"""
+import cadquery as cq
+OD = {round(od, 2)}; BORE = {bore}; WIDTH = {width}; HUB_D = {round(hub_d, 2)}; HUB_H = {round(hub_h, 2)}
+result = cq.Workplane("XY").circle(OD / 2.0).circle(BORE / 2.0).extrude(WIDTH)
+hub = cq.Workplane("XY").workplane(offset=-HUB_H).circle(HUB_D / 2.0).circle(BORE / 2.0).extrude(HUB_H)
+result = result.union(hub)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_sprocket(params: dict[str, Any]) -> str:
+    import math as _m
+    n_teeth = int(params.get("n_teeth", 18))
+    pitch = float(params.get("pitch_mm", 6.35))
+    bore = float(params.get("bore_mm", 8.0))
+    thick = float(params.get("thickness_mm", params.get("height_mm", 4.0)))
+    pitch_d = pitch / _m.sin(_m.pi / n_teeth)
+    od = pitch_d + pitch * 0.3
+    root_d = pitch_d - pitch * 0.3
+    pts = []
+    for i in range(n_teeth):
+        a_tip = 2 * _m.pi * i / n_teeth
+        a_root = 2 * _m.pi * (i + 0.5) / n_teeth
+        pts.append((od / 2 * _m.cos(a_tip), od / 2 * _m.sin(a_tip)))
+        pts.append((root_d / 2 * _m.cos(a_root), root_d / 2 * _m.sin(a_root)))
+    pts_str = repr(pts)
+    return f"""
+import cadquery as cq
+BORE = {bore}; THICKNESS = {thick}
+tooth_pts = {pts_str}
+result = cq.Workplane("XY").polyline(tooth_pts).close().circle(BORE / 2.0).extrude(THICKNESS)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_rack(params: dict[str, Any]) -> str:
+    import math as _m
+    length = float(params.get("length_mm", 100.0))
+    width = float(params.get("width_mm", 15.0))
+    height = float(params.get("height_mm", 12.0))
+    module = float(params.get("module_mm", 1.5))
+    n_teeth = int(params.get("n_teeth", 0))
+    if n_teeth == 0:
+        n_teeth = max(1, int(length / (_m.pi * module)))
+    tooth_h = round(module * 2.25, 3)
+    pitch = round(_m.pi * module, 3)
+    rack_len = round(n_teeth * pitch, 3)
+    total_h = round(height + tooth_h, 3)
+    pts = [(0, 0)]
+    for i in range(n_teeth):
+        x0 = round(i * pitch, 4)
+        pts.append((round(x0 + pitch * 0.25, 4), tooth_h))
+        pts.append((round(x0 + pitch * 0.75, 4), tooth_h))
+        if i < n_teeth - 1:
+            pts.append((round(x0 + pitch, 4), 0))
+    pts.append((rack_len, 0))
+    pts_str = repr(pts)
+    return f"""
+import cadquery as cq
+WIDTH = {width}; HEIGHT = {height}; RACK_LEN = {rack_len}; TOTAL_H = {total_h}
+result = cq.Workplane("XY").box(RACK_LEN, WIDTH, HEIGHT, centered=False)
+tooth_pts = {pts_str}
+teeth = cq.Workplane("XZ").moveTo(0, 0).polyline(tooth_pts).lineTo(0, 0).close().extrude(WIDTH)
+teeth = teeth.translate((0, 0, HEIGHT))
+try:
+    result = result.union(teeth)
+except Exception:
+    result = cq.Workplane("XY").box(RACK_LEN, WIDTH, TOTAL_H, centered=False)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_pipe_elbow(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", params.get("diameter_mm", 25.0)))
+    wall = float(params.get("wall_mm", 2.0))
+    angle = float(params.get("angle_deg", 90.0))
+    bend_r = float(params.get("bend_radius_mm", od * 1.5))
+    return f"""
+import cadquery as cq
+import math
+OD = {od}; WALL = {wall}; ANGLE = {angle}; BEND_R = {bend_r}; ID = OD - 2.0 * WALL
+path = cq.Workplane("XZ").radiusArc((BEND_R * (1 - math.cos(math.radians(ANGLE))), BEND_R * math.sin(math.radians(ANGLE))), -BEND_R)
+outer = cq.Workplane("XY").circle(OD / 2.0).sweep(path)
+inner = cq.Workplane("XY").circle(ID / 2.0).sweep(path)
+result = outer.cut(inner)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_pipe_tee(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", params.get("diameter_mm", 25.0)))
+    wall = float(params.get("wall_mm", 2.0))
+    length = float(params.get("length_mm", 60.0))
+    branch_l = float(params.get("branch_length_mm", length * 0.5))
+    return f"""
+import cadquery as cq
+OD = {od}; WALL = {wall}; LENGTH = {length}; BRANCH_L = {branch_l}; ID = OD - 2.0 * WALL
+run_o = cq.Workplane("YZ").circle(OD / 2.0).extrude(LENGTH)
+run_i = cq.Workplane("YZ").circle(ID / 2.0).extrude(LENGTH)
+run = run_o.cut(run_i)
+br_o = cq.Workplane("XY").transformed(offset=(LENGTH / 2.0, 0, 0)).circle(OD / 2.0).extrude(BRANCH_L)
+br_i = cq.Workplane("XY").transformed(offset=(LENGTH / 2.0, 0, 0)).circle(ID / 2.0).extrude(BRANCH_L)
+result = run.union(br_o.cut(br_i))
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_pipe_reducer(params: dict[str, Any]) -> str:
+    od_large = float(params.get("od_mm", 32.0))
+    od_small = float(params.get("diameter_mm", params.get("od_small_mm", 20.0)))
+    wall = float(params.get("wall_mm", 2.0))
+    length = float(params.get("length_mm", 40.0))
+    return f"""
+import cadquery as cq
+OD_LARGE = {od_large}; OD_SMALL = {od_small}; WALL = {wall}; LENGTH = {length}
+outer = cq.Workplane("XZ").moveTo(OD_LARGE/2.0,0).lineTo(OD_SMALL/2.0,LENGTH).lineTo(0,LENGTH).lineTo(0,0).close().revolve(360,(0,0,0),(0,1,0))
+inner = cq.Workplane("XZ").moveTo(OD_LARGE/2.0-WALL,0).lineTo(OD_SMALL/2.0-WALL,LENGTH).lineTo(0,LENGTH).lineTo(0,0).close().revolve(360,(0,0,0),(0,1,0))
+result = outer.cut(inner)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+# ── Tier 2 expansion templates (April 2026) ──────────────────────────────────
+
+
+def _cq_ring_gear(params: dict[str, Any]) -> str:
+    import math as _m
+    od = float(params.get("od_mm", 80.0))
+    n_teeth = int(params.get("n_teeth", 40))
+    thick = float(params.get("thickness_mm", params.get("height_mm", 10.0)))
+    module = float(params.get("module_mm", 0))
+    if module == 0:
+        module = round(od / (n_teeth + 2), 2)
+    pitch_d = module * n_teeth
+    root_d = pitch_d + module * 2.5
+    tip_d = pitch_d - module * 2.25
+    pts = []
+    for i in range(n_teeth):
+        a_tip = 2 * _m.pi * i / n_teeth
+        a_root = 2 * _m.pi * (i + 0.5) / n_teeth
+        pts.append((tip_d / 2 * _m.cos(a_tip), tip_d / 2 * _m.sin(a_tip)))
+        pts.append((root_d / 2 * _m.cos(a_root), root_d / 2 * _m.sin(a_root)))
+    pts_str = repr(pts)
+    return f"""
+import cadquery as cq
+OD = {od}; THICKNESS = {thick}
+outer = cq.Workplane("XY").circle(OD / 2.0).extrude(THICKNESS)
+tooth_pts = {pts_str}
+try:
+    tooth_cut = cq.Workplane("XY").polyline(tooth_pts).close().extrude(THICKNESS)
+    result = outer.cut(tooth_cut)
+except Exception:
+    result = cq.Workplane("XY").circle(OD / 2.0).circle(OD / 2.0 - {round(module * 3, 2)}).extrude(THICKNESS)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_gopro_mount(params: dict[str, Any]) -> str:
+    w = float(params.get("width_mm", 20.0))
+    h = float(params.get("height_mm", 15.0))
+    t = float(params.get("thickness_mm", 3.5))
+    bolt_d = float(params.get("bolt_dia_mm", 5.0))
+    gap = round(t * 0.3, 1)
+    return f"""
+import cadquery as cq
+W={w}; H={h}; T={t}; GAP={gap}; BOLT={bolt_d}
+prong_w = (W - GAP) / 2.0; prong_h = H * 0.8
+base = cq.Workplane("XY").box(W, H, T)
+left = cq.Workplane("XY").workplane(offset=T/2.0).center(-(prong_w+GAP)/2.0, 0).box(prong_w, prong_h, prong_h, centered=(True,True,False))
+right = cq.Workplane("XY").workplane(offset=T/2.0).center((prong_w+GAP)/2.0, 0).box(prong_w, prong_h, prong_h, centered=(True,True,False))
+result = base.union(left).union(right)
+hole = cq.Workplane("YZ").workplane(offset=-(W/2.0+1)).center(0, T/2.0+prong_h/2.0).circle(BOLT/2.0).extrude(W+2)
+result = result.cut(hole)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_hex_standoff(params: dict[str, Any]) -> str:
+    import math as _m
+    af = float(params.get("diameter_mm", params.get("od_mm", 8.0)))
+    length = float(params.get("length_mm", params.get("height_mm", 15.0)))
+    bore = float(params.get("bore_mm", params.get("bolt_dia_mm", 3.2)))
+    bore_depth = round(length * 0.4, 1)
+    r = af / (2.0 * _m.cos(_m.pi / 6))
+    hex_pts = [(r * _m.cos(_m.pi / 3 * i), r * _m.sin(_m.pi / 3 * i)) for i in range(6)]
+    pts_str = repr(hex_pts)
+    return f"""
+import cadquery as cq
+LENGTH={length}; BORE_D={bore}; BORE_DEPTH={bore_depth}
+hex_pts = {pts_str}
+result = cq.Workplane("XY").polyline(hex_pts).close().extrude(LENGTH)
+result = result.cut(cq.Workplane("XY").circle(BORE_D/2.0).extrude(BORE_DEPTH))
+result = result.cut(cq.Workplane("XY").workplane(offset=LENGTH).circle(BORE_D/2.0).extrude(-BORE_DEPTH))
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_t_nut(params: dict[str, Any]) -> str:
+    bolt_d = float(params.get("bolt_dia_mm", params.get("bore_mm", 5.0)))
+    slot_w = float(params.get("width_mm", 10.0))
+    body_h = float(params.get("height_mm", params.get("thickness_mm", 6.0)))
+    flange_w = slot_w + 4.0
+    flange_h = round(body_h * 0.3, 1)
+    return f"""
+import cadquery as cq
+SLOT_W={slot_w}; BODY_H={body_h}; FLANGE_W={flange_w}; FLANGE_H={flange_h}; BOLT_D={bolt_d}
+result = cq.Workplane("XY").box(SLOT_W, SLOT_W, BODY_H)
+flange = cq.Workplane("XY").workplane(offset=-BODY_H/2.0).box(FLANGE_W, SLOT_W, FLANGE_H, centered=(True,True,False))
+result = result.union(flange)
+result = result.faces(">Z").workplane().hole(BOLT_D)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_thrust_washer(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", 30.0))
+    bore = float(params.get("bore_mm", 15.0))
+    thick = float(params.get("thickness_mm", params.get("height_mm", 2.0)))
+    return f"""
+import cadquery as cq
+result = cq.Workplane("XY").circle({od}/2.0).circle({bore}/2.0).extrude({thick})
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_retaining_ring(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", 25.0))
+    thick = float(params.get("thickness_mm", params.get("height_mm", 1.5)))
+    wire_d = float(params.get("wire_dia_mm", 2.0))
+    return f"""
+import cadquery as cq
+import math
+OD={od}; THICK={thick}; WIRE_D={wire_d}; ID=OD-2*WIRE_D
+ring = cq.Workplane("XY").circle(OD/2.0).circle(ID/2.0).extrude(THICK)
+gap_w = OD * math.sin(math.radians(15))
+gap_cut = cq.Workplane("XY").moveTo(0,0).lineTo(OD,-gap_w/2).lineTo(OD,gap_w/2).close().extrude(THICK*2)
+result = ring.cut(gap_cut)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_linear_bushing(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", 20.0))
+    bore = float(params.get("bore_mm", 12.0))
+    length = float(params.get("length_mm", params.get("height_mm", 25.0)))
+    return f"""
+import cadquery as cq
+result = cq.Workplane("XY").circle({od}/2.0).circle({bore}/2.0).extrude({length})
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_pipe_cap(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", params.get("diameter_mm", 25.0)))
+    wall = float(params.get("wall_mm", 2.0))
+    height = float(params.get("height_mm", params.get("length_mm", 15.0)))
+    return f"""
+import cadquery as cq
+OD={od}; WALL={wall}; HEIGHT={height}; ID=OD-2.0*WALL
+result = cq.Workplane("XY").circle(OD/2.0).extrude(HEIGHT)
+bore = cq.Workplane("XY").workplane(offset=WALL).circle(ID/2.0).extrude(HEIGHT)
+result = result.cut(bore)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_cross_dowel(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", params.get("diameter_mm", 10.0)))
+    length = float(params.get("length_mm", params.get("height_mm", 14.0)))
+    bore = float(params.get("bore_mm", params.get("bolt_dia_mm", 6.0)))
+    return f"""
+import cadquery as cq
+OD={od}; LENGTH={length}; BORE={bore}
+result = cq.Workplane("XY").circle(OD/2.0).extrude(LENGTH)
+cross = cq.Workplane("YZ").workplane(offset=-(OD/2.0+1)).center(0, LENGTH/2.0).circle(BORE/2.0).extrude(OD+2)
+result = result.cut(cross)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+# ── Tier 3 expansion templates (April 2026) ──────────────────────────────────
+
+
+def _cq_bevel_gear(params: dict[str, Any]) -> str:
+    import math as _m
+    n_teeth = int(params.get("n_teeth", 20))
+    module = float(params.get("module_mm", 2.0))
+    bore = float(params.get("bore_mm", 10.0))
+    face_w = float(params.get("thickness_mm", params.get("face_width_mm", 15.0)))
+    od = module * n_teeth + module * 2
+    top_od = max(od - 2 * face_w * _m.tan(_m.radians(45)), bore + 4)
+    return f"""
+import cadquery as cq
+OD={round(od,2)}; TOP_OD={round(top_od,2)}; BORE={bore}; FACE_W={face_w}
+outer = cq.Workplane("XZ").moveTo(OD/2.0,0).lineTo(TOP_OD/2.0,FACE_W).lineTo(0,FACE_W).lineTo(0,0).close().revolve(360,(0,0,0),(0,1,0))
+result = outer.cut(cq.Workplane("XY").circle(BORE/2.0).extrude(FACE_W))
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_worm(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", 20.0))
+    bore = float(params.get("bore_mm", 8.0))
+    length = float(params.get("length_mm", 50.0))
+    return f"""
+import cadquery as cq
+result = cq.Workplane("XY").circle({od}/2.0).circle({bore}/2.0).extrude({length})
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_worm_gear(params: dict[str, Any]) -> str:
+    n_teeth = int(params.get("n_teeth", 30))
+    module = float(params.get("module_mm", 2.0))
+    bore = float(params.get("bore_mm", 12.0))
+    face_w = float(params.get("thickness_mm", params.get("width_mm", 20.0)))
+    od = round(module * n_teeth + module * 2, 2)
+    return f"""
+import cadquery as cq
+result = cq.Workplane("XY").circle({od}/2.0).circle({bore}/2.0).extrude({face_w})
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_timing_belt(params: dict[str, Any]) -> str:
+    import math as _m
+    n_teeth = int(params.get("n_teeth", 60))
+    pitch = float(params.get("pitch_mm", 2.0))
+    width = float(params.get("width_mm", params.get("thickness_mm", 6.0)))
+    belt_thick = float(params.get("belt_thickness_mm", 1.5))
+    pitch_d = n_teeth * pitch / _m.pi
+    od = round(pitch_d + belt_thick, 2)
+    bore_d = round(pitch_d - belt_thick, 2)
+    return f"""
+import cadquery as cq
+result = cq.Workplane("XY").circle({od}/2.0).circle({bore_d}/2.0).extrude({width})
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_jaw_coupling_half(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", 40.0))
+    bore = float(params.get("bore_mm", 12.0))
+    length = float(params.get("length_mm", params.get("height_mm", 25.0)))
+    n_jaws = int(params.get("n_teeth", params.get("n_bolts", 3)))
+    jaw_depth = round(length * 0.4, 1)
+    return f"""
+import cadquery as cq
+import math
+OD={od}; BORE={bore}; LENGTH={length}; N_JAWS={n_jaws}; JAW_DEPTH={jaw_depth}
+result = cq.Workplane("XY").circle(OD/2.0).circle(BORE/2.0).extrude(LENGTH)
+slot_angle = 360.0 / (N_JAWS * 2)
+slot_w = OD * math.sin(math.radians(slot_angle)) * 0.8
+for i in range(N_JAWS):
+    angle = math.radians(i * 360.0 / N_JAWS)
+    cx = (OD/4.0 + BORE/4.0) * math.cos(angle)
+    cy = (OD/4.0 + BORE/4.0) * math.sin(angle)
+    slot = cq.Workplane("XY").workplane(offset=LENGTH).center(cx, cy).rect(slot_w, OD/2.0 - BORE/2.0).extrude(-JAW_DEPTH)
+    result = result.cut(slot)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_valve_body(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", 50.0))
+    port_d = float(params.get("diameter_mm", params.get("bore_mm", 20.0)))
+    wall = float(params.get("wall_mm", 3.0))
+    stub_l = round(od * 0.5, 1)
+    return f"""
+import cadquery as cq
+OD={od}; PORT_D={port_d}; WALL={wall}; STUB_L={stub_l}; PORT_ID=PORT_D-2*WALL
+body = cq.Workplane("XY").circle(OD/2.0).extrude(OD)
+inlet_o = cq.Workplane("YZ").workplane(offset=-(OD/2.0+STUB_L)).circle(PORT_D/2.0).extrude(STUB_L+OD/2.0)
+inlet_i = cq.Workplane("YZ").workplane(offset=-(OD/2.0+STUB_L+1)).circle(PORT_ID/2.0).extrude(STUB_L+OD+2)
+body = body.union(inlet_o)
+outlet_o = cq.Workplane("YZ").workplane(offset=OD/2.0).circle(PORT_D/2.0).extrude(STUB_L)
+body = body.union(outlet_o)
+result = body.cut(inlet_i)
+cavity = cq.Workplane("XY").workplane(offset=WALL).circle(OD/2.0-WALL).extrude(OD-2*WALL)
+result = result.cut(cavity)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_extension_spring(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", 12.0))
+    wire_d = float(params.get("wire_dia_mm", params.get("diameter_mm", 1.5)))
+    length = float(params.get("length_mm", 40.0))
+    return f"""
+import cadquery as cq
+result = cq.Workplane("XY").circle({od}/2.0).circle({od}/2.0-{wire_d}).extrude({length})
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_torsion_spring(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", 15.0))
+    wire_d = float(params.get("wire_dia_mm", params.get("diameter_mm", 1.5)))
+    length = float(params.get("length_mm", params.get("height_mm", 10.0)))
+    arm_l = float(params.get("arm_length_mm", od * 1.5))
+    return f"""
+import cadquery as cq
+OD={od}; WIRE_D={wire_d}; LENGTH={length}; ARM_L={arm_l}
+result = cq.Workplane("XY").circle(OD/2.0).circle(OD/2.0-WIRE_D).extrude(LENGTH)
+arm1 = cq.Workplane("XY").center(OD/2.0, 0).rect(ARM_L, WIRE_D).extrude(WIRE_D)
+result = result.union(arm1)
+arm2 = cq.Workplane("XY").workplane(offset=LENGTH-WIRE_D).center(0, -OD/2.0).rect(WIRE_D, ARM_L).extrude(WIRE_D)
+result = result.union(arm2)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_wave_spring(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", 30.0))
+    bore = float(params.get("bore_mm", 18.0))
+    thick = float(params.get("thickness_mm", params.get("height_mm", 2.0)))
+    return f"""
+import cadquery as cq
+result = cq.Workplane("XY").circle({od}/2.0).circle({bore}/2.0).extrude({thick})
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_pipe_cross(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", params.get("diameter_mm", 25.0)))
+    wall = float(params.get("wall_mm", 2.0))
+    length = float(params.get("length_mm", 60.0))
+    return f"""
+import cadquery as cq
+OD={od}; WALL={wall}; LENGTH={length}; ID=OD-2.0*WALL
+run_o = cq.Workplane("YZ").circle(OD/2.0).extrude(LENGTH)
+run_i = cq.Workplane("YZ").circle(ID/2.0).extrude(LENGTH)
+run = run_o.cut(run_i)
+br_up_o = cq.Workplane("XY").transformed(offset=(LENGTH/2.0,0,0)).circle(OD/2.0).extrude(LENGTH/2.0)
+br_up_i = cq.Workplane("XY").transformed(offset=(LENGTH/2.0,0,0)).circle(ID/2.0).extrude(LENGTH/2.0)
+br_dn_o = cq.Workplane("XY").transformed(offset=(LENGTH/2.0,0,0)).circle(OD/2.0).extrude(-LENGTH/2.0)
+br_dn_i = cq.Workplane("XY").transformed(offset=(LENGTH/2.0,0,0)).circle(ID/2.0).extrude(-LENGTH/2.0)
+result = run.union(br_up_o.cut(br_up_i)).union(br_dn_o.cut(br_dn_i))
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_orifice_plate(params: dict[str, Any]) -> str:
+    od = float(params.get("od_mm", 50.0))
+    bore = float(params.get("bore_mm", 15.0))
+    thick = float(params.get("thickness_mm", params.get("height_mm", 3.0)))
+    return f"""
+import cadquery as cq
+result = cq.Workplane("XY").circle({od}/2.0).circle({bore}/2.0).extrude({thick})
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_rivet(params: dict[str, Any]) -> str:
+    d = float(params.get("diameter_mm", params.get("od_mm", 4.0)))
+    length = float(params.get("length_mm", 10.0))
+    head_d = round(d * 1.8, 1)
+    head_h = round(d * 0.5, 1)
+    return f"""
+import cadquery as cq
+SHANK_D={d}; LENGTH={length}; HEAD_D={head_d}; HEAD_H={head_h}
+result = cq.Workplane("XY").circle(SHANK_D/2.0).extrude(LENGTH)
+head = cq.Workplane("XY").workplane(offset=LENGTH).circle(HEAD_D/2.0).extrude(HEAD_H)
+result = result.union(head)
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
 _CQ_TEMPLATE_MAP: dict[str, Any] = {
     # ARIA structural parts
     "aria_ratchet_ring": _cq_ratchet_ring,
@@ -3453,6 +4044,94 @@ _CQ_TEMPLATE_MAP: dict[str, Any] = {
     "strain_relief":                _cq_cable_gland,
     "cable_fitting":                _cq_cable_gland,
     "cord_grip":                    _cq_cable_gland,
+    # ── Tier 1 expansion (April 2026) — fasteners, drivetrain, pipe fittings ─
+    "hex_bolt":                     _cq_hex_bolt,
+    "hex_head_bolt":                _cq_hex_bolt,
+    "bolt":                         _cq_hex_bolt,
+    "hex_nut":                      _cq_hex_nut,
+    "nut":                          _cq_hex_nut,
+    "socket_cap_screw":             _cq_socket_cap_screw,
+    "cap_screw":                    _cq_socket_cap_screw,
+    "shcs":                         _cq_socket_cap_screw,
+    "socket_head_cap_screw":        _cq_socket_cap_screw,
+    "set_screw":                    _cq_set_screw,
+    "grub_screw":                   _cq_set_screw,
+    "timing_pulley":                _cq_timing_pulley,
+    "gt2_pulley":                   _cq_timing_pulley,
+    "htd_pulley":                   _cq_timing_pulley,
+    "belt_pulley":                  _cq_timing_pulley,
+    "sprocket":                     _cq_sprocket,
+    "chain_sprocket":               _cq_sprocket,
+    "rack":                         _cq_rack,
+    "rack_gear":                    _cq_rack,
+    "gear_rack":                    _cq_rack,
+    "linear_rack":                  _cq_rack,
+    "pipe_elbow":                   _cq_pipe_elbow,
+    "elbow":                        _cq_pipe_elbow,
+    "pipe_bend":                    _cq_pipe_elbow,
+    "pipe_tee":                     _cq_pipe_tee,
+    "tee":                          _cq_pipe_tee,
+    "tee_fitting":                  _cq_pipe_tee,
+    "pipe_reducer":                 _cq_pipe_reducer,
+    "reducer":                      _cq_pipe_reducer,
+    "concentric_reducer":           _cq_pipe_reducer,
+    # ── Tier 2 expansion ─────────────────────────────────────────────────────
+    "ring_gear":                    _cq_ring_gear,
+    "internal_gear":                _cq_ring_gear,
+    "annular_gear":                 _cq_ring_gear,
+    "gopro_mount":                  _cq_gopro_mount,
+    "gopro_mount_adapter":          _cq_gopro_mount,
+    "action_camera_mount":          _cq_gopro_mount,
+    "hex_standoff":                 _cq_hex_standoff,
+    "pcb_standoff":                 _cq_hex_standoff,
+    "t_nut":                        _cq_t_nut,
+    "tslot_nut":                    _cq_t_nut,
+    "t_slot_nut":                   _cq_t_nut,
+    "thrust_washer":                _cq_thrust_washer,
+    "thrust_bearing":               _cq_thrust_washer,
+    "retaining_ring":               _cq_retaining_ring,
+    "snap_ring":                    _cq_retaining_ring,
+    "e_clip":                       _cq_retaining_ring,
+    "linear_bushing":               _cq_linear_bushing,
+    "plain_bushing":                _cq_linear_bushing,
+    "sliding_bushing":              _cq_linear_bushing,
+    "bushing":                      _cq_linear_bushing,
+    "pipe_cap":                     _cq_pipe_cap,
+    "end_cap":                      _cq_pipe_cap,
+    "pipe_plug":                    _cq_pipe_cap,
+    "cross_dowel":                  _cq_cross_dowel,
+    "barrel_nut":                   _cq_cross_dowel,
+    "furniture_connector":          _cq_cross_dowel,
+    # ── Tier 3 expansion ─────────────────────────────────────────────────────
+    "bevel_gear":                   _cq_bevel_gear,
+    "straight_bevel_gear":          _cq_bevel_gear,
+    "miter_gear":                   _cq_bevel_gear,
+    "worm":                         _cq_worm,
+    "worm_shaft":                   _cq_worm,
+    "worm_gear":                    _cq_worm_gear,
+    "worm_wheel":                   _cq_worm_gear,
+    "timing_belt":                  _cq_timing_belt,
+    "gt2_belt":                     _cq_timing_belt,
+    "htd_belt":                     _cq_timing_belt,
+    "jaw_coupling":                 _cq_jaw_coupling_half,
+    "jaw_coupling_half":            _cq_jaw_coupling_half,
+    "spider_coupling":              _cq_jaw_coupling_half,
+    "valve_body":                   _cq_valve_body,
+    "globe_valve":                  _cq_valve_body,
+    "ball_valve":                   _cq_valve_body,
+    "extension_spring":             _cq_extension_spring,
+    "tension_spring":               _cq_extension_spring,
+    "torsion_spring":               _cq_torsion_spring,
+    "wave_spring":                  _cq_wave_spring,
+    "disc_spring":                  _cq_wave_spring,
+    "pipe_cross":                   _cq_pipe_cross,
+    "cross_fitting":                _cq_pipe_cross,
+    "four_way":                     _cq_pipe_cross,
+    "orifice_plate":                _cq_orifice_plate,
+    "flow_orifice":                 _cq_orifice_plate,
+    "rivet":                        _cq_rivet,
+    "blind_rivet":                  _cq_rivet,
+    "pop_rivet":                    _cq_rivet,
 }
 
 # Keyword scan for slug-based part_ids not in the exact map.
@@ -3518,6 +4197,38 @@ _KEYWORD_TO_TEMPLATE: list[tuple[list[str], Any]] = [
     (["pcb_enclosure", "pcb enclosure", "pcb_box", "pcb box", "electronics_enclosure", "electronics enclosure", "electronics_box", "electronics box"], _cq_pcb_enclosure),
     (["bearing_pillow_block", "pillow_block", "pillow block", "plummer_block", "plummer block", "bearing pillow block"], _cq_bearing_pillow_block),
     (["cable_gland", "cable gland", "strain_relief", "strain relief", "cable_fitting", "cable fitting", "cord_grip", "cord grip"], _cq_cable_gland),
+    # ── Expansion (April 2026) ───────────────────────────────────────────────
+    (["hex_bolt", "hex bolt", "hex head bolt"],                    _cq_hex_bolt),
+    (["hex_nut", "hex nut"],                                       _cq_hex_nut),
+    (["socket_cap_screw", "socket cap screw", "cap_screw", "cap screw", "shcs"], _cq_socket_cap_screw),
+    (["set_screw", "set screw", "grub_screw", "grub screw"],      _cq_set_screw),
+    (["timing_pulley", "timing pulley", "gt2_pulley", "gt2 pulley", "htd_pulley", "belt_pulley"], _cq_timing_pulley),
+    (["chain_sprocket", "chain sprocket"],                         _cq_sprocket),
+    (["rack_gear", "rack gear", "gear_rack", "gear rack", "linear_rack", "linear rack"], _cq_rack),
+    (["pipe_elbow", "pipe elbow", "pipe_bend", "pipe bend"],      _cq_pipe_elbow),
+    (["pipe_tee", "pipe tee", "tee_fitting", "tee fitting"],      _cq_pipe_tee),
+    (["pipe_reducer", "pipe reducer", "concentric_reducer"],       _cq_pipe_reducer),
+    (["ring_gear", "ring gear", "internal_gear", "internal gear", "annular_gear"], _cq_ring_gear),
+    (["gopro_mount", "gopro mount", "gopro", "action_camera_mount"], _cq_gopro_mount),
+    (["hex_standoff", "hex standoff", "pcb_standoff"],             _cq_hex_standoff),
+    (["t_nut", "t nut", "tslot_nut", "t-slot nut", "t slot nut"], _cq_t_nut),
+    (["thrust_washer", "thrust washer", "thrust_bearing"],         _cq_thrust_washer),
+    (["retaining_ring", "retaining ring", "snap_ring", "snap ring", "e_clip", "e-clip"], _cq_retaining_ring),
+    (["linear_bushing", "linear bushing", "plain_bushing", "sliding_bushing"], _cq_linear_bushing),
+    (["pipe_cap", "pipe cap", "end_cap", "end cap", "pipe_plug"], _cq_pipe_cap),
+    (["cross_dowel", "cross dowel", "barrel_nut", "barrel nut"],  _cq_cross_dowel),
+    (["bevel_gear", "bevel gear", "miter_gear", "miter gear"],    _cq_bevel_gear),
+    (["worm_shaft", "worm shaft"],                                 _cq_worm),
+    (["worm_gear", "worm gear", "worm_wheel", "worm wheel"],      _cq_worm_gear),
+    (["timing_belt", "timing belt", "gt2_belt", "htd_belt"],      _cq_timing_belt),
+    (["jaw_coupling", "jaw coupling", "spider_coupling"],          _cq_jaw_coupling_half),
+    (["valve_body", "valve body", "globe_valve", "ball_valve"],    _cq_valve_body),
+    (["extension_spring", "extension spring", "tension_spring"],   _cq_extension_spring),
+    (["torsion_spring", "torsion spring"],                         _cq_torsion_spring),
+    (["wave_spring", "wave spring", "disc_spring"],                _cq_wave_spring),
+    (["pipe_cross", "pipe cross", "cross_fitting", "four_way"],   _cq_pipe_cross),
+    (["orifice_plate", "orifice plate", "flow_orifice"],          _cq_orifice_plate),
+    (["rivet", "blind_rivet", "blind rivet", "pop_rivet"],        _cq_rivet),
 ]
 
 
@@ -4084,3 +4795,16 @@ result = cq.Workplane("XY").box(LENGTH_MM, WIDTH_MM, HEIGHT_MM)
 bb = result.val().BoundingBox()
 print(f"BBOX:{bb.xlen:.3f},{bb.ylen:.3f},{bb.zlen:.3f}")
 """
+
+
+def generate(plan: dict, step_path: str, stl_path: str, **kwargs) -> dict:
+    """Backward-compat alias for write_cadquery_artifacts."""
+    goal = plan.get("part_id", "")
+    result = write_cadquery_artifacts(plan, goal, step_path, stl_path, **kwargs)
+    # Old API returned "script" (source code); new API returns "script_path" (file path).
+    if "script" not in result and result.get("script_path"):
+        try:
+            result["script"] = Path(result["script_path"]).read_text(encoding="utf-8")
+        except Exception:
+            result["script"] = ""
+    return result

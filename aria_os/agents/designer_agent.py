@@ -152,12 +152,18 @@ class DesignerAgent(BaseAgent):
         response = self.run(prompt, state)
 
         if not response:
+            # LLM failed — try Zoo.dev text-to-CAD before giving up
+            if self.domain == "cad" and self._try_zoo(state):
+                return
             state.generation_error = "DesignerAgent returned empty response"
             return
 
         # Extract code from response (JSON-first, then markdown, then raw)
         code = _extract_code(response)
         if not code:
+            # LLM returned garbage — try Zoo.dev text-to-CAD before giving up
+            if self.domain == "cad" and self._try_zoo(state):
+                return
             state.generation_error = f"No code block found in DesignerAgent response"
             # Do NOT store raw response as state.code — it poisons the RefinerAgent
             # which tries to "fix" a non-code string as if it were Python
@@ -273,6 +279,43 @@ class DesignerAgent(BaseAgent):
 
         except Exception as exc:
             print(f"  [{self.name}] Template lookup failed: {exc}")
+            return False
+
+    def _try_zoo(self, state: DesignState) -> bool:
+        """Try Zoo.dev text-to-CAD API as fallback when LLMs fail.
+        Returns True if Zoo produced a STEP file successfully."""
+        try:
+            from ..zoo_bridge import is_zoo_available, generate_step_from_zoo
+            if not is_zoo_available(self.repo_root):
+                return False
+
+            print(f"  [{self.name}] LLMs unavailable — trying Zoo.dev text-to-CAD")
+            from ..exporter import get_output_paths
+            paths = get_output_paths(state.part_id or state.goal, self.repo_root)
+            step_dir = str(Path(paths["step_path"]).parent)
+
+            result = generate_step_from_zoo(state.goal, step_dir, repo_root=self.repo_root)
+            if result.get("status") != "ok":
+                print(f"  [{self.name}] Zoo.dev failed: {result.get('error', 'unknown')}")
+                return False
+
+            step_path = result["step_path"]
+            state.output_path = step_path
+            state.generation_error = ""
+            # Parse bbox from STEP if possible
+            try:
+                import trimesh
+                mesh = trimesh.load(step_path)
+                bb = mesh.bounding_box.extents
+                state.bbox = {"x": round(float(bb[0]), 2), "y": round(float(bb[1]), 2), "z": round(float(bb[2]), 2)}
+                print(f"  [{self.name}] Zoo.dev STEP: bbox {state.bbox}")
+            except Exception:
+                pass
+
+            print(f"  [{self.name}] Zoo.dev generated STEP successfully")
+            return True
+        except Exception as exc:
+            print(f"  [{self.name}] Zoo.dev fallback failed: {exc}")
             return False
 
     def _execute_cad(self, state: DesignState, code: str) -> None:

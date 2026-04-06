@@ -97,6 +97,21 @@ class CADRouter:
         elif part_id in _GH_PART_ID_ALIASES:
             backend = "grasshopper"
 
+        # 5. For novel parts with no template match, prefer Zoo.dev over LLM CadQuery
+        if backend == "cadquery" and part_id not in _GH_PART_ID_ALIASES:
+            try:
+                from .generators.cadquery_generator import _find_template_fn
+                has_template = _find_template_fn(part_id) is not None
+            except Exception:
+                has_template = False
+            if not has_template:
+                try:
+                    from .zoo_bridge import is_zoo_available
+                    if is_zoo_available(repo_root):
+                        backend = "zoo"
+                except Exception:
+                    pass
+
         rationale = _build_rationale(goal, part_id, backend, spec)
 
         result: dict[str, Any] = {
@@ -154,7 +169,12 @@ def _infer_part_id(goal: str, spec: dict) -> str:
 def _build_rationale(goal: str, part_id: str, backend: str, spec: dict) -> str:
     reasons: list[str] = []
 
-    if backend == "grasshopper":
+    if backend == "zoo":
+        reasons.append(
+            "No CadQuery template for this part → routing to Zoo.dev text-to-CAD API. "
+            "Zoo produces STEP directly from natural language, bypassing unreliable LLM code gen."
+        )
+    elif backend == "grasshopper":
         reasons.append(
             f"Part '{part_id}' is a Grasshopper part (complex surface geometry). "
             "Will fall back to CadQuery automatically if Rhino Compute is unavailable."
