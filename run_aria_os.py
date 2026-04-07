@@ -2,6 +2,7 @@
 """ARIA-OS CLI: python run_aria_os.py \"describe the part you want\"
   --list                List all generated parts with file sizes and validation status
   --validate            Re-validate all existing STEP outputs (size + re-import)
+  --verify [path]       Visual + geometric verify: DXF/ECAD/STL checks + PNG renders (all outputs/ if no path)
   --modify              Modify existing part: --modify <path_to_.py> \"modification description\"
   --assemble            Create assembly from JSON: --assemble assembly_configs/foo.json
   --assembly            Describe a multi-part assembly: --assembly \"baseplate with bracket bolted to it\"
@@ -868,6 +869,24 @@ def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "--validate":
         validate_all()
         return
+    if len(sys.argv) >= 2 and sys.argv[1] == "--verify":
+        # Visual + geometric verification of all outputs
+        from aria_os.output_verifier import verify_all, verify_dxf, verify_ecad, verify_stl, _print_result
+        if len(sys.argv) >= 3:
+            target = sys.argv[2]
+            goal = sys.argv[3] if len(sys.argv) > 3 else ""
+            p = Path(target)
+            if p.suffix.lower() == ".dxf":
+                r = verify_dxf(p); _print_result(f"DXF: {p.name}", r)
+            elif p.suffix.lower() == ".stl":
+                r = verify_stl(p, goal); _print_result(f"STL: {p.name}", r)
+            elif p.suffix.lower() == ".json":
+                r = verify_ecad(p); _print_result(f"ECAD: {p.name}", r)
+            else:
+                print(f"Unknown file type: {p.suffix}. Use .dxf, .stl, or _bom.json")
+        else:
+            verify_all()
+        return
     if len(sys.argv) >= 2 and sys.argv[1] == "--modify":
         if len(sys.argv) < 4:
             print("Usage: python run_aria_os.py --modify <path_to_.py> \"modification description\"")
@@ -1507,6 +1526,7 @@ def main():
         print("       python run_aria_os.py --system-dry-run \"design a 6-DOF robot arm, 1kg payload\"")
         print("       python run_aria_os.py --list")
         print("       python run_aria_os.py --validate")
+        print("       python run_aria_os.py --verify [path]  # visual checks + PNG renders")
         print("       python run_aria_os.py --modify <path_to_.py> \"modification\"")
         print("       python run_aria_os.py --assemble <config.json>")
         print('       python run_aria_os.py --assembly "baseplate assembly with bracket bolted to it"')
