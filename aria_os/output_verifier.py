@@ -187,6 +187,263 @@ def verify_dxf(dxf_path: str | Path, render_png: bool = True) -> dict:
     return {"passed": passed, "checks": checks, "warnings": warnings, "render_path": render_path}
 
 
+# ─── KICAD BOARD RENDERER ─────────────────────────────────────────────────────
+
+KICAD_CLI   = r"C:\Users\jonko\AppData\Local\Programs\KiCad\10.0\bin\kicad-cli.exe"
+KICAD_PY    = r"C:\Users\jonko\AppData\Local\Programs\KiCad\10.0\bin\python.exe"
+
+
+def _find_kicad_cli() -> str | None:
+    """Return kicad-cli path if it exists, else None."""
+    import os, glob
+    candidates = [
+        KICAD_CLI,
+        r"C:\Program Files\KiCad\10.0\bin\kicad-cli.exe",
+        r"C:\Program Files\KiCad\bin\kicad-cli.exe",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    # glob fallback
+    hits = glob.glob(r"C:\**\kicad-cli.exe", recursive=True)
+    return hits[0] if hits else None
+
+
+def _find_kicad_python() -> str | None:
+    """Return KiCad's bundled python.exe path if available."""
+    import os, glob
+    candidates = [KICAD_PY]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    hits = glob.glob(r"C:\Users\*\AppData\Local\Programs\KiCad\**\python.exe", recursive=True)
+    return hits[0] if hits else None
+
+
+def _bom_to_kicad_pcb(bom_path: Path) -> Path | None:
+    """
+    Generate a minimal .kicad_pcb from a BOM JSON using KiCad 10 S-expression format.
+    No pcbnew Python API required — writes the file as text, which kicad-cli can render.
+    Returns path to the written .kicad_pcb, or None on failure.
+    """
+    import uuid as _uuid
+
+    try:
+        with open(bom_path) as f:
+            bom = json.load(f)
+    except Exception:
+        return None
+
+    comps = bom.get("components", [])
+    board_meta = bom.get("board", {})
+    w = float(board_meta.get("width_mm", 100))
+    h = float(board_meta.get("height_mm", 80))
+    board_name = bom_path.stem.replace("_bom", "")
+
+    def uid():
+        return str(_uuid.uuid4())
+
+    # Build nets list
+    all_nets: list[str] = [""]  # net 0 = unconnected
+    for c in comps:
+        for n in c.get("nets", []):
+            if n and n not in all_nets:
+                all_nets.append(n)
+
+    net_lines = "\n".join(f'  (net {i} "{n}")' for i, n in enumerate(all_nets))
+
+    # Board outline as 4 gr_line segments + title text (KiCad 10 format)
+    outline_lines = "\n".join([
+        f'  (gr_line (start 0 0) (end {w:.3f} 0) (stroke (width 0.05) (type solid)) (layer "Edge.Cuts") (uuid "{uid()}"))',
+        f'  (gr_line (start {w:.3f} 0) (end {w:.3f} {h:.3f}) (stroke (width 0.05) (type solid)) (layer "Edge.Cuts") (uuid "{uid()}"))',
+        f'  (gr_line (start {w:.3f} {h:.3f}) (end 0 {h:.3f}) (stroke (width 0.05) (type solid)) (layer "Edge.Cuts") (uuid "{uid()}"))',
+        f'  (gr_line (start 0 {h:.3f}) (end 0 0) (stroke (width 0.05) (type solid)) (layer "Edge.Cuts") (uuid "{uid()}"))',
+        f'  (gr_text "{board_name}"',
+        f'    (at {w/2:.1f} {h+3.5:.1f})',
+        f'    (layer "F.SilkS")',
+        f'    (uuid "{uid()}")',
+        f'    (effects (font (size 1.5 1.5) (thickness 0.15)))',
+        f'  )',
+    ])
+
+    # Footprints — simple rectangles representing component body + silkscreen ref
+    fp_parts = []
+    for c in comps:
+        ref = c.get("ref", "?")
+        val = c.get("value", "").replace('"', "'")
+        x = float(c.get("x_mm", 0))
+        y = float(c.get("y_mm", 0))
+        cw = max(float(c.get("width_mm", 2)), 1.0)
+        ch = max(float(c.get("height_mm", 2)), 1.0)
+        cx, cy = x + cw / 2, y + ch / 2  # component center
+        hw, hh = cw / 2, ch / 2
+
+        fp_parts.append(f"""  (footprint "{val}"
+    (layer "F.Cu")
+    (uuid "{uid()}")
+    (at {cx:.3f} {cy:.3f})
+    (property "Reference" "{ref}"
+      (at 0 {-(hh + 1.2):.2f} 0)
+      (layer "F.SilkS")
+      (uuid "{uid()}")
+      (effects (font (size 0.8 0.8) (thickness 0.12)))
+    )
+    (property "Value" "{val}"
+      (at 0 {(hh + 1.2):.2f} 0)
+      (layer "F.Fab")
+      (uuid "{uid()}")
+      (effects (font (size 0.6 0.6) (thickness 0.1)))
+    )
+    (fp_line (start {-hw:.3f} {-hh:.3f}) (end {hw:.3f} {-hh:.3f})
+      (stroke (width 0.1) (type solid)) (layer "F.Cu") (uuid "{uid()}"))
+    (fp_line (start {hw:.3f} {-hh:.3f}) (end {hw:.3f} {hh:.3f})
+      (stroke (width 0.1) (type solid)) (layer "F.Cu") (uuid "{uid()}"))
+    (fp_line (start {hw:.3f} {hh:.3f}) (end {-hw:.3f} {hh:.3f})
+      (stroke (width 0.1) (type solid)) (layer "F.Cu") (uuid "{uid()}"))
+    (fp_line (start {-hw:.3f} {hh:.3f}) (end {-hw:.3f} {-hh:.3f})
+      (stroke (width 0.1) (type solid)) (layer "F.Cu") (uuid "{uid()}"))
+    (fp_line (start {-(hw+0.1):.3f} {-(hh+0.1):.3f}) (end {(hw+0.1):.3f} {-(hh+0.1):.3f})
+      (stroke (width 0.05) (type solid)) (layer "F.CrtYd") (uuid "{uid()}"))
+    (fp_line (start {(hw+0.1):.3f} {-(hh+0.1):.3f}) (end {(hw+0.1):.3f} {(hh+0.1):.3f})
+      (stroke (width 0.05) (type solid)) (layer "F.CrtYd") (uuid "{uid()}"))
+    (fp_line (start {(hw+0.1):.3f} {(hh+0.1):.3f}) (end {-(hw+0.1):.3f} {(hh+0.1):.3f})
+      (stroke (width 0.05) (type solid)) (layer "F.CrtYd") (uuid "{uid()}"))
+    (fp_line (start {-(hw+0.1):.3f} {(hh+0.1):.3f}) (end {-(hw+0.1):.3f} {-(hh+0.1):.3f})
+      (stroke (width 0.05) (type solid)) (layer "F.CrtYd") (uuid "{uid()}"))
+  )""")
+
+    fp_lines = "\n".join(fp_parts)
+
+    kicad_pcb_content = f"""(kicad_pcb
+  (version 20241229)
+  (generator "pcbnew")
+  (generator_version "10.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (2 "B.Cu" signal)
+    (5 "F.SilkS" user)
+    (7 "B.SilkS" user)
+    (25 "Edge.Cuts" user)
+    (31 "F.CrtYd" user "F.Courtyard")
+    (29 "B.CrtYd" user "B.Courtyard")
+    (35 "F.Fab" user)
+    (33 "B.Fab" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+    (allow_soldermask_bridges_in_footprints no)
+  )
+{net_lines}
+{outline_lines}
+{fp_lines}
+)
+"""
+    kicad_pcb_path = bom_path.parent / f"{board_name}.kicad_pcb"
+    kicad_pcb_path.write_text(kicad_pcb_content, encoding="utf-8")
+    return kicad_pcb_path
+
+
+def render_kicad_board(pcbnew_script: str | Path, out_png: str | Path,
+                       bom_path: str | Path | None = None) -> bool:
+    """
+    Render a KiCad board to PNG via kicad-cli.
+
+    Pipeline:
+      1. Generate a .kicad_pcb from the BOM JSON (S-expression format, no pcbnew API).
+      2. Use kicad-cli to export that .kicad_pcb as SVG.
+      3. Convert SVG to PNG via cairosvg, Inkscape, or matplotlib placeholder.
+
+    Returns True on success, False on failure (caller should use fallback).
+    """
+    import subprocess
+
+    out_path = Path(out_png).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    kicad_cli = _find_kicad_cli()
+    if not kicad_cli:
+        print("[render_kicad] kicad-cli not found")
+        return False
+
+    # ── Step 1: Generate .kicad_pcb from BOM (no pcbnew API needed) ──────────
+    # Find the BOM JSON — look next to the pcbnew script
+    script_path = Path(pcbnew_script).resolve()
+    bom = bom_path or next(script_path.parent.glob("*_bom.json"), None)
+    if bom is None:
+        print("[render_kicad] no BOM JSON found next to pcbnew script")
+        return False
+
+    kicad_pcb = _bom_to_kicad_pcb(Path(bom))
+    if kicad_pcb is None or not kicad_pcb.exists():
+        print("[render_kicad] .kicad_pcb generation failed")
+        return False
+    print(f"[render_kicad] .kicad_pcb written: {kicad_pcb}")
+
+    # ── Step 2: kicad-cli export SVG ──────────────────────────────────────────
+    svg_path = out_path.with_suffix(".svg")
+    layers = "F.Cu,B.Cu,F.SilkS,Edge.Cuts,F.Courtyard"
+    try:
+        r = subprocess.run(
+            [kicad_cli, "pcb", "export", "svg",
+             str(kicad_pcb),
+             "--output", str(svg_path),
+             "--layers", layers],
+            capture_output=True, text=True, timeout=60
+        )
+        if not svg_path.exists():
+            print(f"[render_kicad] SVG export failed: {r.stderr[:300]}")
+            return False
+        print(f"[render_kicad] SVG exported: {svg_path}")
+    except Exception as e:
+        print(f"[render_kicad] kicad-cli error: {e}")
+        return False
+
+    # ── Step 3: SVG → PNG ─────────────────────────────────────────────────────
+    try:
+        import cairosvg
+        cairosvg.svg2png(url=str(svg_path), write_to=str(out_path), scale=2.0)
+        print(f"[render_kicad] PNG (cairosvg): {out_path}")
+        return True
+    except Exception:
+        pass  # cairosvg not installed or Cairo DLL missing (common on Windows)
+
+    try:
+        import subprocess as _sp
+        r2 = _sp.run(["inkscape", "--export-type=png",
+                       f"--export-filename={out_path}", str(svg_path)],
+                     capture_output=True, timeout=30)
+        if r2.returncode == 0 and out_path.exists():
+            print(f"[render_kicad] PNG (inkscape): {out_path}")
+            return True
+    except Exception:
+        pass
+
+    # Last resort: matplotlib placeholder noting SVG exists
+    try:
+        fig, ax = plt.subplots(figsize=(12, 9))
+        ax.set_facecolor("#1a1a2e")
+        fig.patch.set_facecolor("#1a1a2e")
+        ax.text(0.5, 0.5,
+                f"Board: {kicad_pcb.stem}\nSVG rendered by kicad-cli\n"
+                f"(install cairosvg or Inkscape for PNG conversion)",
+                ha='center', va='center', color='white', fontsize=12,
+                transform=ax.transAxes)
+        ax.axis('off')
+        fig.savefig(str(out_path), dpi=150, bbox_inches='tight',
+                    facecolor=fig.get_facecolor())
+        plt.close(fig)
+        print(f"[render_kicad] PNG placeholder (SVG at {svg_path.name}): {out_path}")
+        return True
+    except Exception as e:
+        print(f"[render_kicad] PNG fallback failed: {e}")
+        return False
+
+
 # ─── ECAD CHECKS ──────────────────────────────────────────────────────────────
 
 def verify_ecad(bom_path: str | Path, render_png: bool = True) -> dict:
@@ -280,83 +537,79 @@ def verify_ecad(bom_path: str | Path, render_png: bool = True) -> dict:
     _check("gnd_net_present", has_gnd, f"nets: {sorted(all_nets)[:10]}")
     _check("power_net_present", has_pwr, f"power nets found: {[n for n in all_nets if any(p in n for p in ['3V3','5V','VIN','12V','VCC'])]}")
 
-    # ── PNG board layout render ────────────────────────────────────────────────
+    # ── PNG board layout render: try KiCad first, fall back to matplotlib ────────
     if render_png and comps:
-        try:
-            OUT_DIR.mkdir(parents=True, exist_ok=True)
-            png_path = OUT_DIR / f"verify_ecad_{path.parent.name[:40]}.png"
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        png_path = OUT_DIR / f"verify_ecad_{path.parent.name[:40]}.png"
 
-            fig, ax = plt.subplots(figsize=(12, 9))
-            ax.set_facecolor("#0d1117")
-            fig.patch.set_facecolor("#0d1117")
+        # Try kicad-cli pipeline (pcbnew script -> .kicad_pcb -> SVG -> PNG)
+        kicad_used = False
+        pcbnew_scripts = list(path.parent.glob("*_pcbnew.py"))
+        if pcbnew_scripts:
+            try:
+                kicad_used = render_kicad_board(pcbnew_scripts[0], png_path, bom_path=path)
+                if kicad_used:
+                    render_path = str(png_path)
+                    print(f"[verify] ECAD render (KiCad): {png_path}")
+            except Exception as e:
+                warnings.append(f"KiCad render failed: {e}, using matplotlib fallback")
 
-            # Board outline
-            board_rect = mpatches.Rectangle((0, 0), board_w, board_h,
-                                            linewidth=2, edgecolor="#00ff88",
-                                            facecolor="none", linestyle="--")
-            ax.add_patch(board_rect)
+        # Fallback: matplotlib BOM placement view
+        if not kicad_used:
+            try:
+                fig, ax = plt.subplots(figsize=(12, 9))
+                ax.set_facecolor("#0d1117")
+                fig.patch.set_facecolor("#0d1117")
 
-            # Color map by component type
-            type_colors = {
-                "U": "#4f9de0",   # ICs — blue
-                "J": "#e0a94f",   # Connectors — orange
-                "C": "#a0d060",   # Caps — green
-                "R": "#d06060",   # Resistors — red
-                "D": "#c060c0",   # Diodes/LEDs — purple
-                "L": "#60c0c0",   # Inductors — teal
-                "ANT": "#e0e060", # Antenna — yellow
-            }
+                board_rect = mpatches.Rectangle((0, 0), board_w, board_h,
+                                                linewidth=2, edgecolor="#00ff88",
+                                                facecolor="none", linestyle="--")
+                ax.add_patch(board_rect)
 
-            for c in comps:
-                x, y = float(c.get("x_mm", 0)), float(c.get("y_mm", 0))
-                cw, ch = float(c.get("width_mm", 2)), float(c.get("height_mm", 2))
-                ref = c.get("ref", "?")
-                val = c.get("value", "")
-                prefix = ref[0] if ref else "?"
-                color = type_colors.get(prefix, "#888888")
+                type_colors = {
+                    "U": "#4f9de0", "J": "#e0a94f", "C": "#a0d060",
+                    "R": "#d06060", "D": "#c060c0", "L": "#60c0c0",
+                    "ANT": "#e0e060",
+                }
 
-                rect = mpatches.FancyBboxPatch(
-                    (x, y), cw, ch,
-                    boxstyle="round,pad=0.3",
-                    linewidth=1, edgecolor=color,
-                    facecolor=color + "44",  # semi-transparent fill
-                )
-                ax.add_patch(rect)
-                # Ref label
-                ax.text(x + cw / 2, y + ch / 2, ref,
-                        ha="center", va="center",
-                        fontsize=6, color="white", fontweight="bold")
-                # Value below
-                ax.text(x + cw / 2, y - 1.5, val[:12],
-                        ha="center", va="top",
-                        fontsize=4.5, color="#aaaaaa")
+                for c in comps:
+                    x, y = float(c.get("x_mm", 0)), float(c.get("y_mm", 0))
+                    cw, ch = float(c.get("width_mm", 2)), float(c.get("height_mm", 2))
+                    ref = c.get("ref", "?")
+                    val = c.get("value", "")
+                    color = type_colors.get(ref[0] if ref else "?", "#888888")
+                    rect = mpatches.FancyBboxPatch((x, y), cw, ch,
+                        boxstyle="round,pad=0.3", linewidth=1,
+                        edgecolor=color, facecolor=color + "44")
+                    ax.add_patch(rect)
+                    ax.text(x + cw/2, y + ch/2, ref, ha="center", va="center",
+                            fontsize=6, color="white", fontweight="bold")
+                    ax.text(x + cw/2, y - 1.5, val[:12], ha="center", va="top",
+                            fontsize=4.5, color="#aaaaaa")
 
-            ax.set_xlim(-5, board_w + 5)
-            ax.set_ylim(-8, board_h + 5)
-            ax.set_aspect("equal")
-            ax.set_xlabel("X (mm)", color="white")
-            ax.set_ylabel("Y (mm)", color="white")
-            ax.tick_params(colors="white")
-            for spine in ax.spines.values():
-                spine.set_edgecolor("#444")
-
-            # Legend
-            legend_items = [mpatches.Patch(color=v, label=k)
-                            for k, v in type_colors.items()]
-            ax.legend(handles=legend_items, loc="upper right",
-                      fontsize=7, facecolor="#1a1a2e", labelcolor="white")
-
-            ax.set_title(f"ECAD Layout: {path.parent.name[:50]}\n"
-                         f"{len(comps)} components  |  {board_w}×{board_h}mm board",
-                         color="white", fontsize=9)
-
-            fig.savefig(str(png_path), dpi=150, bbox_inches="tight",
-                        facecolor=fig.get_facecolor())
-            plt.close(fig)
-            render_path = str(png_path)
-            print(f"[verify] ECAD render: {png_path}")
-        except Exception as e:
-            warnings.append(f"PNG render failed: {e}")
+                ax.set_xlim(-5, board_w + 5)
+                ax.set_ylim(-8, board_h + 5)
+                ax.set_aspect("equal")
+                ax.set_xlabel("X (mm)", color="white")
+                ax.set_ylabel("Y (mm)", color="white")
+                ax.tick_params(colors="white")
+                for spine in ax.spines.values():
+                    spine.set_edgecolor("#444")
+                legend_items = [mpatches.Patch(color=v, label=k)
+                                for k, v in type_colors.items()]
+                ax.legend(handles=legend_items, loc="upper right",
+                          fontsize=7, facecolor="#1a1a2e", labelcolor="white")
+                ax.set_title(
+                    f"ECAD Layout (fallback): {path.parent.name[:50]}\n"
+                    f"{len(comps)} components  |  {board_w}x{board_h}mm board",
+                    color="white", fontsize=9)
+                fig.savefig(str(png_path), dpi=150, bbox_inches="tight",
+                            facecolor=fig.get_facecolor())
+                plt.close(fig)
+                render_path = str(png_path)
+                print(f"[verify] ECAD render (matplotlib fallback): {png_path}")
+            except Exception as e:
+                warnings.append(f"PNG render failed: {e}")
 
     passed = all(c["passed"] for c in checks)
     return {"passed": passed, "checks": checks, "warnings": warnings, "render_path": render_path}
