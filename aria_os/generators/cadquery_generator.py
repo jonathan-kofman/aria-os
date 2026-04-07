@@ -342,12 +342,13 @@ for i in range(N_RAMP_SEGS):
         pass  # skip failed ramp segment
 
 # --- Radial set screw hole (M{{SET_SCREW_D:.0f}}) at mid-height ---
+# XZ workplane: center(x, z) → place at X=0 (radial axis), Z=H/2 (mid-height)
 set_screw = (
     cq.Workplane("XZ")
     .workplane(offset=0)
-    .center(HEIGHT_MM / 2.0, 0)
+    .center(0, HEIGHT_MM / 2.0)
     .circle(SET_SCREW_D / 2.0)
-    .extrude(OD_MM)
+    .extrude(OD_MM / 2.0 + 2.0, both=True)
 )
 result = result.cut(set_screw)
 
@@ -959,6 +960,12 @@ try:
     result = result.cut(lanyard)
 except Exception:
     pass
+
+# ── Keep largest solid only (guards against floating retention clip fragments) ──
+solids = result.solids().vals()
+if len(solids) > 1:
+    largest = max(solids, key=lambda s: s.Volume())
+    result = cq.Workplane("XY").newObject([largest])
 
 bb = result.val().BoundingBox()
 print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
