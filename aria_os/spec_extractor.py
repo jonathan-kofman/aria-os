@@ -336,7 +336,9 @@ def extract_spec(description: str) -> dict[str, Any]:
             m = re.search(pat, text, re.I)
             if m:
                 try:
-                    return float(m.group(1))
+                    val = float(m.group(1))
+                    if val > 0:
+                        return val
                 except (TypeError, ValueError):
                     pass
         return None

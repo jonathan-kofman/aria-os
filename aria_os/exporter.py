@@ -32,10 +32,28 @@ def export(geometry, goal_or_part_id: str, repo_root: Optional[Path] = None) -> 
     stl_path = stl_dir / (name + ".stl")
 
     solid = geometry.val() if hasattr(geometry, "val") else geometry
-    solid.exportStep(str(step_path))
-    solid.exportStl(str(stl_path))
 
-    return {"step_path": str(step_path), "stl_path": str(stl_path)}
+    errors = []
+    try:
+        solid.exportStep(str(step_path))
+    except Exception as e:
+        errors.append(f"STEP export failed: {e}")
+        print(f"[EXPORT ERROR] STEP: {e}")
+
+    try:
+        solid.exportStl(str(stl_path))
+    except Exception as e:
+        errors.append(f"STL export failed: {e}")
+        print(f"[EXPORT ERROR] STL: {e}")
+
+    result: dict[str, str] = {}
+    if step_path.exists():
+        result["step_path"] = str(step_path)
+    if stl_path.exists():
+        result["stl_path"] = str(stl_path)
+    if errors:
+        result["errors"] = "; ".join(errors)
+    return result
 
 
 def get_meta_path(goal_or_part_id: str, repo_root: Optional[Path] = None) -> str:

@@ -112,8 +112,12 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
         try:
             from .agents.base_agent import is_ollama_available
             _use_agents = is_ollama_available()
-        except Exception:
+            if not _use_agents:
+                print("[INFO] Ollama not running — using template/LLM planning mode.")
+                print("       Start Ollama for faster agentic generation: ollama serve")
+        except Exception as _oa_exc:
             _use_agents = False
+            print(f"[WARN] Ollama check failed ({_oa_exc}) — using template/LLM planning mode.")
 
     if _use_agents:
         try:
@@ -140,12 +144,17 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
             session["bbox"] = _agent_state.bbox
             session["goal"] = goal
 
-            step_path = Path(_agent_state.artifacts.get("step_path", ""))
-            stl_path = Path(_agent_state.artifacts.get("stl_path", ""))
-            if step_path.exists():
-                session["step_path"] = str(step_path)
-            if stl_path.exists():
-                session["stl_path"] = str(stl_path)
+            _raw_step = _agent_state.artifacts.get("step_path", "")
+            _raw_stl  = _agent_state.artifacts.get("stl_path", "")
+            # Guard: only use the path if it's a non-empty string pointing to a real file
+            _step_file = Path(_raw_step) if _raw_step else None
+            _stl_file  = Path(_raw_stl)  if _raw_stl  else None
+            step_path = _step_file if (_step_file and _step_file.is_file()) else Path("__no_step__")
+            stl_path  = _stl_file  if (_stl_file  and _stl_file.is_file())  else Path("__no_stl__")
+            if _step_file and _step_file.is_file():
+                session["step_path"] = str(_step_file)
+            if _stl_file and _stl_file.is_file():
+                session["stl_path"] = str(_stl_file)
             if _agent_state.artifacts.get("script_path"):
                 session["script_path"] = _agent_state.artifacts["script_path"]
 
@@ -173,8 +182,8 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
             ], session)
 
             # ── CHECKPOINT: GENERATE ─────────────────────────────────────────
-            _step_exists = step_path.exists()
-            _stl_exists = stl_path.exists()
+            _step_exists = step_path.is_file()
+            _stl_exists  = stl_path.is_file()
             _checkpoint("GENERATE", [
                 ("output_exists",   _step_exists or _stl_exists,
                  "no geometry produced" if not (_step_exists or _stl_exists) else "STEP/STL generated"),
@@ -182,6 +191,14 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                  f"converged iter {_agent_state.iteration}" if _agent_state.converged
                  else f"stalled after {_agent_state.iteration} iterations with {len(_agent_state.failures)} failures"),
             ], session)
+
+            # ── AUTO-FALLBACK: if agent produced no geometry, use template path ─
+            if not (_step_exists or _stl_exists):
+                _fail_reason = "; ".join(_agent_state.failures[:2]) if _agent_state.failures else "stalled"
+                print(f"[AGENT] No geometry produced ({_fail_reason})")
+                print(f"[AGENT→TEMPLATE] Falling back to direct template generation...")
+                _use_agents = False
+                # Fall through to legacy path below — it will re-use part_id + _spec set above
 
             # ── CHECKPOINT: GEOMETRY (if STEP exists) ────────────────────────
             if _step_exists:
@@ -313,31 +330,65 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                     except Exception as _ce:
                         print(f'  [CAM] skipped: {_ce}')
 
-            # ── Final summary ────────────────────────────────────────────────
-            _all_cp = session.get('checkpoints', {})
-            _all_checks_n = sum(len(cp.get('checks', [])) for cp in _all_cp.values())
-            _all_checks_ok = sum(
-                sum(1 for c in cp.get('checks', []) if c.get('passed'))
-                for cp in _all_cp.values()
-            )
-            print()
-            print('=' * 64)
-            print('  PIPELINE VALIDATION SUMMARY')
-            print('=' * 64)
-            for stg, cp in _all_cp.items():
-                tag = '[OK]  ' if cp['passed'] else '[FAIL]'
-                n_ok = sum(1 for c in cp.get('checks', []) if c['passed'])
-                n_t = len(cp.get('checks', []))
-                print(f'  {tag} {stg:12s}  {n_ok}/{n_t} checks')
-                for f in cp.get('failures', []):
-                    print(f'         -> {f}')
-            print('-' * 64)
-            print(f'  Total: {_all_checks_ok}/{_all_checks_n} checks passed across {len(_all_cp)} stages')
-            print('=' * 64)
+            # ── Final summary (only when agent actually produced geometry) ─────
+            # If _use_agents was reset to False above (no geometry), skip this
+            # summary and fall through to the legacy template path instead.
+            if not _use_agents:
+                # Clear partial checkpoints so legacy path starts clean
+                session.pop("checkpoints", None)
+            else:
+                _all_cp = session.get('checkpoints', {})
+                _all_checks_n  = sum(len(cp.get('checks', [])) for cp in _all_cp.values())
+                _all_checks_ok = sum(
+                    sum(1 for c in cp.get('checks', []) if c.get('passed'))
+                    for cp in _all_cp.values()
+                )
+                _s_step = str(step_path) if step_path.is_file() else session.get('step_path', '')
+                _s_stl  = str(stl_path)  if stl_path.is_file()  else session.get('stl_path', '')
+                _pipeline_ok  = bool(
+                    (_s_step and Path(_s_step).is_file()) or (_s_stl and Path(_s_stl).is_file())
+                ) and not session.get('cem_blocked')
+                print()
+                print('=' * 64)
+                print(f"  PIPELINE SUMMARY  --  {'PASS' if _pipeline_ok else 'FAIL'}")
+                print('=' * 64)
+                for stg, cp in _all_cp.items():
+                    tag = '[OK]  ' if cp['passed'] else '[FAIL]'
+                    n_ok = sum(1 for c in cp.get('checks', []) if c['passed'])
+                    n_t  = len(cp.get('checks', []))
+                    print(f'  {tag} {stg:12s}  {n_ok}/{n_t} checks')
+                    for f in cp.get('failures', []):
+                        print(f'         -> {f}')
+                print('-' * 64)
+                print(f'  {_all_checks_ok}/{_all_checks_n} checks passed  |  {len(_all_cp)} stages')
+                print('=' * 64)
+                if (_s_step and Path(_s_step).is_file()) or (_s_stl and Path(_s_stl).is_file()):
+                    print()
+                    print('OUTPUT FILES')
+                    print('-' * 64)
+                    if _s_step and Path(_s_step).is_file():
+                        print(f'  STEP:   {_s_step}  ({Path(_s_step).stat().st_size // 1024} KB)')
+                    if _s_stl and Path(_s_stl).is_file():
+                        print(f'  STL:    {_s_stl}  ({Path(_s_stl).stat().st_size // 1024} KB)')
+                    print()
+                    print('NEXT STEPS')
+                    print('-' * 64)
+                    _vt = _s_step or _s_stl
+                    print(f'  View:     python run_aria_os.py --view "{_vt}"')
+                    if _s_stl:
+                        print(f'  Verify:   python run_aria_os.py --verify "{_s_stl}"')
+                    if _s_step:
+                        print(f'  Analyze:  python run_aria_os.py --analyze-part "{_s_step}"')
+                    print(f'  List all: python run_aria_os.py --list')
+                    print('=' * 64)
+                else:
+                    print()
+                    print('[!] No geometry produced — check errors above.')
+                    print('=' * 64)
 
-            event_bus.emit('complete', f'Agent pipeline done', {'session': session})
-            logger_log(session)
-            return session
+                event_bus.emit('complete', f'Agent pipeline done', {'session': session})
+                logger_log(session)
+                return session
 
         except Exception as _agent_exc:
             print(f"[AGENT] Failed: {_agent_exc}")
@@ -491,6 +542,7 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
             _use_agents = is_ollama_available()
         except Exception:
             _use_agents = False
+    # (Ollama status already printed above during first check)
 
     # --- Generate artifacts (legacy path — only when agents NOT used) ---
     artifacts: dict[str, str] = {}
@@ -618,6 +670,7 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
         if not _zoo_used:
             try:
                 from .cadquery_generator import write_cadquery_artifacts
+                print(f"[CADQUERY] Generating '{part_id}'...")
 
                 # Build a generate_fn compatible with run_validation_loop protocol:
                 #   generate_fn(plan, step_path, stl_path, repo_root, previous_failures=None) -> dict
@@ -1123,9 +1176,19 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
         sum(1 for c in cp.get("checks", []) if c.get("passed"))
         for cp in _all_cp.values()
     )
+
+    # Determine overall outcome
+    _s_step = str(step_path) if step_path.exists() else session.get("step_path", "")
+    _s_stl  = str(stl_path)  if stl_path.exists()  else session.get("stl_path",  "")
+    _has_geometry = bool(
+        (_s_step and Path(_s_step).exists()) or
+        (_s_stl  and Path(_s_stl).exists())
+    )
+    _pipeline_ok = _has_geometry and not session.get("cem_blocked")
+
     print()
     print(f"{'=' * 64}")
-    print(f"  PIPELINE VALIDATION SUMMARY")
+    print(f"  PIPELINE SUMMARY  --  {'PASS' if _pipeline_ok else 'FAIL'}")
     print(f"{'=' * 64}")
     for stg, cp in _all_cp.items():
         tag = "[OK]  " if cp["passed"] else "[FAIL]"
@@ -1135,8 +1198,47 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
         for f in cp.get("failures", []):
             print(f"         -> {f}")
     print(f"{'-' * 64}")
-    print(f"  Total: {_all_checks_ok}/{_all_checks_n} checks passed across {_stages_total} stages")
+    print(f"  {_all_checks_ok}/{_all_checks_n} checks passed  |  {_stages_passed}/{_stages_total} stages OK")
     print(f"{'=' * 64}")
+
+    # ── OUTPUT FILE PATHS ─────────────────────────────────────────────────
+    if _has_geometry:
+        print()
+        print("OUTPUT FILES")
+        print("-" * 64)
+        if _s_step and Path(_s_step).exists():
+            _sz_kb = Path(_s_step).stat().st_size / 1024
+            print(f"  STEP:   {_s_step}  ({_sz_kb:.0f} KB)")
+        if _s_stl and Path(_s_stl).exists():
+            _sz_kb = Path(_s_stl).stat().st_size / 1024
+            print(f"  STL:    {_s_stl}  ({_sz_kb:.0f} KB)")
+        if session.get("script_path"):
+            print(f"  Script: {session['script_path']}")
+        _view_target = _s_step or _s_stl
+        print()
+        print("NEXT STEPS")
+        print("-" * 64)
+        print(f"  View:     python run_aria_os.py --view \"{_view_target}\"")
+        if _s_stl:
+            print(f"  Verify:   python run_aria_os.py --verify \"{_s_stl}\"")
+        if _s_step:
+            print(f"  Analyze:  python run_aria_os.py --analyze-part \"{_s_step}\"")
+            print(f"  Quote:    python run_aria_os.py --quote")
+        print(f"  List all: python run_aria_os.py --list")
+        print(f"{'=' * 64}")
+    else:
+        print()
+        print("[!] No geometry produced.")
+        _cq_err = session.get("cq_error", "")
+        if _cq_err:
+            print(f"    Error: {str(_cq_err)[:200]}")
+        if session.get("cem_blocked"):
+            print("    CEM physics check blocked export — part failed safety thresholds.")
+            print("    Increase dimensions or material spec to meet safety factor requirements.")
+        else:
+            print("    Try rephrasing your goal with explicit dimensions, e.g.:")
+            print("      python run_aria_os.py \"bracket 80x40x5mm with 4 M6 holes\"")
+        print(f"{'=' * 64}")
 
     # --- Derive real learning-log values from actual run results ---
     _bbox = session.get("bbox") or {}

@@ -1651,7 +1651,15 @@ def main():
         else:
             print(f"[PHYSICS] {_result['analysis_type']}  {'PASS' if _result['passed'] else 'FAIL'}")
 
-    print("Done.")
+    # Exit code 1 if no geometry was produced (orchestrator already printed the reason)
+    if isinstance(session, dict):
+        _exit_step = session.get("step_path", "")
+        _exit_stl  = session.get("stl_path", "")
+        if not (
+            (_exit_step and Path(_exit_step).exists()) or
+            (_exit_stl  and Path(_exit_stl).exists())
+        ):
+            sys.exit(1)
 
 
 if __name__ == "__main__":

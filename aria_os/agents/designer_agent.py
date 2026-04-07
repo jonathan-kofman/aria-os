@@ -258,8 +258,10 @@ class DesignerAgent(BaseAgent):
                     print(f"  [{self.name}] Fuzzy match → storing '{ref_name}' as LLM reference")
                 return False
 
+            # Sanitize spec: remove None values so template defaults kick in
+            _safe_spec = {k: v for k, v in state.spec.items() if v is not None}
             # Generate code using the template with agent-extracted params
-            code = template_fn(state.spec)
+            code = template_fn(_safe_spec)
             if not code or len(code) < 50:
                 return False
 

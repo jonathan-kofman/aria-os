@@ -154,7 +154,10 @@ def _extract_dim_mm(goal_lower: str, labels: list[str], default: float) -> float
             m = re.search(rf"(\d+(?:\.\d+)?)\s*mm[^\d]*{re.escape(label)}", goal_lower)
         if m:
             try:
-                return float(m.group(1))
+                val = float(m.group(1))
+                if val > 0:
+                    return val
+                # Zero/negative dimension — ignore and fall through to default
             except ValueError:
                 continue
     return float(default)
