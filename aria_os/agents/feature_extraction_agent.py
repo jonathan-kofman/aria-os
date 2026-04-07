@@ -32,10 +32,8 @@ class FeatureExtractionAgent:
 
         # Sample surface points for RANSAC — raw vertices are too sparse
         # on simple meshes (a box has only 8 vertices but 12 face triangles).
-        # Seed RNG for deterministic results across runs.
         n_samples = max(2000, len(mesh.vertices) * 10)
-        np.random.seed(42)
-        points, face_indices = trimesh.sample.sample_surface(mesh, n_samples)
+        points, face_indices = trimesh.sample.sample_surface(mesh, n_samples, seed=42)
         points = np.asarray(points, dtype=np.float64)
         total_area = cleaned_mesh.surface_area_mm2
 
@@ -65,9 +63,10 @@ class FeatureExtractionAgent:
             if hasattr(p, "_inlier_indices_raw"):
                 del p._inlier_indices_raw
 
-        # Compute coverage
-        explained_area = sum(p.surface_area_mm2 for p in primitives)
-        coverage = min(explained_area / max(total_area, 1e-9), 1.0)
+        # Coverage = fraction of sampled points explained by detected primitives.
+        # Each point is removed from remaining_indices when claimed, so no double-counting.
+        n_explained = len(points) - len(remaining_indices)
+        coverage = n_explained / max(len(points), 1)
 
         # Classify topology
         topology = self._classify_topology(primitives, coverage)
@@ -217,7 +216,7 @@ class FeatureExtractionAgent:
         # (e.g., a box inscribed in a cylinder has high radial variance)
         inlier_radii = radii[inlier_mask]
         radial_std = float(np.std(inlier_radii))
-        if radial_std > radius * 0.15:  # >15% variation = not a cylinder
+        if radial_std > radius * 0.25:  # >25% variation = not a cylinder
             return None
 
         height = float(along[inlier_mask].max() - along[inlier_mask].min())

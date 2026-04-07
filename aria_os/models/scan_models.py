@@ -16,6 +16,10 @@ class BoundingBox:
     def as_dict(self) -> dict:
         return {"x": self.x, "y": self.y, "z": self.z}
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "BoundingBox":
+        return cls(x=float(d.get("x", 0.0)), y=float(d.get("y", 0.0)), z=float(d.get("z", 0.0)))
+
 
 @dataclass
 class CleanedMesh:
@@ -51,7 +55,7 @@ class PartFeatureSet:
 
 @dataclass
 class CatalogEntry:
-    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
     scan_date: str = field(default_factory=lambda: datetime.now().isoformat())
     source_file: str = ""
     bounding_box: Optional[BoundingBox] = None
@@ -84,10 +88,10 @@ class CatalogEntry:
     def from_dict(cls, d: dict) -> "CatalogEntry":
         bb = d.get("bounding_box")
         return cls(
-            id=d.get("id", str(uuid.uuid4())[:8]),
+            id=d.get("id", str(uuid.uuid4())[:12]),
             scan_date=d.get("scan_date", ""),
             source_file=d.get("source_file", ""),
-            bounding_box=BoundingBox(**bb) if bb else None,
+            bounding_box=BoundingBox.from_dict(bb) if bb else None,
             volume_mm3=d.get("volume_mm3", 0.0),
             material=d.get("material", "unknown"),
             topology=d.get("topology", "unknown"),

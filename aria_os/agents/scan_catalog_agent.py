@@ -32,7 +32,16 @@ class ScanCatalogAgent:
                 for d in data:
                     entry = CatalogEntry.from_dict(d)
                     self._entries[entry.id] = entry
-            except Exception:
+            except Exception as exc:
+                print(f"[ScanCatalog] WARNING: Failed to load catalog {self.catalog_path}: {exc}")
+                try:
+                    backup = self.catalog_path.with_suffix(".json.bak")
+                    if self.catalog_path.exists():
+                        import shutil
+                        shutil.copy2(str(self.catalog_path), str(backup))
+                        print(f"[ScanCatalog] Backed up corrupt catalog to {backup}")
+                except Exception:
+                    pass
                 self._entries = {}
 
     def _save(self):

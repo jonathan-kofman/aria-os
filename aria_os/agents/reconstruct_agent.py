@@ -143,7 +143,7 @@ def _detect_holes_from_mesh(
         proj = perp_pts[:, other_axes]
 
         # Use simple grid-based clustering
-        found = _cluster_circles(proj, perp_pts, axis_idx, body_thickness)
+        found = _cluster_circles(proj, perp_pts, axis_idx, body_thickness, bbox)
         holes.extend(found)
 
     # Deduplicate holes that are very close to each other
@@ -158,12 +158,17 @@ def _cluster_circles(
     full_3d: np.ndarray,
     axis_idx: int,
     body_thickness: float,
+    bbox: dict,
 ) -> List[dict]:
     """Find circular clusters in 2D projected points."""
     if len(proj_2d) < 10:
         return []
 
     from scipy.spatial import cKDTree
+
+    bbox_dims = [bbox.get("x", 100), bbox.get("y", 100), bbox.get("z", 100)]
+    search_r = max(bbox_dims) * 0.3
+    max_hole_r = min(bbox_dims) * 0.4
 
     # Build KD-tree for fast neighbor queries
     tree = cKDTree(proj_2d)
@@ -175,9 +180,8 @@ def _cluster_circles(
         if i in visited:
             continue
 
-        # Find points within a radius of this point (potential same-hole cluster)
-        # Start with a generous search radius
-        neighbors = tree.query_ball_point(proj_2d[i], r=30.0)
+        # Find points within a scaled radius of this point
+        neighbors = tree.query_ball_point(proj_2d[i], r=search_r)
         if len(neighbors) < 8:
             continue
 
@@ -193,7 +197,7 @@ def _cluster_circles(
             continue
 
         median_r = float(np.median(radii))
-        if median_r < 1.0 or median_r > 100.0:
+        if median_r < 1.0 or median_r > max_hole_r:
             continue
 
         # Check if the points are actually ring-shaped (not a filled disc)
@@ -365,13 +369,16 @@ print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
         h = round(cyl.parameters["height_mm"], 2)
         center = cyl.parameters.get("center", [0, 0, 0])
 
-        if r < main_r * 0.8:
-            # Smaller cylinder — likely a bore or step
+        if r < main_r * 0.95:
+            # Smaller cylinder — bore or step
+            cx = round(center[0], 2)
+            cy = round(center[1], 2)
             lines.append(f"")
             lines.append(f"# Step/bore #{i}: dia {round(r*2, 2)}mm x {h}mm")
             lines.append(f"bore_{i} = (")
             lines.append(f'    cq.Workplane("XY")')
             lines.append(f"    .workplane(offset={round(-h/2 - 1, 2)})")
+            lines.append(f"    .center({cx}, {cy})")
             lines.append(f"    .circle({r})")
             lines.append(f"    .extrude({round(h + 2, 2)})")
             lines.append(f")")

@@ -839,6 +839,21 @@ def _run_full(goal: str) -> None:
     print(f"{'='*64}\n")
 
 
+def _get_cli_arg(flag: str, default: str = None) -> str | None:
+    """Safely get the value following a CLI flag. Returns default if flag absent."""
+    if flag not in sys.argv:
+        return default
+    idx = sys.argv.index(flag)
+    if idx + 1 >= len(sys.argv):
+        print(f"Error: {flag} requires a value")
+        sys.exit(1)
+    value = sys.argv[idx + 1]
+    if value.startswith("--"):
+        print(f"Error: {flag} requires a value, got another flag '{value}'")
+        sys.exit(1)
+    return value
+
+
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "--full":
         if len(sys.argv) < 3:
@@ -1083,6 +1098,33 @@ def main():
             repo_root=ROOT,
         )
         print(f"[review] Revised file: {_rv_out}")
+        return
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "--ecad-to-enclosure":
+        if len(sys.argv) < 3:
+            print("Usage: python run_aria_os.py --ecad-to-enclosure <path/to/board.kicad_pcb>")
+            sys.exit(1)
+        _enc_pcb_path = sys.argv[2]
+        _enc_out_dir = None
+        if "--out" in sys.argv:
+            _oi = sys.argv.index("--out")
+            if _oi + 1 < len(sys.argv):
+                _enc_out_dir = sys.argv[_oi + 1]
+        from aria_os.ecad.ecad_to_enclosure import generate_enclosure_from_pcb
+        _enc_result = generate_enclosure_from_pcb(_enc_pcb_path, output_dir=_enc_out_dir)
+        if _enc_result.error:
+            print(f"[ENCLOSURE] Error: {_enc_result.error}")
+            sys.exit(1)
+        pcb = _enc_result.pcb_geometry
+        print(f"[ENCLOSURE] Board: {pcb.board_width_mm:.1f} x {pcb.board_height_mm:.1f} mm")
+        print(f"[ENCLOSURE] Mounting holes: {len(pcb.mounting_holes)}")
+        print(f"[ENCLOSURE] Connectors: {len(pcb.connectors)}")
+        if _enc_result.stl_paths:
+            for name, path in _enc_result.stl_paths.items():
+                print(f"[ENCLOSURE] STL ({name}): {path}")
+        if _enc_result.step_paths:
+            for name, path in _enc_result.step_paths.items():
+                print(f"[ENCLOSURE] STEP ({name}): {path}")
         return
 
     if len(sys.argv) >= 2 and sys.argv[1] == "--ecad-variants":
@@ -1399,12 +1441,9 @@ def main():
             print("Usage: python run_aria_os.py --scan <file.stl|.obj|.ply> [--material X] [--tags tag1,tag2]")
             sys.exit(1)
         _scan_file = sys.argv[2]
-        _scan_mat = "unknown"
-        if "--material" in sys.argv:
-            _scan_mat = sys.argv[sys.argv.index("--material") + 1]
-        _scan_tags = []
-        if "--tags" in sys.argv:
-            _scan_tags = sys.argv[sys.argv.index("--tags") + 1].split(",")
+        _scan_mat = _get_cli_arg("--material", "unknown")
+        _raw_tags = _get_cli_arg("--tags")
+        _scan_tags = _raw_tags.split(",") if _raw_tags else []
         from aria_os.scan_pipeline import run_scan_pipeline
         run_scan_pipeline(_scan_file, material=_scan_mat, tags=_scan_tags)
         print("Done.")
@@ -1412,15 +1451,10 @@ def main():
 
     # --- --catalog: list/search scanned parts catalog ---
     if len(sys.argv) >= 2 and sys.argv[1] == "--catalog":
-        _cat_topo = None
-        _cat_tags = None
-        _cat_dims = None
-        if "--topology" in sys.argv:
-            _cat_topo = sys.argv[sys.argv.index("--topology") + 1]
-        if "--tags" in sys.argv:
-            _cat_tags = sys.argv[sys.argv.index("--tags") + 1].split(",")
-        if "--search" in sys.argv:
-            _cat_dims = sys.argv[sys.argv.index("--search") + 1]
+        _cat_topo = _get_cli_arg("--topology")
+        _raw_tags = _get_cli_arg("--tags")
+        _cat_tags = _raw_tags.split(",") if _raw_tags else None
+        _cat_dims = _get_cli_arg("--search")
         from aria_os.scan_pipeline import list_catalog
         list_catalog(topology=_cat_topo, tags=_cat_tags, search_dims=_cat_dims)
         return
@@ -1442,12 +1476,9 @@ def main():
             print("Usage: python run_aria_os.py --scan-dir <directory> [--material X] [--tags tag1,tag2]")
             sys.exit(1)
         _sdir = sys.argv[2]
-        _sdir_mat = "unknown"
-        if "--material" in sys.argv:
-            _sdir_mat = sys.argv[sys.argv.index("--material") + 1]
-        _sdir_tags = []
-        if "--tags" in sys.argv:
-            _sdir_tags = sys.argv[sys.argv.index("--tags") + 1].split(",")
+        _sdir_mat = _get_cli_arg("--material", "unknown")
+        _raw_tags = _get_cli_arg("--tags")
+        _sdir_tags = _raw_tags.split(",") if _raw_tags else []
         from aria_os.scan_pipeline import scan_directory
         scan_directory(_sdir, material=_sdir_mat, tags=_sdir_tags or None)
         print("Done.")

@@ -155,7 +155,7 @@ class DesignerAgent(BaseAgent):
             # LLM failed — try Zoo.dev text-to-CAD before giving up
             if self.domain == "cad" and self._try_zoo(state):
                 return
-            state.generation_error = "DesignerAgent returned empty response"
+            state.generation_error = "DesignerAgent: LLM returned empty response, Zoo.dev fallback failed or unavailable"
             return
 
         # Extract code from response (JSON-first, then markdown, then raw)
@@ -164,7 +164,7 @@ class DesignerAgent(BaseAgent):
             # LLM returned garbage — try Zoo.dev text-to-CAD before giving up
             if self.domain == "cad" and self._try_zoo(state):
                 return
-            state.generation_error = f"No code block found in DesignerAgent response"
+            state.generation_error = "DesignerAgent: no code block in LLM response, Zoo.dev fallback failed or unavailable"
             # Do NOT store raw response as state.code — it poisons the RefinerAgent
             # which tries to "fix" a non-code string as if it were Python
             return
@@ -300,6 +300,9 @@ class DesignerAgent(BaseAgent):
                 return False
 
             step_path = result["step_path"]
+            if not Path(step_path).exists():
+                print(f"  [{self.name}] Zoo.dev reported success but STEP file not found: {step_path}")
+                return False
             state.output_path = step_path
             state.generation_error = ""
             # Parse bbox from STEP if possible

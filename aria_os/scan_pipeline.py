@@ -187,6 +187,9 @@ def reconstruct_from_catalog(
         return {"error": "No features file"}
 
     features_data = json.loads(Path(entry.features_path).read_text(encoding="utf-8"))
+    if not features_data or not isinstance(features_data, dict):
+        print(f"[RECONSTRUCT] Features file for '{part_id}' is empty or malformed.")
+        return {"error": "Features file is empty or malformed"}
     features = _load_features(features_data)
 
     # Determine output dir
@@ -231,6 +234,8 @@ def _load_features(data: dict) -> PartFeatureSet:
 
     primitives = []
     for p in data.get("primitives", []):
+        if not isinstance(p, dict) or "type" not in p or "parameters" not in p:
+            continue
         primitives.append(DetectedPrimitive(
             type=p["type"],
             parameters=p["parameters"],
@@ -344,10 +349,14 @@ def scan_directory(
     material: str = "unknown",
     tags: Optional[List[str]] = None,
     catalog_path: Optional[str | Path] = None,
+    recursive: bool = False,
 ) -> List[CatalogEntry]:
     """
     Scan all STL/OBJ/PLY files in a directory and catalog them.
     Handles errors gracefully — logs failures and continues.
+
+    Args:
+        recursive: If True, scan subdirectories recursively. Default: top-level only.
     """
     dir_path = Path(dir_path)
     if not dir_path.is_dir():
@@ -355,8 +364,9 @@ def scan_directory(
         return []
 
     extensions = {".stl", ".obj", ".ply"}
+    glob_fn = dir_path.rglob if recursive else dir_path.iterdir
     scan_files = sorted(
-        f for f in dir_path.iterdir()
+        f for f in (glob_fn("*") if recursive else glob_fn())
         if f.is_file() and f.suffix.lower() in extensions
     )
 
