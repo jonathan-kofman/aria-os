@@ -1019,7 +1019,7 @@ print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 def _cq_bracket(params: dict[str, Any]) -> str:
     w    = float(params.get("width_mm",  80.0))
     h    = float(params.get("height_mm", 60.0))
-    t    = float(params.get("thickness_mm", 6.0))
+    t    = float(params.get("thickness_mm", params.get("depth_mm", 6.0)))
     hole = float(params.get("hole_dia_mm", params.get("bolt_dia_mm", 8.0)))
     n    = max(1, int(params.get("n_bolts", 2)))
     # Space holes evenly along the width with 15% margin on each side
@@ -1042,16 +1042,16 @@ HEIGHT_MM    = {h}
 THICKNESS_MM = {t}
 HOLE_DIA_MM  = {hole}
 
-plate = cq.Workplane("XY").box(WIDTH_MM, THICKNESS_MM, HEIGHT_MM)
-# {n} mounting hole(s) evenly spaced along the plate
-hole_cyl = (
-    cq.Workplane("XY")
-    .workplane(offset=-1.0)
+# Flat plate: width x height x thickness (thickness is the thin dimension)
+plate = cq.Workplane("XY").box(WIDTH_MM, HEIGHT_MM, THICKNESS_MM)
+# {n} mounting hole(s) evenly spaced along the width, cutting through thickness
+result = (
+    plate
+    .faces(">Z")
+    .workplane()
     .pushPoints({pts_repr})
-    .circle(HOLE_DIA_MM / 2.0)
-    .extrude(THICKNESS_MM + 2.0)
+    .hole(HOLE_DIA_MM)
 )
-result = plate.cut(hole_cyl)
 bb = result.val().BoundingBox()
 print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 """

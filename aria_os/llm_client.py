@@ -212,13 +212,16 @@ def _ensure_lightning_tunnel() -> None:
 
 
 def is_gemma_available() -> bool:
-    """Check if Gemma 4 is pulled in Ollama.
+    """Check if Gemma 4 is available via a remote Ollama (Lightning AI).
 
-    Queries Ollama's /api/tags endpoint and checks if any pulled model
-    matches the configured GEMMA_MODEL (default: gemma4:31b).
-    Returns False if Ollama is not running or Gemma 4 is not pulled.
+    Gemma 4 31B requires >16GB VRAM — it must NOT run on the local GPU
+    (RTX 1000 Ada, 6GB). Only check if OLLAMA_HOST points to a remote
+    instance (non-default port, e.g. localhost:11435 for the Lightning tunnel).
     """
     host = _ollama_host()
+    # Only allow gemma on a remote Ollama instance (not local default port)
+    if host == _DEFAULT_OLLAMA_HOST or host == "http://localhost:11434":
+        return False
     model = _gemma_model()
     model_base = model.split(":")[0]  # e.g. "gemma4" from "gemma4:31b"
     try:
@@ -440,6 +443,9 @@ def _try_gemma(prompt: str, system: str) -> str | None:
         # Try auto-reconnecting the Lightning AI tunnel
         _ensure_lightning_tunnel()
         if not is_gemma_available():
+            host = _ollama_host()
+            if host == _DEFAULT_OLLAMA_HOST:
+                print("[LLM] gemma4 skipped — requires remote GPU. Set OLLAMA_HOST=http://localhost:11435 and start Lightning AI tunnel")
             return None
 
     host = _ollama_host()
