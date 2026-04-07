@@ -286,3 +286,122 @@ def list_catalog(
     print()
 
     return entries
+
+
+def search_similar(
+    description: str,
+    catalog_path: Optional[str | Path] = None,
+    top_n: int = 3,
+) -> List:
+    """
+    Natural-language similarity search across the catalog.
+
+    Parses a description like "75x45x12 bracket with 4 holes" into
+    target dimensions and primitive counts, then finds the closest
+    catalog entries using a combined distance metric.
+    """
+    from .agents.scan_catalog_agent import ScanCatalogAgent, parse_search_description
+
+    catalog = ScanCatalogAgent(catalog_path=catalog_path)
+    parsed = parse_search_description(description)
+
+    if not catalog.list_all():
+        print("[SEARCH] Catalog is empty.")
+        return []
+
+    results = catalog.find_similar(
+        target_dims=parsed.get("dims"),
+        target_volume=parsed.get("volume"),
+        target_primitives=parsed.get("primitives"),
+        top_n=top_n,
+    )
+
+    if not results:
+        print("[SEARCH] No matches found.")
+        return results
+
+    print(f'\n  Search: "{description}"')
+    if parsed.get("dims"):
+        d = parsed["dims"]
+        print(f"  Parsed: dims={d[0]}x{d[1]}x{d[2]}mm", end="")
+    if parsed.get("primitives"):
+        print(f"  prims={parsed['primitives']}", end="")
+    print(f"\n")
+
+    print(f"  {'#':<3} {'Score':>6}  {'ID':<10} {'Dims (mm)':<22} {'Topology':<14} {'Material':<16} {'Tags'}")
+    print(f"  {'—'*3} {'—'*6}  {'—'*10} {'—'*22} {'—'*14} {'—'*16} {'—'*20}")
+    for i, (entry, score) in enumerate(results, 1):
+        bb = f"{entry.bounding_box.x}x{entry.bounding_box.y}x{entry.bounding_box.z}" if entry.bounding_box else "?"
+        tags_str = ", ".join(entry.tags) if entry.tags else ""
+        print(f"  {i:<3} {score:>5.0%}  {entry.id:<10} {bb:<22} {entry.topology:<14} {entry.material:<16} {tags_str}")
+    print()
+
+    return results
+
+
+def scan_directory(
+    dir_path: str | Path,
+    material: str = "unknown",
+    tags: Optional[List[str]] = None,
+    catalog_path: Optional[str | Path] = None,
+) -> List[CatalogEntry]:
+    """
+    Scan all STL/OBJ/PLY files in a directory and catalog them.
+    Handles errors gracefully — logs failures and continues.
+    """
+    dir_path = Path(dir_path)
+    if not dir_path.is_dir():
+        print(f"[SCAN-DIR] Not a directory: {dir_path}")
+        return []
+
+    extensions = {".stl", ".obj", ".ply"}
+    scan_files = sorted(
+        f for f in dir_path.iterdir()
+        if f.is_file() and f.suffix.lower() in extensions
+    )
+
+    if not scan_files:
+        print(f"[SCAN-DIR] No STL/OBJ/PLY files found in {dir_path}")
+        return []
+
+    print(f"\n  [SCAN-DIR] Found {len(scan_files)} scan files in {dir_path}")
+    print(f"  [SCAN-DIR] {'=' * 56}\n")
+
+    entries: List[CatalogEntry] = []
+    errors: List[tuple] = []
+
+    for i, scan_file in enumerate(scan_files, 1):
+        print(f"  [{i}/{len(scan_files)}] {scan_file.name}")
+        try:
+            entry = run_scan_pipeline(
+                scan_file,
+                material=material,
+                tags=tags,
+                catalog_path=catalog_path,
+            )
+            entries.append(entry)
+        except Exception as exc:
+            print(f"  [ERROR] {scan_file.name}: {exc}")
+            errors.append((scan_file.name, str(exc)))
+
+    # Summary table
+    print(f"\n  [SCAN-DIR] {'=' * 70}")
+    print(f"  [SCAN-DIR] SUMMARY: {len(entries)} succeeded, {len(errors)} failed out of {len(scan_files)} files")
+    print(f"  [SCAN-DIR] {'=' * 70}\n")
+
+    if entries:
+        print(f"  {'Filename':<30} {'ID':<10} {'Dims (mm)':<22} {'Topology':<14} {'Conf':>5} {'Prims':>5}")
+        print(f"  {'—'*30} {'—'*10} {'—'*22} {'—'*14} {'—'*5} {'—'*5}")
+        for e in entries:
+            bb = f"{e.bounding_box.x}x{e.bounding_box.y}x{e.bounding_box.z}" if e.bounding_box else "?"
+            n_prims = sum(p.get("count", 0) for p in e.primitives_summary)
+            print(f"  {e.source_file:<30} {e.id:<10} {bb:<22} {e.topology:<14} {e.confidence:>4.0%} {n_prims:>5}")
+        print()
+
+    if errors:
+        print(f"  Errors:")
+        for fname, err in errors:
+            print(f"    {fname}: {err}")
+        print()
+
+    return entries

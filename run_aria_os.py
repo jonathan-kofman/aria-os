@@ -1436,6 +1436,33 @@ def main():
         print("Done.")
         return
 
+    # --- --scan-dir: batch scan a directory of mesh files ---
+    if len(sys.argv) >= 2 and sys.argv[1] == "--scan-dir":
+        if len(sys.argv) < 3:
+            print("Usage: python run_aria_os.py --scan-dir <directory> [--material X] [--tags tag1,tag2]")
+            sys.exit(1)
+        _sdir = sys.argv[2]
+        _sdir_mat = "unknown"
+        if "--material" in sys.argv:
+            _sdir_mat = sys.argv[sys.argv.index("--material") + 1]
+        _sdir_tags = []
+        if "--tags" in sys.argv:
+            _sdir_tags = sys.argv[sys.argv.index("--tags") + 1].split(",")
+        from aria_os.scan_pipeline import scan_directory
+        scan_directory(_sdir, material=_sdir_mat, tags=_sdir_tags or None)
+        print("Done.")
+        return
+
+    # --- --catalog-search: similarity search with natural language ---
+    if len(sys.argv) >= 2 and sys.argv[1] == "--catalog-search":
+        if len(sys.argv) < 3:
+            print('Usage: python run_aria_os.py --catalog-search "75x45x12 bracket with 4 holes"')
+            sys.exit(1)
+        _search_desc = " ".join(sys.argv[2:])
+        from aria_os.scan_pipeline import search_similar
+        search_similar(_search_desc)
+        return
+
     if len(sys.argv) < 2:
         print("Usage: python run_aria_os.py \"describe the part you want\"")
         print("       python run_aria_os.py \"part description\" --fea   # force FEA after export")
@@ -1466,6 +1493,8 @@ def main():
         print("       python run_aria_os.py --scan <file.stl> [--material X] [--tags tag1,tag2]  # reverse: scan → features → catalog")
         print("       python run_aria_os.py --catalog [--topology prismatic] [--search 50x30x20] [--tags bracket]")
         print("       python run_aria_os.py --reconstruct <catalog_id>  # regenerate parametric CAD from scan features")
+        print("       python run_aria_os.py --scan-dir <directory> [--material X] [--tags tag1,tag2]  # batch scan all meshes")
+        print('       python run_aria_os.py --catalog-search "75x45x12 bracket with 4 holes"  # similarity search')
         print("Example: python run_aria_os.py \"generate the ARIA housing shell\"")
         sys.exit(1)
 

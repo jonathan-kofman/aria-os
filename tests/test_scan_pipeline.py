@@ -518,3 +518,173 @@ class TestReconstructAgent:
             # If holes were cut, volume should be measurably less
             if recon_mesh.is_watertight:
                 assert abs(recon_mesh.volume) < solid_volume
+
+
+# ---------------------------------------------------------------------------
+# Similarity search tests
+# ---------------------------------------------------------------------------
+
+class TestSimilaritySearch:
+
+    def _populate_catalog(self, tmp_path):
+        """Create a catalog with several diverse parts."""
+        from aria_os.agents.scan_catalog_agent import ScanCatalogAgent
+        from aria_os.models.scan_models import BoundingBox, CatalogEntry
+
+        cat = ScanCatalogAgent(catalog_path=tmp_path / "catalog.json")
+        cat.add(CatalogEntry(
+            id="bracket1", source_file="bracket.stl",
+            bounding_box=BoundingBox(80, 50, 25), volume_mm3=95000,
+            topology="prismatic", tags=["bracket"],
+            primitives_summary=[{"type": "plane", "count": 6}, {"type": "cylinder", "count": 4}],
+        ))
+        cat.add(CatalogEntry(
+            id="shaft1", source_file="shaft.stl",
+            bounding_box=BoundingBox(30, 30, 40), volume_mm3=28000,
+            topology="turned_part", tags=["shaft"],
+            primitives_summary=[{"type": "cylinder", "count": 1}, {"type": "plane", "count": 2}],
+        ))
+        cat.add(CatalogEntry(
+            id="plate1", source_file="plate.stl",
+            bounding_box=BoundingBox(200, 150, 5), volume_mm3=150000,
+            topology="prismatic", tags=["plate"],
+            primitives_summary=[{"type": "plane", "count": 6}],
+        ))
+        return tmp_path / "catalog.json"
+
+    def test_find_similar_by_dims(self, tmp_path):
+        from aria_os.agents.scan_catalog_agent import ScanCatalogAgent
+
+        cat_path = self._populate_catalog(tmp_path)
+        cat = ScanCatalogAgent(catalog_path=cat_path)
+
+        # Search for something close to the bracket (80x50x25)
+        results = cat.find_similar(target_dims=(75, 45, 20), top_n=3)
+        assert len(results) == 3
+        # Bracket should be the best match
+        assert results[0][0].id == "bracket1"
+        assert results[0][1] > 0.5  # reasonable similarity
+
+    def test_find_similar_by_primitives(self, tmp_path):
+        from aria_os.agents.scan_catalog_agent import ScanCatalogAgent
+
+        cat_path = self._populate_catalog(tmp_path)
+        cat = ScanCatalogAgent(catalog_path=cat_path)
+
+        # Search for something with lots of cylinders (shaft-like)
+        results = cat.find_similar(target_primitives={"cylinder": 1}, top_n=3)
+        assert len(results) == 3
+        # Shaft should score highest on cylinder match
+        ids = [r[0].id for r in results]
+        assert "shaft1" in ids[:2]
+
+    def test_find_similar_combined(self, tmp_path):
+        from aria_os.agents.scan_catalog_agent import ScanCatalogAgent
+
+        cat_path = self._populate_catalog(tmp_path)
+        cat = ScanCatalogAgent(catalog_path=cat_path)
+
+        # Search for bracket-like: 80x50x25 with planes and holes
+        results = cat.find_similar(
+            target_dims=(80, 50, 25),
+            target_volume=95000,
+            target_primitives={"plane": 6, "cylinder": 4},
+            top_n=3,
+        )
+        assert results[0][0].id == "bracket1"
+        assert results[0][1] > 0.9  # near-perfect match
+
+    def test_parse_search_description_dims(self):
+        from aria_os.agents.scan_catalog_agent import parse_search_description
+
+        parsed = parse_search_description("75x45x12 bracket with 4 holes")
+        assert parsed["dims"] == pytest.approx((75, 45, 12))
+        assert parsed["primitives"]["cylinder"] == 4  # 4 holes
+        assert parsed["primitives"]["plane"] == 6  # bracket keyword
+
+    def test_parse_search_description_shaft(self):
+        from aria_os.agents.scan_catalog_agent import parse_search_description
+
+        parsed = parse_search_description("50mm diameter shaft")
+        assert parsed["dims"] is not None
+        assert parsed["primitives"]["cylinder"] >= 1
+
+    def test_search_similar_e2e(self, tmp_path):
+        from aria_os.scan_pipeline import search_similar
+
+        self._populate_catalog(tmp_path)
+        results = search_similar(
+            "75x45x20 bracket with 4 holes",
+            catalog_path=tmp_path / "catalog.json",
+        )
+        assert len(results) > 0
+        assert results[0][0].id == "bracket1"
+
+
+# ---------------------------------------------------------------------------
+# Batch scan-dir tests
+# ---------------------------------------------------------------------------
+
+class TestScanDirectory:
+
+    def test_scan_dir_processes_all_files(self, tmp_path):
+        """scan_directory should process all STL files and return entries."""
+        from aria_os.scan_pipeline import scan_directory
+
+        scan_dir = tmp_path / "scans"
+        scan_dir.mkdir()
+        # Create 3 test meshes
+        trimesh.creation.box(extents=[50, 30, 20]).export(str(scan_dir / "box.stl"))
+        trimesh.creation.cylinder(radius=10, height=30).export(str(scan_dir / "cyl.stl"))
+        trimesh.creation.icosphere(radius=15).export(str(scan_dir / "sphere.stl"))
+
+        entries = scan_directory(
+            scan_dir,
+            material="test_mat",
+            catalog_path=tmp_path / "catalog.json",
+        )
+        assert len(entries) == 3
+        assert all(e.material == "test_mat" for e in entries)
+
+    def test_scan_dir_handles_bad_file(self, tmp_path):
+        """scan_directory should skip corrupt files and continue."""
+        from aria_os.scan_pipeline import scan_directory
+
+        scan_dir = tmp_path / "scans"
+        scan_dir.mkdir()
+        trimesh.creation.box(extents=[40, 40, 10]).export(str(scan_dir / "good.stl"))
+        (scan_dir / "bad.stl").write_text("not a real mesh file")
+
+        entries = scan_directory(
+            scan_dir,
+            catalog_path=tmp_path / "catalog.json",
+        )
+        # Should get 1 success (the good file), the bad file should be logged
+        assert len(entries) == 1
+        assert entries[0].source_file == "good.stl"
+
+    def test_scan_dir_empty_dir(self, tmp_path):
+        """scan_directory on empty dir returns empty list."""
+        from aria_os.scan_pipeline import scan_directory
+
+        scan_dir = tmp_path / "empty"
+        scan_dir.mkdir()
+        entries = scan_directory(scan_dir, catalog_path=tmp_path / "catalog.json")
+        assert entries == []
+
+    def test_scan_dir_with_tags(self, tmp_path):
+        """Tags propagate to all scanned entries."""
+        from aria_os.scan_pipeline import scan_directory
+
+        scan_dir = tmp_path / "scans"
+        scan_dir.mkdir()
+        trimesh.creation.box(extents=[30, 20, 10]).export(str(scan_dir / "part.stl"))
+
+        entries = scan_directory(
+            scan_dir,
+            tags=["legacy", "batch1"],
+            catalog_path=tmp_path / "catalog.json",
+        )
+        assert len(entries) == 1
+        assert "legacy" in entries[0].tags
+        assert "batch1" in entries[0].tags
