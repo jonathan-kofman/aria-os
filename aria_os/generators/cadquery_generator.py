@@ -2468,6 +2468,213 @@ print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 """
 
 
+def _cq_sheet_metal_panel(params: dict[str, Any]) -> str:
+    """Sheet metal panel with one or two bends (formed, not flat pattern).
+    Models the bent result directly. K-factor bend deduction is computed for
+    reference but the geometry reflects the finished formed shape.
+
+    Params:
+      length_mm       — along X (direction of the bend)
+      width_mm        — the flat panel width (will be split by bends)
+      thickness_mm    — sheet gauge (default 1.5mm / 16ga steel)
+      bend_angle_deg  — bend angle, e.g. 90 for right-angle flange
+      bend_radius_mm  — inner bend radius (default 2x thickness)
+      k_factor        — neutral axis factor (default 0.45 for steel)
+      flange_mm       — height of the bent flange leg
+      n_bends         — 1 or 2 (adds symmetric second bend on opposite end)
+      n_holes         — number of holes in flat section
+      hole_dia_mm     — hole diameter
+    """
+    import math as _m
+    length   = float(params.get("length_mm", 200.0))
+    width    = float(params.get("width_mm",  100.0))
+    t        = float(params.get("thickness_mm", params.get("gauge_mm", 1.5)))
+    angle    = float(params.get("bend_angle_deg", 90.0))
+    r        = float(params.get("bend_radius_mm", 2.0 * t))
+    kf       = float(params.get("k_factor", 0.45))
+    flange   = float(params.get("flange_mm", 25.0))
+    n_bends  = int(params.get("n_bends", 1))
+    n_holes  = int(params.get("n_holes", 0))
+    hdia     = float(params.get("hole_dia_mm", 6.0))
+
+    # Bend deduction (for flat blank reference, not used in geometry):
+    # BD = 2*(R+T)*tan(A/2) - pi*(R+kf*T)*(A/180)
+    a_rad = _m.radians(angle)
+    bd    = round(2*(r+t)*_m.tan(a_rad/2) - _m.pi*(r+kf*t)*(angle/180.0), 3)
+    flat_width = round(width + n_bends * flange - n_bends * bd, 3)
+
+    # Hole points along the flat section
+    hole_pts = []
+    if n_holes > 0:
+        margin = max(hdia * 2.0, 10.0)
+        y_center = (flange + width / 2.0) if n_bends >= 1 else (width / 2.0)
+        for i in range(n_holes):
+            x = -length/2.0 + margin + (length - 2*margin) * i / max(n_holes-1, 1)
+            hole_pts.append((round(x, 2), round(y_center, 2)))
+
+    return f"""
+import cadquery as cq, math
+
+# Sheet metal panel — formed shape (not flat pattern)
+# K-factor={kf}, bend deduction={bd:.3f}mm, flat blank width={flat_width:.3f}mm
+
+LENGTH_MM  = {length}
+THICK_MM   = {t}
+WIDTH_MM   = {width}
+FLANGE_MM  = {flange}
+BEND_R_MM  = {r}
+BEND_ANGLE = {angle}
+N_BENDS    = {n_bends}
+
+# ── 1. Flat web section ──────────────────────────────────────────────────────
+result = cq.Workplane("XY").box(LENGTH_MM, WIDTH_MM, THICK_MM)
+
+# ── 2. First flange — bent up at Y=-WIDTH/2 edge ─────────────────────────────
+# The flange is an additional box rotated by BEND_ANGLE
+a_rad = math.radians(BEND_ANGLE)
+flange_dx = FLANGE_MM * math.sin(a_rad)
+flange_dz = FLANGE_MM * math.cos(a_rad)
+
+flange1 = (
+    cq.Workplane("XY")
+    .box(LENGTH_MM, THICK_MM, FLANGE_MM)
+    .translate((0, -(WIDTH_MM / 2.0 + THICK_MM / 2.0), FLANGE_MM / 2.0))
+)
+result = result.union(flange1)
+
+# ── 3. Second flange (if requested) ─────────────────────────────────────────
+if N_BENDS >= 2:
+    flange2 = (
+        cq.Workplane("XY")
+        .box(LENGTH_MM, THICK_MM, FLANGE_MM)
+        .translate((0, WIDTH_MM / 2.0 + THICK_MM / 2.0, FLANGE_MM / 2.0))
+    )
+    result = result.union(flange2)
+
+# ── 4. Holes in flat web ──────────────────────────────────────────────────────
+{f"""for hx, hy in {hole_pts!r}:
+    result = result.cut(
+        cq.Workplane("XZ").workplane(offset=0).center(hx, 0)
+        .circle({hdia:.2f} / 2.0).extrude(WIDTH_MM + 2 * THICK_MM + 2)
+    )""" if hole_pts else "# No holes requested"}
+
+# Filter to largest solid (guards against flange union failures)
+solids = result.solids().vals()
+if len(solids) > 1:
+    result = cq.Workplane("XY").newObject([max(solids, key=lambda s: s.Volume())])
+
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+print(f"FlatBlankWidth:{flat_width:.3f}mm  BendDeduction:{bd:.3f}mm  KFactor:{kf}")
+"""
+
+
+def _cq_sheet_metal_box(params: dict[str, Any]) -> str:
+    """Sheet metal box — 3 or 4-sided tray formed from a single blank.
+    Models the formed box (not the flat pattern). Correct corner reliefs
+    are not modeled (would require DSTV/DXF unfold); this is the 3D shell.
+
+    Params:
+      length_mm, width_mm, height_mm — outer formed dimensions
+      thickness_mm                   — gauge (default 1.5mm)
+      n_holes                        — holes in base panel
+      hole_dia_mm
+    """
+    import math as _m
+    l  = float(params.get("length_mm", 200.0))
+    w  = float(params.get("width_mm",  100.0))
+    h  = float(params.get("height_mm",  50.0))
+    t  = float(params.get("thickness_mm", params.get("gauge_mm", 1.5)))
+    nh = int(params.get("n_holes", 0))
+    hd = float(params.get("hole_dia_mm", 6.0))
+
+    return f"""
+import cadquery as cq
+
+# Sheet metal box — formed 3D tray (4 sides + base, open top)
+L = {l}
+W = {w}
+H = {h}
+T = {t}
+
+# Shell: extrude outer box then shell to T thickness leaving top face open
+outer = cq.Workplane("XY").box(L, W, H)
+# Shell inward by T, removing top face (">Z")
+result = outer.faces(">Z").shell(-T)
+
+{"# Holes in base" if nh > 0 else "# No holes"}
+{f"""import math as _m2
+_margin = max({hd} * 2.0, 10.0)
+_pts = []
+for _i in range({nh}):
+    _x = -L/2 + _margin + (L - 2*_margin) * _i / max({nh}-1, 1)
+    _pts.append((_x, 0.0))
+result = (result.faces("<Z").workplane()
+    .pushPoints(_pts).hole({hd:.2f}))""" if nh > 0 else ""}
+
+# Single solid check
+solids = result.solids().vals()
+if len(solids) > 1:
+    result = cq.Workplane("XY").newObject([max(solids, key=lambda s: s.Volume())])
+
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_weld_bead(params: dict[str, Any]) -> str:
+    """Fillet weld bead — right-triangle cross-section extruded along joint length.
+    Used to add weld geometry at the junction of two plates (T-joint or corner joint).
+
+    Params:
+      length_mm    — weld run length along X axis
+      leg_a_mm     — weld leg on horizontal plate (default 6mm)
+      leg_b_mm     — weld leg on vertical plate (default 6mm, equal leg fillet)
+      joint_type   — "t_joint" (default) or "corner_joint"
+      n_passes     — 1 (single pass, default) or 2 (multi-pass, larger bead)
+    """
+    import math as _m
+    length    = float(params.get("length_mm", 100.0))
+    leg_a     = float(params.get("leg_a_mm",    6.0))
+    leg_b     = float(params.get("leg_b_mm",    leg_a))   # equal leg by default
+    joint     = str(params.get("joint_type", "t_joint"))
+    n_passes  = max(1, int(params.get("n_passes", 1)))
+
+    # Effective throat = 0.707 * min(leg_a, leg_b) per AWS D1.1
+    throat = round(0.707 * min(leg_a, leg_b), 3)
+    # Multi-pass: scale bead by sqrt(n_passes) for approximate cross-section
+    scale = round(_m.sqrt(n_passes), 3)
+    eff_a = round(leg_a * scale, 3)
+    eff_b = round(leg_b * scale, 3)
+
+    return f"""
+import cadquery as cq
+
+# Fillet weld bead — {joint}
+# Leg A: {eff_a:.1f}mm  Leg B: {eff_b:.1f}mm  Throat: {throat:.1f}mm  Passes: {n_passes}
+# Per AWS D1.1: minimum throat = 0.707 * min_leg
+
+LENGTH_MM = {length}
+LEG_A     = {eff_a}   # horizontal plate leg
+LEG_B     = {eff_b}   # vertical plate leg
+
+# Cross-section: right triangle in YZ plane at X=0
+# Vertices: (0,0), (LEG_A,0), (0,LEG_B) — junction at origin
+bead_profile = [(0.0, 0.0), (LEG_A, 0.0), (0.0, LEG_B)]
+
+result = (
+    cq.Workplane("YZ")
+    .polyline(bead_profile)
+    .close()
+    .extrude(LENGTH_MM)
+)
+
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+print(f"Throat:{throat:.2f}mm  LegA:{eff_a:.1f}mm  LegB:{eff_b:.1f}mm  Length:{length:.1f}mm")
+"""
+
+
 def _cq_spoked_wheel(params: dict[str, Any]) -> str:
     """Spoked wheel / handwheel: outer rim + hub + N radial spokes."""
     import math as _m
@@ -3992,6 +4199,21 @@ _CQ_TEMPLATE_MAP: dict[str, Any] = {
     "gusset_plate":                 _cq_gusset,
     "corner_bracket":               _cq_gusset,
     "triangle_brace":               _cq_gusset,
+    # Sheet metal
+    "sheet_metal_panel":            _cq_sheet_metal_panel,
+    "sheet_metal":                  _cq_sheet_metal_panel,
+    "bent_plate":                   _cq_sheet_metal_panel,
+    "formed_channel":               _cq_sheet_metal_panel,
+    "u_channel":                    _cq_sheet_metal_panel,
+    "sheet_metal_box":              _cq_sheet_metal_box,
+    "sheet_metal_tray":             _cq_sheet_metal_box,
+    "formed_box":                   _cq_sheet_metal_box,
+    "metal_tray":                   _cq_sheet_metal_box,
+    # Weld bead
+    "weld_bead":                    _cq_weld_bead,
+    "fillet_weld":                  _cq_weld_bead,
+    "weld":                         _cq_weld_bead,
+    "weld_joint":                   _cq_weld_bead,
     # Spoked wheel / handwheel
     "spoked_wheel":                 _cq_spoked_wheel,
     "handwheel":                    _cq_spoked_wheel,
@@ -4192,6 +4414,9 @@ _KEYWORD_TO_TEMPLATE: list[tuple[list[str], Any]] = [
     (["handle", "grip", "knob", "pull_handle", "pull handle"], _cq_handle),
     (["enclosure_lid", "box_lid", "snap_lid", "enclosure lid", "box lid", "snap lid"], _cq_enclosure_lid),
     (["gusset", "corner_brace", "gusset_plate", "corner_bracket", "triangle_brace", "corner brace", "gusset plate", "corner bracket"], _cq_gusset),
+    (["sheet_metal_panel", "sheet metal panel", "bent_plate", "bent plate", "formed_channel", "u_channel", "u channel", "sheet metal"], _cq_sheet_metal_panel),
+    (["sheet_metal_box", "sheet metal box", "sheet_metal_tray", "formed_box", "metal_tray", "metal tray"], _cq_sheet_metal_box),
+    (["weld_bead", "weld bead", "fillet_weld", "fillet weld", "weld_joint", "weld joint", "weld"], _cq_weld_bead),
     (["spoked_wheel", "handwheel", "hand_wheel", "spoke_wheel", "spoked wheel", "hand wheel", "spoke wheel"], _cq_spoked_wheel),
     (["t_slot_plate", "tslot_plate", "fixture_plate", "tooling_plate", "t-slot plate", "t slot plate", "fixture plate", "tooling plate"], _cq_t_slot_plate),
     (["spring_clip", "retaining_clip", "circlip", "u_clip", "retainer", "spring clip", "retaining clip", "u clip"], _cq_spring_clip),

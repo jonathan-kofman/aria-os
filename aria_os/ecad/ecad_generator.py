@@ -309,6 +309,47 @@ BARREL_JACK_PAD_NETS: dict[str, str] = {
 }
 
 
+def _l298n_dip20_pads() -> list[tuple[str, float, float, float, float, str]]:
+    """L298N DIP-20 pads (7.62mm pitch rows, 2.54mm pin pitch)."""
+    pads = []
+    # Left column: pins 1-10 (top to bottom), right column: pins 11-20 (bottom to top)
+    for i in range(10):
+        pads.append((str(i + 1), -3.81, (i - 4.5) * 2.54, 1.6, 1.6, "circle"))
+    for i in range(10):
+        pads.append((str(20 - i), 3.81, (i - 4.5) * 2.54, 1.6, 1.6, "circle"))
+    return pads
+
+L298N_PAD_NETS: dict[str, str] = {
+    "1":  "SENSEA",    # Current sensing A
+    "2":  "OUT1",      # Motor A output 1
+    "3":  "OUT2",      # Motor A output 2
+    "4":  "+12V",      # Logic VCC (+5V)
+    "5":  "IN1",       # Input 1
+    "6":  "ENA",       # Enable A
+    "7":  "IN2",       # Input 2
+    "8":  "VS",        # Motor supply voltage (12V)
+    "9":  "GND",
+    "10": "IN3",       # Input 3
+    "11": "IN4",       # Input 4
+    "12": "ENB",       # Enable B
+    "13": "+12V",      # Logic VCC
+    "14": "OUT3",      # Motor B output 1
+    "15": "OUT4",      # Motor B output 2
+    "16": "SENSEB",    # Current sensing B
+    # Right column mirroring (pins 17-20 are GND heat sink tabs)
+    "17": "GND", "18": "GND", "19": "GND", "20": "GND",
+}
+
+
+def _screw_terminal_pads(n: int = 4, pitch: float = 3.5) -> list[tuple[str, float, float, float, float, str]]:
+    """KF350-style screw terminal pads (3.5mm pitch, through-hole)."""
+    half = (n - 1) * pitch / 2.0
+    return [
+        (str(i + 1), round(-half + i * pitch, 3), 0.0, 2.0, 2.0, "circle")
+        for i in range(n)
+    ]
+
+
 def _usb_c_pads() -> list[tuple[str, float, float, float, float, str]]:
     """USB-C receptacle simplified pads (power + CC + D+/D-)."""
     pads = []
@@ -616,6 +657,15 @@ def _assign_pads_and_nets(comp: Component) -> None:
     elif "servo" in val_lower:
         comp.pads = _pin_header_pads(3)
         comp.net_map = dict(SERVO_CONNECTOR_NETS)
+    elif "l298n" in val_lower or "l298" in val_lower:
+        comp.pads = _l298n_dip20_pads()
+        comp.net_map = dict(L298N_PAD_NETS)
+    elif "screw" in val_lower or "kf350" in val_lower or "terminal" in val_lower:
+        # Detect pin count from value string (e.g. "KF350-4P" or "ScrewTerm-2P")
+        m = re.search(r"(\d+)[Pp]", val_lower)
+        n_pins = int(m.group(1)) if m else 4
+        comp.pads = _screw_terminal_pads(n_pins)
+        comp.net_map = {str(i + 1): f"TERM_{i + 1}" for i in range(n_pins)}
     # --- Sensors ---
     elif "hx711" in val_lower:
         comp.pads = _soic_pads(16)
@@ -732,6 +782,17 @@ def parse_components(description: str) -> List[Component]:
             description="LiPo BMS / charger IC",
         ))
 
+    # ── Ensure STM32/ESP32 always have a 3.3V LDO if not already added ────────
+    has_mcu = re.search(r"\bstm32\b|\besp32\b|\barduino\b", lower)
+    if has_mcu and not any("ams1117" in c.value.lower() for c in components):
+        components.append(Component(
+            ref=next_ref("U"),
+            value="AMS1117-3.3",
+            footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+            width_mm=3.5, height_mm=6.5,
+            description="3.3 V LDO regulator",
+        ))
+
     # ── Interface connectors ──────────────────────────────────────────────────
     if "uart" in lower:
         components.append(Component(
@@ -809,15 +870,59 @@ def parse_components(description: str) -> List[Component]:
             description="MPU-6050 6-axis IMU",
         ))
 
+    # ── Motor drivers ─────────────────────────────────────────────────────────
+    if re.search(r"\bl298n?\b", lower):
+        components.append(Component(
+            ref=next_ref("U"),
+            value="L298N",
+            footprint="Package_DIP:DIP-20_W7.62mm",
+            width_mm=7.62, height_mm=25.4,
+            description="L298N dual H-bridge motor driver, DIP-20",
+        ))
+        # L298N implies 12V motor supply — add barrel jack + LDO if not already present
+        has_barrel = any("barrel" in c.value.lower() for c in components)
+        has_ldo = any("ams1117" in c.value.lower() for c in components)
+        if not has_barrel:
+            components.append(Component(
+                ref=next_ref("J"),
+                value="Barrel-Jack-2.1mm",
+                footprint="Connector_BarrelJack:BarrelJack_Horizontal",
+                width_mm=9.0, height_mm=11.0,
+                description="DC barrel jack (12 V motor supply input)",
+            ))
+        if not has_ldo:
+            components.append(Component(
+                ref=next_ref("U"),
+                value="AMS1117-3.3",
+                footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+                width_mm=3.5, height_mm=6.5,
+                description="3.3 V LDO regulator",
+            ))
+
+    # ── Screw terminals ───────────────────────────────────────────────────────
+    screw_match = re.search(r"(\d+)\s*(?:x\s*)?screw\s*terminal|screw\s*terminal[s]?\s*[x×]?\s*(\d+)", lower)
+    if screw_match:
+        n_terms = int(screw_match.group(1) or screw_match.group(2) or 4)
+        for idx in range(n_terms):
+            components.append(Component(
+                ref=next_ref("J"),
+                value=f"KF350-2P",
+                footprint="Connector_Phoenix_MC:PhoenixContact_MC_1,5_2-G-3.5_1x02_P3.50mm_Horizontal",
+                width_mm=7.0, height_mm=8.5,
+                description=f"KF350 2-pin screw terminal",
+            ))
+
     # ── Motor / actuator connectors ───────────────────────────────────────────
     if re.search(r"\bvesc\b|\bmotor\b|\bstepper\b", lower):
-        components.append(Component(
-            ref=next_ref("J"),
-            value="Molex-6P-Motor",
-            footprint="Connector_Molex:Molex_Mini-Fit_Jr_5566-06A2_2x03_P4.20mm_Vertical",
-            width_mm=12.6, height_mm=10.0,
-            description="Motor / VESC 6-pin power connector",
-        ))
+        # Only add Molex if no L298N was already detected (L298N has its own outputs)
+        if not re.search(r"\bl298n?\b", lower):
+            components.append(Component(
+                ref=next_ref("J"),
+                value="Molex-6P-Motor",
+                footprint="Connector_Molex:Molex_Mini-Fit_Jr_5566-06A2_2x03_P4.20mm_Vertical",
+                width_mm=12.6, height_mm=10.0,
+                description="Motor / VESC 6-pin power connector",
+            ))
     if re.search(r"\bservo\b", lower):
         components.append(Component(
             ref=next_ref("J"),
@@ -1128,12 +1233,18 @@ def _compute_mcu_peripheral_nets(
 
 
 def _select_trace_width(net_name: str) -> float:
-    """Return trace width in mm based on net type."""
-    power_nets = {"VIN", "VBUS", "+5V", "VBAT", "MOTOR_A+", "MOTOR_A-", "MOTOR_B+", "MOTOR_B-"}
-    if net_name in power_nets:
-        return 0.5   # power traces: wider
-    if net_name == "GND" or net_name == "+3V3":
-        return 0.4   # power rail
+    """Return trace width in mm based on net type (IPC-2221 compliant)."""
+    # High-current motor supply nets: 5A → 1.2 mm (IPC-2221, 10°C rise, 1oz Cu)
+    high_current_nets = {"VIN", "12V", "+12V", "VS", "24V", "+24V", "VBAT",
+                         "MOTOR_A+", "MOTOR_A-", "MOTOR_B+", "MOTOR_B-",
+                         "OUT1", "OUT2", "OUT3", "OUT4"}
+    if net_name in high_current_nets:
+        return 2.0   # 2mm handles L298N full-load (~9A) per IPC-2221
+    # Medium-current power rails: ~1A → 0.5 mm
+    if net_name in {"VBUS", "+5V", "5V", "GND"}:
+        return 0.5
+    if net_name in {"+3V3", "3V3", "VCC"}:
+        return 0.4   # 200 mA MCU supply
     return 0.25      # signal traces
 
 

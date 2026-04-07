@@ -94,7 +94,8 @@ class _ComponentMeta:
     ref: str
     value: str
     description: str
-    pins: list[str]
+    pins: list[str]       # pad/pin names
+    net_names: list[str]  # unique named nets assigned to this component's pads
     net: str
 
 
@@ -106,18 +107,24 @@ def _coerce_components(components: list[dict]) -> list[_ComponentMeta]:
     out: list[_ComponentMeta] = []
     for c in (components or []):
         if isinstance(c, dict):
-            ref   = str(c.get("ref",   ""))
-            value = str(c.get("value", ""))
-            desc  = str(c.get("description", ""))
-            pins  = list(c.get("pins", []))
-            net   = str(c.get("net",  ""))
+            ref       = str(c.get("ref",   ""))
+            value     = str(c.get("value", ""))
+            desc      = str(c.get("description", ""))
+            pins      = list(c.get("pins", []))
+            net       = str(c.get("net",  ""))
+            # "nets" is a list of unique named nets (not just pad numbers)
+            net_names = [str(n) for n in c.get("nets", []) if n]
         else:
-            ref   = str(getattr(c, "ref",         ""))
-            value = str(getattr(c, "value",        ""))
-            desc  = str(getattr(c, "description",  ""))
-            pins  = list(getattr(c, "pins",        []))
-            net   = str(getattr(c, "net",          ""))
-        out.append(_ComponentMeta(ref=ref, value=value, description=desc, pins=pins, net=net))
+            ref       = str(getattr(c, "ref",         ""))
+            value     = str(getattr(c, "value",        ""))
+            desc      = str(getattr(c, "description",  ""))
+            pins      = list(getattr(c, "pins",        []))
+            net       = str(getattr(c, "net",          ""))
+            # From Component dataclass: net_map values are the actual net names
+            net_map   = getattr(c, "net_map", {})
+            net_names = list(set(net_map.values())) if net_map else []
+        out.append(_ComponentMeta(ref=ref, value=value, description=desc,
+                                  pins=pins, net_names=net_names, net=net))
     return out
 
 
@@ -211,14 +218,19 @@ def run_erc(
         errors.append("ERC: no GND reference — board has zero components")
 
     # ── 3. GPIO conflicts ──────────────────────────────────────────────────────
-    # Map: net_name -> list[ref] of output-type components driving it
-    # We model each MCU module as driving all its listed pins as outputs.
+    # Map: net_name -> list[ref] of ICs driving it.
+    # Use actual net names (not pad numbers) to avoid false conflicts between
+    # components that happen to share pad numbering (e.g. pin "1" on STM32 and L298N).
+    # Skip power/ground nets — they're intentionally shared.
+    _SHARED_NETS = {"GND", "VCC", "+3V3", "3V3", "+5V", "5V", "VIN",
+                    "12V", "+12V", "24V", "VBUS", "VBAT", "GND_PWR"}
     net_drivers: dict[str, list[str]] = {}
     for c in comps:
-        if c.ref[:1] in ("U", "I"):  # ICs / MCUs
-            for pin in c.pins:
-                net_name = str(pin).strip()
-                if net_name:
+        if c.ref[:1] in ("U", "I"):  # ICs / MCUs only
+            # Use named nets (from net_map) not pad numbers
+            nets_to_check = c.net_names if c.net_names else []
+            for net_name in nets_to_check:
+                if net_name and net_name not in _SHARED_NETS:
                     net_drivers.setdefault(net_name, []).append(c.ref)
     for net, drivers in net_drivers.items():
         if len(drivers) > 1:
@@ -257,16 +269,22 @@ def run_erc(
     if any("hx711" in c.value.lower() for c in comps):
         current_map["3V3"] = current_map.get("3V3", 0.0) + 0.01  # HX711 < 10 mA
 
-    # Default trace width assumption from pcbnew generator: 0.25 mm signal,
-    # 0.5 mm power.  Flag when estimated current exceeds what a 0.5 mm trace
-    # can carry per IPC-2221.
+    # High-current motor supply nets use 1.2mm traces per IPC-2221 (set in _select_trace_width)
+    _HIGH_CURRENT_NETS = {"VIN", "12V", "+12V", "VS", "24V", "+24V",
+                          "MOTOR_A+", "MOTOR_A-", "MOTOR_B+", "MOTOR_B-",
+                          "OUT1", "OUT2", "OUT3", "OUT4"}
+    ASSUMED_HIGH_CURRENT_MM = 2.0   # 2mm handles up to ~9A (L298N full load)
     ASSUMED_POWER_TRACE_MM = 0.5
     ASSUMED_SIGNAL_TRACE_MM = 0.25
 
     for net_label, current_a in current_map.items():
         required = _ipc2221_min_width(current_a)
-        # Use power trace assumption for supply rails
-        actual = ASSUMED_POWER_TRACE_MM if net_label in _POWER_NETS else ASSUMED_SIGNAL_TRACE_MM
+        if net_label in _HIGH_CURRENT_NETS:
+            actual = ASSUMED_HIGH_CURRENT_MM
+        elif net_label in _POWER_NETS:
+            actual = ASSUMED_POWER_TRACE_MM
+        else:
+            actual = ASSUMED_SIGNAL_TRACE_MM
         if required > actual:
             trace_violations.append({
                 "net":         net_label,
