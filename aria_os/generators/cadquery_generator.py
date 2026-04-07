@@ -970,7 +970,7 @@ def _cq_flat_plate(params: dict[str, Any]) -> str:
     import math as _math
     w    = float(params.get("width_mm",  100.0))
     d    = float(params.get("depth_mm",  params.get("width_mm", 100.0)))
-    t    = float(params.get("thickness_mm", params.get("height_mm", 10.0)))
+    t    = float(params.get("thickness_mm", params.get("depth_mm", params.get("height_mm", 10.0))))
     bore = params.get("bore_mm")
     n    = int(params.get("n_bolts", 0))
     bdia = float(params.get("bolt_dia_mm", 6.0))
@@ -1061,7 +1061,7 @@ def _cq_l_bracket(params: dict[str, Any]) -> str:
     """L-bracket: two plates joined at 90 degrees."""
     w = float(params.get("width_mm", 50.0))
     h = float(params.get("height_mm", 30.0))
-    t = float(params.get("thickness_mm", 3.0))
+    t = float(params.get("thickness_mm", params.get("depth_mm", 3.0)))
     hole = float(params.get("hole_dia_mm", params.get("bolt_dia_mm", 4.0)))
     n = max(0, int(params.get("n_bolts", 4)))
     leg_h = float(params.get("leg_height_mm", h))  # vertical leg height
@@ -1095,20 +1095,21 @@ vert = (cq.Workplane("XY")
 
 result = base.union(vert)
 
-# Holes in base plate
+# Holes in base plate — cut through top face (Z-axis)
 base_holes = {repr(base_pts)}
 if base_holes:
-    hole_cutter = (cq.Workplane("XY").workplane(offset=-1)
-        .pushPoints(base_holes).circle(HOLE_DIA/2).extrude(T + 2))
-    result = result.cut(hole_cutter)
+    result = (result
+        .faces(">Z").workplane()
+        .pushPoints(base_holes)
+        .hole(HOLE_DIA))
 
-# Holes in vertical leg
+# Holes in vertical leg — cut through back face (Y-axis, most negative Y face)
 vert_hole_pts = {repr(vert_pts)}
 if vert_hole_pts:
-    vert_cutter = (cq.Workplane("XZ")
-        .workplane(offset=H/2)
-        .pushPoints(vert_hole_pts).circle(HOLE_DIA/2).extrude(T + 2))
-    result = result.cut(vert_cutter)
+    result = (result
+        .faces("<Y").workplane()
+        .pushPoints(vert_hole_pts)
+        .hole(HOLE_DIA))
 
 bb = result.val().BoundingBox()
 print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
@@ -2412,7 +2413,7 @@ def _cq_gusset(params: dict[str, Any]) -> str:
     import math as _m
     leg_a     = float(params.get("leg_a_mm", 60.0))
     leg_b     = float(params.get("leg_b_mm", 60.0))
-    thickness = float(params.get("thickness_mm", 5.0))
+    thickness = float(params.get("thickness_mm", params.get("depth_mm", 5.0)))
     n_bolts   = max(0, int(params.get("n_bolts", 4)))
     bolt_dia  = float(params.get("bolt_dia_mm", 6.0))
     return f"""
