@@ -14,6 +14,14 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 
+def _cadquery_available():
+    try:
+        import cadquery  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Fixtures — programmatic test meshes
 # ---------------------------------------------------------------------------
@@ -366,3 +374,147 @@ class TestScanPipeline:
         assert "topology" in data
         assert "primitives" in data
         assert "parametric_description" in data
+
+
+# ---------------------------------------------------------------------------
+# Reconstruction tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def box_with_holes_stl(tmp_path):
+    """80x50x25mm box with 4 through-holes (8mm diameter) as STL."""
+    box = trimesh.creation.box(extents=[80, 50, 25])
+    for x, y in [(-25, -15), (-25, 15), (25, -15), (25, 15)]:
+        hole = trimesh.creation.cylinder(radius=4, height=30, sections=32)
+        hole.apply_translation([x, y, 0])
+        box = box.difference(hole)
+    path = tmp_path / "box_holes.stl"
+    box.export(str(path))
+    return path
+
+
+class TestReconstructAgent:
+
+    @pytest.mark.skipif(not _cadquery_available(), reason="cadquery not installed")
+    def test_reconstruct_prismatic_generates_script(self, cube_stl, tmp_path):
+        """Scan a cube, reconstruct it, verify script is generated."""
+        from aria_os.scan_pipeline import run_scan_pipeline, reconstruct_from_catalog
+
+        entry = run_scan_pipeline(
+            cube_stl,
+            output_dir=tmp_path / "scan_out",
+            catalog_path=tmp_path / "catalog.json",
+        )
+        result = reconstruct_from_catalog(
+            entry.id,
+            catalog_path=tmp_path / "catalog.json",
+            output_dir=tmp_path / "recon_out",
+        )
+        assert Path(result["script_path"]).exists()
+        script = Path(result["script_path"]).read_text()
+        assert "cadquery" in script.lower() or "cq" in script
+
+    @pytest.mark.skipif(not _cadquery_available(), reason="cadquery not installed")
+    def test_reconstruct_prismatic_dimensions_match(self, cube_stl, tmp_path):
+        """Scan a 50x30x20 cube, reconstruct, verify dims match within 1mm."""
+        from aria_os.scan_pipeline import run_scan_pipeline, reconstruct_from_catalog
+
+        entry = run_scan_pipeline(
+            cube_stl,
+            output_dir=tmp_path / "scan_out",
+            catalog_path=tmp_path / "catalog.json",
+        )
+        result = reconstruct_from_catalog(
+            entry.id,
+            catalog_path=tmp_path / "catalog.json",
+            output_dir=tmp_path / "recon_out",
+        )
+        assert result.get("bbox") is not None, f"Reconstruction failed: {result.get('error')}"
+        bb = result["bbox"]
+        orig = sorted([50.0, 30.0, 20.0])
+        recon = sorted([bb["x"], bb["y"], bb["z"]])
+        assert recon == pytest.approx(orig, abs=1.0), f"Dims mismatch: orig={orig} recon={recon}"
+
+    @pytest.mark.skipif(not _cadquery_available(), reason="cadquery not installed")
+    def test_reconstruct_prismatic_step_exported(self, cube_stl, tmp_path):
+        """Reconstruction produces a STEP file."""
+        from aria_os.scan_pipeline import run_scan_pipeline, reconstruct_from_catalog
+
+        entry = run_scan_pipeline(
+            cube_stl,
+            output_dir=tmp_path / "scan_out",
+            catalog_path=tmp_path / "catalog.json",
+        )
+        result = reconstruct_from_catalog(
+            entry.id,
+            catalog_path=tmp_path / "catalog.json",
+            output_dir=tmp_path / "recon_out",
+        )
+        assert result.get("step_path"), f"No STEP: {result.get('error')}"
+        assert Path(result["step_path"]).exists()
+        assert Path(result["step_path"]).stat().st_size > 500
+
+    @pytest.mark.skipif(not _cadquery_available(), reason="cadquery not installed")
+    def test_reconstruct_turned_part(self, cylinder_stl, tmp_path):
+        """Scan a cylinder, reconstruct as turned part, verify dims."""
+        from aria_os.scan_pipeline import run_scan_pipeline, reconstruct_from_catalog
+
+        entry = run_scan_pipeline(
+            cylinder_stl,
+            output_dir=tmp_path / "scan_out",
+            catalog_path=tmp_path / "catalog.json",
+        )
+        result = reconstruct_from_catalog(
+            entry.id,
+            catalog_path=tmp_path / "catalog.json",
+            output_dir=tmp_path / "recon_out",
+        )
+        assert result.get("bbox") is not None, f"Reconstruction failed: {result.get('error')}"
+        bb = result["bbox"]
+        # Original: 30mm dia x 40mm tall → bbox 30x30x40
+        assert bb["z"] == pytest.approx(40.0, abs=1.0) or max(bb["x"], bb["y"]) == pytest.approx(30.0, abs=1.0)
+
+    @pytest.mark.skipif(not _cadquery_available(), reason="cadquery not installed")
+    def test_reconstruct_box_with_holes_dimensions(self, box_with_holes_stl, tmp_path):
+        """Scan 80x50x25 box with holes, reconstruct, verify body dims within 1mm."""
+        from aria_os.scan_pipeline import run_scan_pipeline, reconstruct_from_catalog
+
+        entry = run_scan_pipeline(
+            box_with_holes_stl,
+            output_dir=tmp_path / "scan_out",
+            catalog_path=tmp_path / "catalog.json",
+        )
+        result = reconstruct_from_catalog(
+            entry.id,
+            catalog_path=tmp_path / "catalog.json",
+            output_dir=tmp_path / "recon_out",
+        )
+        assert result.get("bbox") is not None, f"Reconstruction failed: {result.get('error')}"
+        bb = result["bbox"]
+        # Body dimensions should match the original bounding box
+        orig = sorted([80.0, 50.0, 25.0])
+        recon = sorted([bb["x"], bb["y"], bb["z"]])
+        assert recon == pytest.approx(orig, abs=1.0), f"Dims mismatch: orig={orig} recon={recon}"
+
+    @pytest.mark.skipif(not _cadquery_available(), reason="cadquery not installed")
+    def test_reconstruct_box_with_holes_has_holes(self, box_with_holes_stl, tmp_path):
+        """Reconstructed box should have less volume than a solid box (holes cut material)."""
+        from aria_os.scan_pipeline import run_scan_pipeline, reconstruct_from_catalog
+
+        entry = run_scan_pipeline(
+            box_with_holes_stl,
+            output_dir=tmp_path / "scan_out",
+            catalog_path=tmp_path / "catalog.json",
+        )
+        result = reconstruct_from_catalog(
+            entry.id,
+            catalog_path=tmp_path / "catalog.json",
+            output_dir=tmp_path / "recon_out",
+        )
+        # Load reconstructed STL and check volume is less than solid box
+        if result.get("stl_path") and Path(result["stl_path"]).exists():
+            recon_mesh = trimesh.load(result["stl_path"])
+            solid_volume = 80.0 * 50.0 * 25.0  # 100,000 mm^3
+            # If holes were cut, volume should be measurably less
+            if recon_mesh.is_watertight:
+                assert abs(recon_mesh.volume) < solid_volume

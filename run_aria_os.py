@@ -1425,6 +1425,17 @@ def main():
         list_catalog(topology=_cat_topo, tags=_cat_tags, search_dims=_cat_dims)
         return
 
+    # --- --reconstruct: regenerate CAD from scanned part features ---
+    if len(sys.argv) >= 2 and sys.argv[1] == "--reconstruct":
+        if len(sys.argv) < 3:
+            print("Usage: python run_aria_os.py --reconstruct <catalog_part_id>")
+            sys.exit(1)
+        _recon_id = sys.argv[2]
+        from aria_os.scan_pipeline import reconstruct_from_catalog
+        reconstruct_from_catalog(_recon_id)
+        print("Done.")
+        return
+
     if len(sys.argv) < 2:
         print("Usage: python run_aria_os.py \"describe the part you want\"")
         print("       python run_aria_os.py \"part description\" --fea   # force FEA after export")
@@ -1454,6 +1465,7 @@ def main():
         print("       python run_aria_os.py --full \"part description\"  # generate+FEA+draw+render+CAM+setup+quote in one shot")
         print("       python run_aria_os.py --scan <file.stl> [--material X] [--tags tag1,tag2]  # reverse: scan → features → catalog")
         print("       python run_aria_os.py --catalog [--topology prismatic] [--search 50x30x20] [--tags bracket]")
+        print("       python run_aria_os.py --reconstruct <catalog_id>  # regenerate parametric CAD from scan features")
         print("Example: python run_aria_os.py \"generate the ARIA housing shell\"")
         sys.exit(1)
 

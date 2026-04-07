@@ -10,6 +10,7 @@ Or via CLI:
     python run_aria_os.py --catalog
     python run_aria_os.py --catalog --topology prismatic
     python run_aria_os.py --catalog --search "50x30x20"
+    python run_aria_os.py --reconstruct <catalog_id>
 """
 from __future__ import annotations
 
@@ -158,6 +159,93 @@ def _save_features(features: PartFeatureSet, path: str):
         ],
     }
     Path(path).write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+
+
+def reconstruct_from_catalog(
+    part_id: str,
+    catalog_path: Optional[str | Path] = None,
+    output_dir: Optional[str | Path] = None,
+) -> dict:
+    """
+    Load a catalog entry's PartFeatureSet and generate a CadQuery script
+    that parametrically recreates the part.
+
+    Returns dict with script_path, step_path, stl_path, bbox, error.
+    """
+    from .agents.scan_catalog_agent import ScanCatalogAgent
+    from .agents.reconstruct_agent import reconstruct
+
+    catalog = ScanCatalogAgent(catalog_path=catalog_path)
+    entry = catalog.get(part_id)
+    if entry is None:
+        print(f"[RECONSTRUCT] Part '{part_id}' not found in catalog.")
+        return {"error": f"Part '{part_id}' not found"}
+
+    # Load features from JSON
+    if not entry.features_path or not Path(entry.features_path).exists():
+        print(f"[RECONSTRUCT] No features file for '{part_id}'. Run --scan first.")
+        return {"error": "No features file"}
+
+    features_data = json.loads(Path(entry.features_path).read_text(encoding="utf-8"))
+    features = _load_features(features_data)
+
+    # Determine output dir
+    if output_dir is None:
+        output_dir = Path("outputs/cad/reconstructed") / part_id
+    else:
+        output_dir = Path(output_dir)
+
+    event_bus.emit("scan", f"[Reconstruct] Starting: {part_id} ({features.topology})")
+
+    result = reconstruct(
+        features=features,
+        cleaned_mesh_path=entry.stl_path,
+        output_dir=output_dir,
+        part_id=part_id,
+    )
+
+    # Print summary
+    print(f"\n  [RECONSTRUCT] {'=' * 50}")
+    print(f"  [RECONSTRUCT] Part ID:    {part_id}")
+    print(f"  [RECONSTRUCT] Topology:   {features.topology}")
+    print(f"  [RECONSTRUCT] Script:     {result.get('script_path', 'N/A')}")
+    if result.get("bbox"):
+        bb = result["bbox"]
+        print(f"  [RECONSTRUCT] Output:     {bb['x']}x{bb['y']}x{bb['z']}mm")
+    if result.get("step_path"):
+        print(f"  [RECONSTRUCT] STEP:       {result['step_path']}")
+    if result.get("stl_path"):
+        print(f"  [RECONSTRUCT] STL:        {result['stl_path']}")
+    if result.get("error"):
+        print(f"  [RECONSTRUCT] Error:      {result['error']}")
+    else:
+        print(f"  [RECONSTRUCT] Status:     OK")
+    print(f"  [RECONSTRUCT] {'=' * 50}\n")
+
+    return result
+
+
+def _load_features(data: dict) -> PartFeatureSet:
+    """Load a PartFeatureSet from a features JSON dict."""
+    from .models.scan_models import DetectedPrimitive
+
+    primitives = []
+    for p in data.get("primitives", []):
+        primitives.append(DetectedPrimitive(
+            type=p["type"],
+            parameters=p["parameters"],
+            surface_area_mm2=p.get("surface_area_mm2", 0.0),
+            inlier_count=p.get("inlier_count", 0),
+            confidence=p.get("confidence", 0.0),
+        ))
+
+    return PartFeatureSet(
+        primitives=primitives,
+        topology=data.get("topology", "unknown"),
+        coverage=data.get("coverage", 0.0),
+        confidence=data.get("confidence", 0.0),
+        parametric_description=data.get("parametric_description", {}),
+    )
 
 
 def list_catalog(
