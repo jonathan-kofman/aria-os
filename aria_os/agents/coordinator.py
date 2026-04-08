@@ -165,6 +165,11 @@ class JobContext:
     # Phase 2 output (coordinator synthesis)
     geometry_spec: dict[str, Any] = field(default_factory=dict)
 
+    # Phase 2 geometry routing (set by classifier at end of synthesis)
+    geometry_type: str = "prismatic"    # see GEOMETRY_TYPES constant
+    geometry_kernel: str = "cadquery"   # cadquery|nx|fusion|grasshopper|blender|sdf
+    geometry_rationale: str = ""
+
     # Phase 3 outputs (geometry + validation)
     geometry_path: str = ""       # STEP/3dm path
     stl_path: str = ""
@@ -513,12 +518,22 @@ class CoordinatorAgent:
         # step-by-step CadQuery geometry description that the 7b model can follow.
         build_recipe = await self._synthesize_build_recipe(ctx, state.spec, research_text)
 
+        # Classify geometry type and select CAD kernel before Phase 3
+        classification = await self._classify_geometry_type(ctx, state.spec)
+        ctx.geometry_type = classification.get("geometry_type", "prismatic")
+        ctx.geometry_kernel = classification.get("kernel", "cadquery")
+        ctx.geometry_rationale = classification.get("rationale", "")
+        print(f"  [Phase 2] Kernel: {ctx.geometry_kernel} ({ctx.geometry_type}) — {ctx.geometry_rationale}")
+
         ctx.geometry_spec = {
             "spec": state.spec,
             "cem_params": state.cem_params,
             "material": state.material,
             "research_context": research_text[:2000],
             "build_recipe": build_recipe,
+            "geometry_type": ctx.geometry_type,
+            "geometry_kernel": ctx.geometry_kernel,
+            "geometry_rationale": ctx.geometry_rationale,
         }
         ctx.save_artifact("geometry_spec.json", ctx.geometry_spec)
 
@@ -526,60 +541,104 @@ class CoordinatorAgent:
         if build_recipe:
             print(f"  [Phase 2] Build recipe: {len(build_recipe)} chars")
         ctx.phases_completed.append("synthesis")
-        _emit(ctx, "phase_complete", "Phase 2 done", {"phase": 2, "spec": state.spec})
+        _emit(ctx, "phase_complete", "Phase 2 done", {
+            "phase": 2, "spec": state.spec,
+            "geometry_type": ctx.geometry_type, "kernel": ctx.geometry_kernel,
+        })
 
     async def _synthesize_build_recipe(
         self, ctx: JobContext, spec: dict, research: str
     ) -> str:
-        """Use LLM to create a step-by-step CadQuery build recipe from research.
+        """Use LLM to create a step-by-step geometry build recipe from research.
 
-        The recipe tells the DesignerAgent EXACTLY what geometry operations to perform,
-        in what order, with what dimensions. This compensates for the 7b model's
-        inability to reason about complex 3D shapes from scratch.
+        Calls Claude (cloud) first, falls back to local model. The recipe tells
+        the downstream geometry agent what operations to perform, in what order,
+        with exact dimensions. This is the highest-leverage LLM call in the pipeline.
         """
-        from .base_agent import _call_ollama
-        from .ollama_config import AGENT_MODELS
+        from ..llm_client import call_llm
 
-        system = """You are a CAD geometry planner. Given a part description and web research about its shape,
-create a step-by-step CadQuery build recipe.
+        system = """You are a precision CAD geometry planner for a professional engineering pipeline.
+Given a part description and research, create a step-by-step geometry build recipe.
 
 Rules:
-- Describe ONLY CadQuery operations (box, circle, extrude, cut, union, polyline)
-- NEVER use .cylinder() — use .circle(r).extrude(h)
-- NEVER use .fillet() on first attempt
-- Include exact dimensions in mm for every operation
-- Each step should be one CadQuery operation
+- Include exact dimensions in mm for every operation (derive from research or spec)
+- Each step = one geometry operation
+- NEVER use .cylinder() in CadQuery — use .circle(r).extrude(h)
+- NEVER use .fillet() on first attempt (causes OCCT failures)
+- For lattice/organic geometry, describe the math (gyroid equation, cell size, wall thickness)
+- For surface geometry, describe control points, continuity requirements, curvature intent
 
 Output format:
-STEP 1: Create base plate — cq.Workplane("XY").box(width, depth, thickness)
-STEP 2: Cut center bore — .faces(">Z").workplane().circle(r).cutThruAll()
-STEP 3: Add raised feature — .workplane(offset=thickness).rect(w, d).extrude(height)
-...etc
+STEP 1: <operation> — <exact code or mathematical description with dimensions>
+STEP 2: ...
 
-Be SPECIFIC about dimensions. Use the research to determine realistic sizes."""
+Be precise. A machinist or CAD kernel will execute these steps directly."""
 
         prompt = f"""Part request: {ctx.goal}
 
-Extracted spec: {json.dumps(spec, default=str)}
+Extracted spec: {json.dumps(spec, default=str)[:1000]}
 
 Research findings:
-{research[:3000]}
+{research[:4000]}
 
-Create a step-by-step CadQuery build recipe for this part.
-Include exact dimensions from the research or spec.
-Describe the 3D shape in terms of CadQuery operations."""
+Create a complete step-by-step build recipe with exact dimensions."""
 
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None, _call_ollama, prompt, system, AGENT_MODELS.get("spec", "qwen2.5-coder:7b")
-        )
+        response = await loop.run_in_executor(None, call_llm, prompt, system, ctx.repo_root)
         return response or ""
+
+    async def _classify_geometry_type(self, ctx: JobContext, spec: dict) -> dict:
+        """Classify geometry complexity and select the best CAD kernel.
+
+        Returns {geometry_type, kernel, rationale}. Always returns a valid dict
+        — defaults to prismatic/cadquery on any failure.
+        """
+        from ..llm_client import call_llm
+
+        system = """You are a CAD routing system. Output ONLY valid JSON — no markdown, no explanation.
+
+{
+  "geometry_type": "<type>",
+  "kernel": "<kernel>",
+  "rationale": "<one sentence>"
+}
+
+geometry_type → kernel mapping:
+  prismatic         → cadquery    (standard machined: flanges, brackets, housings, bores)
+  freeform_surface  → nx          (class-A NURBS, aerospace skins, compound curvature, G2 continuity)
+  precision_assembly→ nx          (multi-body GD&T, tight tolerances, mechanisms, motion)
+  lattice_tpms      → sdf         (gyroid, Schwartz P/D, periodic minimal surfaces, TPMS infill)
+  lattice_structural→ fusion      (octet truss, Kagome, load-bearing cellular, FEA-validated)
+  organic_tspline   → fusion      (ergonomic, sculptural, T-spline freeform, smooth organic)
+  generative_topopt → fusion      (minimum-weight, topology optimization, generative design)
+  sheet_metal       → fusion      (bends, flanges, flat patterns, sheetmetal enclosures)
+  algorithmic       → grasshopper (computational patterns, Voronoi, non-standard parametric)
+  mesh_heavy        → blender     (subdivision surfaces, coils, arc-weave, non-manifold mesh)"""
+
+        prompt = f"""Goal: {ctx.goal}
+Spec: {json.dumps(spec, default=str)[:400]}"""
+
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, call_llm, prompt, system, ctx.repo_root)
+
+        default = {"geometry_type": "prismatic", "kernel": "cadquery", "rationale": "default fallback"}
+        if not response:
+            return default
+        try:
+            text = response.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+            result = json.loads(text)
+            if "geometry_type" in result and "kernel" in result:
+                return result
+        except Exception:
+            pass
+        return default
 
     # -- Phase 3: Geometry Generation + Validation ---------------------------
 
     async def _phase_3_geometry(self, ctx: JobContext) -> None:
         _emit(ctx, "phase", "Phase 3: Geometry + Validation", {"phase": 3})
-        print(f"\n  [Phase 3] Generating geometry...")
+        kernel = ctx.geometry_kernel or "cadquery"
+        print(f"\n  [Phase 3] Generating geometry (kernel={kernel}, type={ctx.geometry_type})...")
 
         from .refinement_loop import run_agent_loop
         from .design_state import DesignState
@@ -587,59 +646,27 @@ Describe the 3D shape in terms of CadQuery operations."""
 
         domain = detect_domain(ctx.goal)
 
-        # ECAD domain: use dedicated generator instead of CadQuery pipeline
+        # Domain-specific overrides (always win over ML classifier)
         if domain == "ecad":
             await self._phase_3_ecad(ctx)
             return
-
-        # Civil/AutoCAD domain: use DXF generator
         if domain == "civil":
             await self._phase_3_civil(ctx)
             return
 
-        state = DesignState(
-            goal=ctx.goal,
-            repo_root=ctx.repo_root,
-            domain=domain,
-            spec=ctx.geometry_spec.get("spec", {}),
-            cem_params=ctx.geometry_spec.get("cem_params", {}),
-            material=ctx.geometry_spec.get("material", ""),
-            max_iterations=10,
-        )
-        state.plan["research_context"] = ctx.geometry_spec.get("research_context", "")
-        state.plan["build_recipe"] = ctx.geometry_spec.get("build_recipe", "")
+        # Kernel routing from Phase 2 classifier
+        if kernel == "nx":
+            await self._phase_3_nx(ctx)
+            return
+        if kernel == "sdf":
+            await self._phase_3_implicit(ctx)
+            return
+        # Fusion/Grasshopper/Blender: scripts generated in Phase 4; use CadQuery
+        # for the STEP validation file. Kernel label still flows to the dashboard.
+        if kernel in ("fusion", "grasshopper", "blender"):
+            _emit(ctx, "kernel_note", f"{kernel} script will be generated in Phase 4", {"kernel": kernel})
 
-        # Run the refinement loop (sync — runs in thread pool)
-        loop = asyncio.get_event_loop()
-        state = await loop.run_in_executor(None, run_agent_loop, state)
-
-        ctx.validation_passed = state.converged
-        ctx.geometry_path = state.artifacts.get("step_path", "")
-        ctx.stl_path = state.artifacts.get("stl_path", "")
-        ctx.validation_report = {
-            "converged": state.converged,
-            "iterations": state.iteration,
-            "failures": list(state.failures),
-            "bbox": state.bbox,
-        }
-        ctx.save_artifact("validation_report.json", ctx.validation_report)
-
-        tag = "PASS" if state.converged else "FAIL"
-        failure_category = "none"
-        if not state.converged:
-            failure_category = _categorize_cad_failure(
-                list(state.failures),
-                getattr(state, "generation_error", ""),
-            )
-            ctx.validation_report["failure_category"] = failure_category
-            print(f"  [Phase 3] Failure category: {failure_category}")
-
-        print(f"  [Phase 3] {tag} — {state.iteration} iterations, {len(state.failures)} failures")
-        ctx.phases_completed.append("geometry")
-        _emit(ctx, "phase_complete", f"Phase 3: {tag}", {
-            "phase": 3,
-            "failure_category": failure_category,
-        })
+        await self._phase_3_cadquery_loop(ctx)
 
     # -- Phase 3 variants: ECAD and Civil domains --------------------------------
 
@@ -734,6 +761,159 @@ Describe the 3D shape in terms of CadQuery operations."""
 
         ctx.phases_completed.append("geometry")
         _emit(ctx, "phase_complete", "Phase 3: Civil", {"phase": 3})
+
+    # -- Phase 3 variant: Siemens NX (headless journal execution) ---------------
+
+    async def _phase_3_nx(self, ctx: JobContext) -> None:
+        """Generate NXOpen Python journal via Claude and attempt batch execution.
+
+        Tries headless run via run_journal.exe. Falls back to CadQuery refinement
+        loop if NX batch is unavailable (Student Edition restriction) or fails.
+        """
+        _emit(ctx, "phase", "Phase 3: NX Journal Generation", {"phase": 3})
+        print(f"\n  [Phase 3] NX path: generating NXOpen journal...")
+
+        try:
+            from ..generators.nx_generator import generate_nx_journal, run_nx_headless
+
+            out_dir = ctx.repo_root / "outputs" / "cad" / "nx"
+            spec = ctx.geometry_spec.get("spec", {})
+            build_recipe = ctx.geometry_spec.get("build_recipe", "")
+
+            loop = asyncio.get_event_loop()
+            journal_result = await loop.run_in_executor(
+                None, generate_nx_journal,
+                ctx.goal, spec, build_recipe, out_dir, ctx.repo_root,
+            )
+
+            journal_path = journal_result.get("journal_path", "")
+            if journal_path:
+                ctx.save_artifact("nx_journal_path.txt", journal_path)
+                print(f"  [Phase 3] NX journal: {journal_path}")
+
+                # Attempt headless batch execution
+                batch_result = await loop.run_in_executor(
+                    None, run_nx_headless, journal_path, ctx.repo_root)
+
+                if batch_result.get("success"):
+                    ctx.geometry_path = batch_result.get("step_path", "")
+                    ctx.stl_path = batch_result.get("stl_path", "")
+                    ctx.validation_passed = True
+                    ctx.validation_report = {
+                        "converged": True, "kernel": "nx",
+                        "geometry_type": ctx.geometry_type,
+                        "headless": True,
+                    }
+                    print(f"  [Phase 3] NX PASS (headless) — {ctx.geometry_path}")
+                    ctx.phases_completed.append("geometry")
+                    _emit(ctx, "phase_complete", "Phase 3: NX", {
+                        "phase": 3, "kernel": "nx", "headless": True})
+                    return
+                else:
+                    print(f"  [Phase 3] NX batch unavailable ({batch_result.get('error','')}) — falling back to CadQuery")
+        except Exception as exc:
+            print(f"  [Phase 3] NX generator error: {exc} — falling back to CadQuery")
+
+        # Fallback: CadQuery refinement loop
+        await self._phase_3_cadquery_loop(ctx)
+
+    # -- Phase 3 variant: Implicit SDF geometry (sdf library) -------------------
+
+    async def _phase_3_implicit(self, ctx: JobContext) -> None:
+        """Generate TPMS/implicit geometry via Claude-written sdf library Python.
+
+        Uses the `sdf` library (pip install sdf) which runs pure Python marching
+        cubes. Falls back to CadQuery if sdf is not installed or script fails.
+        """
+        _emit(ctx, "phase", "Phase 3: Implicit SDF Geometry", {"phase": 3})
+        print(f"\n  [Phase 3] SDF path: generating implicit geometry...")
+
+        try:
+            from .implicit_geometry import generate_sdf_geometry
+
+            out_dir = ctx.repo_root / "outputs" / "cad" / "sdf"
+            spec = ctx.geometry_spec.get("spec", {})
+            build_recipe = ctx.geometry_spec.get("build_recipe", "")
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, generate_sdf_geometry,
+                ctx.goal, spec, build_recipe, out_dir, ctx.repo_root,
+            )
+
+            if result.get("success"):
+                ctx.stl_path = result["stl_path"]
+                ctx.geometry_path = result["stl_path"]  # no STEP for SDF output
+                ctx.validation_passed = True
+                ctx.validation_report = {
+                    "converged": True, "kernel": "sdf",
+                    "geometry_type": ctx.geometry_type,
+                    "manifold": result.get("manifold", True),
+                    "bbox": result.get("bbox"),
+                }
+                print(f"  [Phase 3] SDF PASS — {ctx.stl_path}")
+                ctx.phases_completed.append("geometry")
+                _emit(ctx, "phase_complete", "Phase 3: SDF", {
+                    "phase": 3, "kernel": "sdf", "bbox": result.get("bbox")})
+                return
+            else:
+                print(f"  [Phase 3] SDF failed ({result.get('error','')}) — falling back to CadQuery")
+        except Exception as exc:
+            print(f"  [Phase 3] SDF error: {exc} — falling back to CadQuery")
+
+        await self._phase_3_cadquery_loop(ctx)
+
+    # -- Phase 3 core: CadQuery refinement loop (extracted for reuse) -----------
+
+    async def _phase_3_cadquery_loop(self, ctx: JobContext) -> None:
+        """Run the CadQuery agent refinement loop. Used as primary and fallback."""
+        from .refinement_loop import run_agent_loop
+        from .design_state import DesignState
+        from .domains import detect_domain
+
+        domain = detect_domain(ctx.goal)
+        state = DesignState(
+            goal=ctx.goal,
+            repo_root=ctx.repo_root,
+            domain=domain,
+            spec=ctx.geometry_spec.get("spec", {}),
+            cem_params=ctx.geometry_spec.get("cem_params", {}),
+            material=ctx.geometry_spec.get("material", ""),
+            max_iterations=10,
+        )
+        state.plan["research_context"] = ctx.geometry_spec.get("research_context", "")
+        state.plan["build_recipe"] = ctx.geometry_spec.get("build_recipe", "")
+
+        loop = asyncio.get_event_loop()
+        state = await loop.run_in_executor(None, run_agent_loop, state)
+
+        ctx.validation_passed = state.converged
+        ctx.geometry_path = state.artifacts.get("step_path", "")
+        ctx.stl_path = state.artifacts.get("stl_path", "")
+        ctx.validation_report = {
+            "converged": state.converged,
+            "kernel": "cadquery",
+            "geometry_type": ctx.geometry_type,
+            "iterations": state.iteration,
+            "failures": list(state.failures),
+            "bbox": state.bbox,
+        }
+        ctx.save_artifact("validation_report.json", ctx.validation_report)
+
+        tag = "PASS" if state.converged else "FAIL"
+        failure_category = "none"
+        if not state.converged:
+            failure_category = _categorize_cad_failure(
+                list(state.failures),
+                getattr(state, "generation_error", ""),
+            )
+            ctx.validation_report["failure_category"] = failure_category
+            print(f"  [Phase 3] Failure category: {failure_category}")
+
+        print(f"  [Phase 3] CadQuery {tag} — {state.iteration} iterations")
+        ctx.phases_completed.append("geometry")
+        _emit(ctx, "phase_complete", f"Phase 3: CadQuery {tag}", {
+            "phase": 3, "kernel": "cadquery", "failure_category": failure_category})
 
     # -- Phase 4: Parallel Manufacturing Outputs --------------------------------
     # Run ALL output domains in parallel: CAM + FEA + Drawing + Fusion + DFM
