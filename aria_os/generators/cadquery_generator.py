@@ -2552,11 +2552,11 @@ if N_BENDS >= 2:
     result = result.union(flange2)
 
 # ── 4. Holes in flat web ──────────────────────────────────────────────────────
-{f"""for hx, hy in {hole_pts!r}:
+{f'''for hx, hy in {hole_pts!r}:
     result = result.cut(
         cq.Workplane("XZ").workplane(offset=0).center(hx, 0)
         .circle({hdia:.2f} / 2.0).extrude(WIDTH_MM + 2 * THICK_MM + 2)
-    )""" if hole_pts else "# No holes requested"}
+    )''' if hole_pts else "# No holes requested"}
 
 # Filter to largest solid (guards against flange union failures)
 solids = result.solids().vals()
@@ -2603,14 +2603,14 @@ outer = cq.Workplane("XY").box(L, W, H)
 result = outer.faces(">Z").shell(-T)
 
 {"# Holes in base" if nh > 0 else "# No holes"}
-{f"""import math as _m2
+{f'''import math as _m2
 _margin = max({hd} * 2.0, 10.0)
 _pts = []
 for _i in range({nh}):
     _x = -L/2 + _margin + (L - 2*_margin) * _i / max({nh}-1, 1)
     _pts.append((_x, 0.0))
 result = (result.faces("<Z").workplane()
-    .pushPoints(_pts).hole({hd:.2f}))""" if nh > 0 else ""}
+    .pushPoints(_pts).hole({hd:.2f}))''' if nh > 0 else ""}
 
 # Single solid check
 solids = result.solids().vals()
