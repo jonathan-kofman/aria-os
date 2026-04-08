@@ -1228,8 +1228,17 @@ Spec: {json.dumps(spec, default=str)[:400]}"""
             op_type = op.get("type") or op.get("role") or op.get("name", "")
             if op_type:
                 required_ops.append(op_type)
+        # Kernel-aware default operations
+        _kernel_ops = {
+            "sdf":        ["additive_3dp", "post_processing"],
+            "nx":         ["milling", "5axis"],
+            "fusion":     ["milling"],
+            "grasshopper": ["milling"],
+            "blender":    ["additive_3dp"],
+            "cadquery":   ["milling"],
+        }
         if not required_ops:
-            required_ops = ["milling"]
+            required_ops = _kernel_ops.get(ctx.geometry_kernel, ["milling"])
 
         # Load DFM / quote / drawing artifacts for extended payload
         dfm_summary = None
@@ -1263,7 +1272,18 @@ Spec: {json.dumps(spec, default=str)[:400]}"""
             "material_spec": material_spec,
             "estimated_cycle_time_minutes": cycle_time,
             "required_operations": required_ops,
-            "tolerance_class": "standard",
+            "tolerance_class": {
+                "freeform_surface": "tight",
+                "precision_assembly": "ultra",
+                "lattice_tpms": "standard",
+                "lattice_structural": "medium",
+                "organic_tspline": "medium",
+                "generative_topopt": "medium",
+                "sheet_metal": "standard",
+                "algorithmic": "medium",
+                "mesh_heavy": "standard",
+                "prismatic": "standard",
+            }.get(ctx.geometry_type, "standard"),
             "aria_job_id": ctx.job_id,
             "generated_at": ctx.created_at.isoformat(),
             "geometry_hash": geo_hash,
@@ -1274,6 +1294,9 @@ Spec: {json.dumps(spec, default=str)[:400]}"""
             "extra": {
                 "trace_id": ctx.job_id,
                 "source_material_name": raw_material,
+                "geometry_type": ctx.geometry_type,
+                "geometry_kernel": ctx.geometry_kernel,
+                "geometry_rationale": ctx.geometry_rationale,
                 "dfm_summary": dfm_summary,
                 "aria_quote": quote_data,
                 "drawing_path": drawing_path,
