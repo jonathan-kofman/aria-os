@@ -1,0 +1,4 @@
+{
+  "name": "aria-os-dashboard",
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}

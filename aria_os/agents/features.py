@@ -75,6 +75,11 @@ def load_features(profile: str = "") -> ARIAFeatures:
             else:
                 setattr(features, key, val)
 
+    # Auto-activate MILLFORGE_BRIDGE when connection credentials are available
+    if not features.MILLFORGE_BRIDGE:
+        if os.environ.get("MILLFORGE_API_URL") or os.environ.get("MILLFORGE_JWT"):
+            features.MILLFORGE_BRIDGE = True
+
     _features = features
     return features
 

@@ -22,6 +22,7 @@ GEOMETRY_PATTERNS = _MEMORY_DIR / "geometry_patterns.md"
 VALIDATION_LESSONS = _MEMORY_DIR / "validation_lessons.md"
 MATERIAL_KNOWLEDGE = _MEMORY_DIR / "material_knowledge.md"
 MACHINE_PREFERENCES = _MEMORY_DIR / "machine_preferences.md"
+QC_FEEDBACK_LOG = _MEMORY_DIR / "qc_feedback.jsonl"
 
 # Three-gate thresholds
 _TIME_GATE_HOURS = 24
@@ -96,6 +97,86 @@ def search_memory(query: str, max_chars: int = 1500) -> str:
 # ---------------------------------------------------------------------------
 # Memory writer — called after generation runs
 # ---------------------------------------------------------------------------
+
+def record_qc_feedback(
+    part_type: str,
+    material: str,
+    defects: list[str],
+    qc_passed: bool,
+    aria_job_id: str = "",
+) -> None:
+    """Record a MillForge QC outcome so future generations can avoid the same defects."""
+    ensure_memory_dir()
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "part_type": part_type.lower().strip(),
+        "material": material.lower().strip(),
+        "defects": defects,
+        "qc_passed": qc_passed,
+        "aria_job_id": aria_job_id,
+    }
+    with open(QC_FEEDBACK_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+
+
+def read_qc_memory(material: str, part_type: str, max_entries: int = 5) -> str:
+    """Return a formatted defect history string for injection into the Phase 2 spec prompt.
+
+    Matches on exact material and fuzzy part_type (substring either way).
+    Only returns entries where qc_passed=False (failures only).
+    Returns empty string if no relevant history exists.
+    """
+    ensure_memory_dir()
+    if not QC_FEEDBACK_LOG.exists():
+        return ""
+
+    material_lc = material.lower().strip()
+    part_lc = part_type.lower().strip()
+    failures: list[dict] = []
+
+    try:
+        for line in QC_FEEDBACK_LOG.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if e.get("qc_passed", True):
+                continue  # only care about failures
+            m_match = e.get("material", "") == material_lc
+            p_stored = e.get("part_type", "")
+            p_match = part_lc in p_stored or p_stored in part_lc
+            if m_match and p_match:
+                failures.append(e)
+    except Exception:
+        return ""
+
+    if not failures:
+        return ""
+
+    # Keep most recent max_entries, tally defect frequency
+    failures = failures[-max_entries:]
+    counts: dict[str, int] = {}
+    for e in failures:
+        for d in e.get("defects", []):
+            counts[d] = counts.get(d, 0) + 1
+
+    if not counts:
+        return ""
+
+    lines = [
+        f"WARNING — {len(failures)} QC failure(s) recorded for {material}/{part_type}:",
+    ]
+    for defect, n in sorted(counts.items(), key=lambda x: -x[1]):
+        lines.append(f"  - {defect}: {n} occurrence{'s' if n > 1 else ''}")
+    lines.append(
+        "Design guidance: avoid sharp internal corners, ensure adequate surface finish "
+        "allowance, verify wall thicknesses meet material minimums."
+    )
+    return "\n".join(lines)
+
 
 def record_generation(
     part_type: str,

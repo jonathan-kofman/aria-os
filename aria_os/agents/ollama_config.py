@@ -67,4 +67,5 @@ CONTEXT_LIMITS: dict[str, int] = {
 
 # Ollama connection
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "600"))  # 10 min for 14b model
+OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "90"))   # 90s — enough for 7B cold load
+OLLAMA_WARMUP_TIMEOUT = int(os.environ.get("OLLAMA_WARMUP_TIMEOUT", "10"))  # pre-flight check

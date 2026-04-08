@@ -111,10 +111,14 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
     if _use_agents is None:
         try:
             from .agents.base_agent import is_ollama_available
-            _use_agents = is_ollama_available()
+            from .agents.ollama_config import AGENT_MODELS
+            _agent_model = AGENT_MODELS.get("designer", "qwen2.5-coder:7b")
+            _use_agents = is_ollama_available(model=_agent_model)
             if not _use_agents:
-                print("[INFO] Ollama not running — using template/LLM planning mode.")
-                print("       Start Ollama for faster agentic generation: ollama serve")
+                print("[INFO] Ollama not running or model not ready — using template/LLM planning mode.")
+                print(f"       To enable agents: ollama serve && ollama pull {_agent_model}")
+            else:
+                print(f"[INFO] Agent mode enabled — model: {_agent_model}")
         except Exception as _oa_exc:
             _use_agents = False
             print(f"[WARN] Ollama check failed ({_oa_exc}) — using template/LLM planning mode.")
@@ -536,13 +540,12 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
     # --- Agent mode: autonomous multi-agent loop ---
     _use_agents = agent_mode
     if _use_agents is None:
-        # Auto-detect: use agents if Ollama is available
         try:
             from .agents.base_agent import is_ollama_available
-            _use_agents = is_ollama_available()
+            from .agents.ollama_config import AGENT_MODELS
+            _use_agents = is_ollama_available(model=AGENT_MODELS.get("designer", "qwen2.5-coder:7b"))
         except Exception:
             _use_agents = False
-    # (Ollama status already printed above during first check)
 
     # --- Generate artifacts (legacy path — only when agents NOT used) ---
     artifacts: dict[str, str] = {}

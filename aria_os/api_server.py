@@ -162,6 +162,19 @@ def _check_zoo() -> dict:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+ARIA_SCHEMA_VERSION = "1.0"
+
+
+@app.get("/schema-version")
+def schema_version() -> dict:
+    """Report the CAM/bridge schema version ARIA is currently emitting.
+
+    MillForge probes this endpoint on startup via aria_schema.check_aria_compatibility()
+    to verify it has a compatible normalizer registered.
+    """
+    return {"schema_version": ARIA_SCHEMA_VERSION}
+
+
 @app.get("/api/health")
 def health() -> dict:
     """Report availability of all CAD backends."""

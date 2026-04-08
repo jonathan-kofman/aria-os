@@ -1,4 +1,26 @@
+# Core pipeline
+cadquery==2.7.0
+cadquery-ocp==7.8.1.1.post1
+numpy==2.4.3
+trimesh>=4.0.0
+scipy>=1.11.0
+ezdxf==1.4.3
+numpy-stl==3.2.0
+
+# Dashboard server
+fastapi==0.135.3
+uvicorn[standard]==0.44.0
+httpx==0.28.1
+pydantic==2.12.5
+python-multipart==0.0.24
+starlette==1.0.0
+
+# LLM backends (optional — set env vars to enable)
+anthropic>=0.39.0
+google-genai>=1.0.0
+
+# Utilities
+requests>=2.31.0
+rich>=13.0.0
 pyserial
 plotly
-firebase-admin  # optional, only needed for Firebase session push
-

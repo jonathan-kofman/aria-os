@@ -575,17 +575,26 @@ def write_setup_sheet(
         for t in parsed.get("tools", [])
     ]
 
+    # Normalize stock_dims to MillForge's expected keys (length/width/height)
+    _sd = stock_dims
+    mf_stock_dims = {
+        "length_mm": _sd.get("length_mm") or _sd.get("x_mm", 100.0),
+        "width_mm":  _sd.get("width_mm")  or _sd.get("y_mm", 100.0),
+        "height_mm": _sd.get("height_mm") or _sd.get("z_mm", 10.0),
+    }
+
     json_data = {
         "schema_version": CAM_SETUP_SCHEMA_VERSION,
         "part_id": part_id,
         "machine_name": machine_name,
         "tools": tools_json,
-        "stock_dims": stock_dims,
+        "stock_dims": mf_stock_dims,
         "cycle_time_min_estimate": cycle_min,
         "second_op_required": bool(second_op.get("required")),
         "work_offset_recommendation": "G54: bottom-left-top corner of stock",
         "fixturing_suggestion": fixturing,
         "generated_at": datetime.utcnow().isoformat(),
+        "material": material,
     }
 
     json_path = out_dir / "setup_sheet.json"

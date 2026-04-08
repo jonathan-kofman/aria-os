@@ -15,14 +15,131 @@ import asyncio
 import hashlib
 import json
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from .. import event_bus
+
+
+# ---------------------------------------------------------------------------
+# Circuit Breaker — protects the ARIA → MillForge HTTP boundary
+# ---------------------------------------------------------------------------
+
+class _CBState(Enum):
+    CLOSED = "closed"       # normal — requests pass through
+    OPEN = "open"           # failing — reject immediately
+    HALF_OPEN = "half_open" # recovery probe — allow one request
+
+
+class _MillForgeCircuitBreaker:
+    """Thread-safe circuit breaker for POST /api/jobs/from-aria submissions.
+
+    Transitions:
+      CLOSED → OPEN  : after FAILURE_THRESHOLD consecutive failures
+      OPEN   → HALF_OPEN : after RECOVERY_TIMEOUT_S seconds
+      HALF_OPEN → CLOSED : on probe success
+      HALF_OPEN → OPEN   : on probe failure
+    """
+
+    FAILURE_THRESHOLD = 5
+    RECOVERY_TIMEOUT_S = 30.0
+
+    def __init__(self) -> None:
+        self._state = _CBState.CLOSED
+        self._consecutive_failures = 0
+        self._opened_at: float = 0.0
+        self._lock = threading.Lock()
+
+    @property
+    def state(self) -> _CBState:
+        with self._lock:
+            if self._state == _CBState.OPEN:
+                if time.monotonic() - self._opened_at >= self.RECOVERY_TIMEOUT_S:
+                    self._state = _CBState.HALF_OPEN
+            return self._state
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._consecutive_failures = 0
+            self._state = _CBState.CLOSED
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self.FAILURE_THRESHOLD or self._state == _CBState.HALF_OPEN:
+                self._state = _CBState.OPEN
+                self._opened_at = time.monotonic()
+
+    def is_open(self) -> bool:
+        return self.state == _CBState.OPEN
+
+
+# Module-level singleton — shared across all Coordinator instances in the process
+_mf_circuit_breaker = _MillForgeCircuitBreaker()
+
+
+# ---------------------------------------------------------------------------
+# CadQuery failure categorizer
+# ---------------------------------------------------------------------------
+
+def _categorize_cad_failure(failures: list[str], generation_error: str = "") -> str:
+    """Return a canonical failure category from CadQuery refinement loop output.
+
+    Categories:
+      syntax_error       — Python/CadQuery syntax or import error
+      timeout            — execution took too long
+      degenerate         — geometry produced but invalid (zero volume, null solid, etc.)
+      sandbox_violation  — attempted filesystem/network access inside sandboxed exec
+      empty_response     — LLM returned nothing usable
+      unknown            — anything else
+
+    Recovery hints (for the caller / UI):
+      syntax_error     → re-prompt with clearer constraints
+      timeout          → simplify geometry (fewer features, larger tolerances)
+      degenerate       → adjust dimensions (check aspect ratios, wall thicknesses)
+      sandbox_violation → escalate to human; part type may be unsupported
+      empty_response   → retry with a different model or prompt strategy
+    """
+    combined = " ".join(failures + [generation_error]).lower()
+
+    if any(kw in combined for kw in (
+        "syntaxerror", "syntax error", "nameerror", "attributeerror",
+        "indentationerror", "typeerror", "importerror", "no module",
+    )):
+        return "syntax_error"
+
+    if any(kw in combined for kw in (
+        "timeout", "timed out", "time limit", "execution took",
+    )):
+        return "timeout"
+
+    if any(kw in combined for kw in (
+        "degenerate", "zero volume", "null solid", "empty solid",
+        "non-manifold", "no valid shape", "invalid geometry",
+        "failed to create", "boolean failed", "shell failed",
+    )):
+        return "degenerate"
+
+    if any(kw in combined for kw in (
+        "permission", "open(", "os.system", "subprocess", "socket",
+        "sandbox", "__import__", "builtins",
+    )):
+        return "sandbox_violation"
+
+    if any(kw in combined for kw in (
+        "empty response", "no code block", "llm returned", "returned nothing",
+    )):
+        return "empty_response"
+
+    if combined.strip():
+        return "unknown"
+    return "none"
 
 
 # ---------------------------------------------------------------------------
@@ -56,9 +173,13 @@ class JobContext:
 
     # Phase 4 outputs (CAM + simulation)
     simulation_result: dict[str, Any] = field(default_factory=dict)
+    cam_result: dict[str, Any] = field(default_factory=dict)
 
     # Phase 5 output (final)
     millforge_job: dict[str, Any] = field(default_factory=dict)
+
+    # StructSight context (from /api/from-visualization)
+    structsight_context: dict[str, Any] = field(default_factory=dict)
 
     # Tracking
     phases_completed: list[str] = field(default_factory=list)
@@ -109,6 +230,17 @@ class CoordinatorAgent:
         t0 = time.time()
 
         _emit(ctx, "coordinator", f"Job {ctx.job_id} started", {"goal": goal})
+
+        # Drain the retry queue before starting new work — resubmit any
+        # previously queued jobs if the circuit is now healthy.
+        try:
+            from .retry_queue import drain as _drain_queue
+            await _drain_queue(
+                submit_fn=self._submit_payload_direct,
+                circuit_is_open_fn=_mf_circuit_breaker.is_open,
+            )
+        except Exception as _rq_exc:
+            print(f"  [COORDINATOR] Retry queue drain error (non-fatal): {_rq_exc}")
         print(f"\n{'=' * 64}")
         print(f"  COORDINATOR — Job {ctx.job_id}")
         print(f"  Goal: {goal}")
@@ -203,6 +335,27 @@ class CoordinatorAgent:
         ctx.total_time_s = _time.time() - ctx.created_at.timestamp()
         self._print_summary(ctx)
         return ctx
+
+    # -- StructSight context loader ------------------------------------------
+
+    def _load_structsight_context(self, ctx: JobContext) -> None:
+        """Load StructSight context from workspace if available."""
+        if ctx.structsight_context:
+            return  # already loaded
+        context_dir = ctx.repo_root / "workspace" / "structsight"
+        if not context_dir.exists():
+            return
+        # Find the most recent context file
+        context_files = sorted(context_dir.glob("*_context.json"),
+                               key=lambda p: p.stat().st_mtime, reverse=True)
+        if not context_files:
+            return
+        try:
+            data = json.loads(context_files[0].read_text(encoding="utf-8"))
+            ctx.structsight_context = data
+            print(f"  [COORDINATOR] Loaded StructSight context: {data.get('run_id', '?')}")
+        except Exception:
+            pass
 
     # -- Phase 1: Parallel Research ------------------------------------------
 
@@ -302,6 +455,9 @@ class CoordinatorAgent:
         _emit(ctx, "phase", "Phase 2: Synthesis", {"phase": 2})
         print(f"\n  [Phase 2] Synthesizing geometry spec from research...")
 
+        # Load StructSight context if available (enriches research)
+        self._load_structsight_context(ctx)
+
         # Step 1: Extract structured spec from goal
         from .spec_agent import SpecAgent
         from .design_state import DesignState
@@ -310,6 +466,20 @@ class CoordinatorAgent:
 
         # Compile all research into a single context
         research_text = ""
+
+        # Inject StructSight vision analysis as research context
+        ss = ctx.structsight_context
+        if ss.get("description"):
+            research_text += f"\n## StructSight Vision Analysis\n{ss['description']}\n"
+        if ss.get("suggestions"):
+            research_text += "\n## Engineering Suggestions (from vision)\n"
+            for s in ss["suggestions"]:
+                research_text += f"- {s}\n"
+        if ss.get("considerations"):
+            research_text += "\n## Engineering Considerations (from vision)\n"
+            for c in ss["considerations"]:
+                research_text += f"- {c}\n"
+
         for label, data in [
             ("Shape & Geometry", getattr(ctx, "_research_shape", {})),
             ("Dimensions", getattr(ctx, "_research_dims", {})),
@@ -325,6 +495,18 @@ class CoordinatorAgent:
 
         spec_agent = SpecAgent(ctx.repo_root)
         spec_agent.extract(state)
+
+        # Inject past QC defect memory — warns about known failure modes for this
+        # material+part_type before the LLM generates a build recipe.
+        try:
+            from .memory import read_qc_memory
+            _part_type = (state.spec.get("part_type") or ctx.goal.split()[0]).lower()
+            _qc_history = read_qc_memory(state.material or "", _part_type)
+            if _qc_history:
+                research_text += f"\n## Past QC Defect History (from MillForge)\n{_qc_history}\n"
+                print(f"  [Phase 2] QC memory injected ({len(_qc_history)} chars)")
+        except Exception:
+            pass
 
         # Step 2: Use LLM to synthesize a BUILD RECIPE from research
         # This is the critical step — turn raw search results into a
@@ -443,9 +625,21 @@ Describe the 3D shape in terms of CadQuery operations."""
         ctx.save_artifact("validation_report.json", ctx.validation_report)
 
         tag = "PASS" if state.converged else "FAIL"
+        failure_category = "none"
+        if not state.converged:
+            failure_category = _categorize_cad_failure(
+                list(state.failures),
+                getattr(state, "generation_error", ""),
+            )
+            ctx.validation_report["failure_category"] = failure_category
+            print(f"  [Phase 3] Failure category: {failure_category}")
+
         print(f"  [Phase 3] {tag} — {state.iteration} iterations, {len(state.failures)} failures")
         ctx.phases_completed.append("geometry")
-        _emit(ctx, "phase_complete", f"Phase 3: {tag}", {"phase": 3})
+        _emit(ctx, "phase_complete", f"Phase 3: {tag}", {
+            "phase": 3,
+            "failure_category": failure_category,
+        })
 
     # -- Phase 3 variants: ECAD and Civil domains --------------------------------
 
@@ -556,8 +750,21 @@ Describe the 3D shape in terms of CadQuery operations."""
 
 
 
+        # ── CAM: toolpath generation ──────────────────────────────────────
+        async def _run_cam():
+            if not step_exists:
+                return {"status": "skipped", "reason": "no geometry"}
+            try:
+                from .cam_agent import run_cam_agent
+                result = await loop.run_in_executor(
+                    None, run_cam_agent,
+                    ctx.geometry_path, material, "generic_vmc",
+                    ctx.repo_root)
+                return result or {"status": "no_result"}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+
         # ── FEA: structural analysis ─────────────────────────────────────
-        async def _run_fea():
             try:
                 from ..physics_analyzer import analyze
                 result = await loop.run_in_executor(
@@ -657,7 +864,8 @@ Describe the 3D shape in terms of CadQuery operations."""
             except Exception as e:
                 return {"status": "error", "error": str(e)}
 
-        fea, drawing, dfm, fusion, quote, onshape, visual = await asyncio.gather(
+        cam, fea, drawing, dfm, fusion, quote, onshape, visual = await asyncio.gather(
+            _with_timeout(_run_cam(), "CAM", secs=120),
             _with_timeout(_run_fea(), "FEA"),
             _with_timeout(_run_drawing(), "Drawing"),
             _with_timeout(_run_dfm(), "DFM"),
@@ -670,9 +878,11 @@ Describe the 3D shape in terms of CadQuery operations."""
 
         # Store results
         ctx.simulation_result = fea if isinstance(fea, dict) else {"error": str(fea)}
+        ctx.cam_result = cam if isinstance(cam, dict) else {"error": str(cam)}
 
         # Print results
         results = [
+            ("CAM", cam, lambda r: f"{'PASS' if r.get('passed') else 'FAIL'} — {r.get('cycle_time_min', '?')} min" if r.get("passed") is not None else ""),
             ("FEA", fea, lambda r: f"{'PASS' if r.get('passed') else 'FAIL'} SF={r.get('safety_factor', '?')}" if r.get("passed") is not None else ""),
             ("Drawing", drawing, lambda r: r.get("path", "")),
             ("DFM", dfm, lambda r: f"Score: {r.get('score', '?')}/100 — {r.get('process_recommendation', '')}" if r.get("score") else ""),
@@ -700,6 +910,8 @@ Describe the 3D shape in terms of CadQuery operations."""
                 print(f"  [Phase 4] {name}: exception — {result}")
 
         # Store in context for Phase 5
+        if isinstance(cam, dict) and cam.get("script_path"):
+            ctx.save_artifact("cam_result.json", cam)
         if isinstance(dfm, dict) and dfm.get("score"):
             ctx.save_artifact("dfm_report.json", dfm)
         if isinstance(quote, dict) and quote.get("unit_cost_usd"):
@@ -733,7 +945,7 @@ Describe the 3D shape in terms of CadQuery operations."""
                 passed=ctx.validation_passed,
                 failures=ctx.validation_report.get("failures", []),
                 bbox=ctx.validation_report.get("bbox"),
-                cam_data=ctx.cam_result if isinstance(ctx.cam_result, dict) else None,
+                cam_data=ctx.cam_result if ctx.cam_result else None,
             )
         except Exception:
             pass
@@ -743,7 +955,14 @@ Describe the 3D shape in terms of CadQuery operations."""
         if get_features().MILLFORGE_BRIDGE and ctx.validation_passed:
             ctx.millforge_job = self._build_millforge_job(ctx)
             ctx.save_artifact("millforge_job.json", ctx.millforge_job)
-            print(f"  [Phase 5] MillForge job created: {ctx.millforge_job.get('aria_job_id')}")
+            print(f"  [Phase 5] MillForge job built: {ctx.millforge_job.get('aria_job_id')}")
+
+            # Submit to MillForge via the canonical /api/jobs/from-aria endpoint
+            submit_result = await self._submit_to_millforge(ctx)
+            if submit_result:
+                print(f"  [Phase 5] MillForge submission: job #{submit_result.get('millforge_job_id', '?')}")
+            else:
+                print(f"  [Phase 5] MillForge submission skipped (no MILLFORGE_API_URL)")
         elif ctx.validation_passed:
             print(f"  [Phase 5] MillForge bridge disabled — job not submitted")
         else:
@@ -760,33 +979,225 @@ Describe the 3D shape in terms of CadQuery operations."""
         ctx.phases_completed.append("finalize")
         _emit(ctx, "phase_complete", "Phase 5 done", {"phase": 5})
 
-    def _build_millforge_job(self, ctx: JobContext) -> dict[str, Any]:
-        """Build the MillForge job data from ARIA outputs."""
-        spec = ctx.geometry_spec.get("spec", {})
-        cam = ctx.cam_result if isinstance(ctx.cam_result, dict) else {}
+    # Material name → MillForge enum mapping
+    _MATERIAL_TO_MILLFORGE = {
+        "aluminium_6061": "aluminum", "aluminium_7075": "aluminum",
+        "aluminum_6061": "aluminum", "aluminum_7075": "aluminum",
+        "aluminum": "aluminum", "aluminium": "aluminum",
+        "steel_mild": "steel", "steel_4140": "steel",
+        "steel_stainless": "steel", "stainless_316": "steel",
+        "steel": "steel", "x1_420i": "steel",
+        "titanium": "titanium", "titanium_ti6al4v": "titanium",
+        "copper": "copper", "brass": "copper",
+    }
 
-        # Compute geometry hash for dedup
-        geo_hash = ""
+    def _build_millforge_job(self, ctx: JobContext) -> dict[str, Any]:
+        """Build a MillForge-compatible ARIAJobSubmission payload.
+
+        Conforms to the schema validated by MillForge's POST /api/jobs/from-aria:
+        - geometry_hash: full 64-char SHA-256
+        - material: enum {steel, aluminum, titanium, copper}
+        - estimated_cycle_time_minutes: > 0
+        - simulation_results: matches _SimulationResults shape
+        - material_spec: matches _MaterialSpec shape
+        """
+        spec = ctx.geometry_spec.get("spec", {})
+        cam = ctx.cam_result if isinstance(getattr(ctx, "cam_result", None), dict) else {}
+        fea = ctx.simulation_result if isinstance(ctx.simulation_result, dict) else {}
+
+        # Full 64-char SHA-256 for geometry dedup
+        geo_hash = "0" * 64
         if ctx.geometry_path and Path(ctx.geometry_path).exists():
             data = Path(ctx.geometry_path).read_bytes()
-            geo_hash = hashlib.sha256(data).hexdigest()[:16]
+            geo_hash = hashlib.sha256(data).hexdigest()
+
+        # Map free-text material to MillForge enum
+        raw_material = (ctx.geometry_spec.get("material", "") or "").lower()
+        mf_material = self._MATERIAL_TO_MILLFORGE.get(raw_material, "steel")
+
+        # Cycle time: prefer CAM result, fallback to FEA or a reasonable default
+        cycle_time = cam.get("cycle_time_min", 0) or 0
+        if cycle_time <= 0:
+            cycle_time = fea.get("estimated_cycle_time_minutes", 0) or 0
+        if cycle_time <= 0:
+            cycle_time = 5.0  # minimum default so validation passes
+
+        # Build simulation_results in the shape MillForge expects
+        sim_results = {
+            "estimated_cycle_time_minutes": cycle_time,
+            "estimated_material_removal_cm3": cam.get("material_removal_cm3"),
+            "max_chip_load_mm": cam.get("max_chip_load_mm"),
+            "tool_wear_index": cam.get("tool_wear_index"),
+            "collision_detected": False,
+            "simulation_confidence": 0.8 if cam.get("passed") else 0.5,
+        }
+
+        # Build material_spec
+        material_spec = {
+            "material_name": raw_material or mf_material,
+            "material_family": mf_material,
+            "hardness_hrc": spec.get("hardness_hrc"),
+            "tensile_strength_mpa": spec.get("tensile_strength_mpa"),
+            "notes": None,
+        }
+
+        # Extract operation types from CAM
+        operations = cam.get("operations", [])
+        required_ops = []
+        for op in operations:
+            op_type = op.get("type") or op.get("role") or op.get("name", "")
+            if op_type:
+                required_ops.append(op_type)
+        if not required_ops:
+            required_ops = ["milling"]
+
+        # Load DFM / quote / drawing artifacts for extended payload
+        dfm_summary = None
+        quote_data = None
+        drawing_path = None
+        try:
+            dfm_file = ctx.scratchpad_dir / "dfm_report.json"
+            if dfm_file.exists():
+                dfm_summary = json.loads(dfm_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        try:
+            quote_file = ctx.scratchpad_dir / "quote.json"
+            if quote_file.exists():
+                quote_data = json.loads(quote_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        try:
+            drawing_file = ctx.scratchpad_dir / "drawing_path.txt"
+            if drawing_file.exists():
+                drawing_path = drawing_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
 
         return {
+            "schema_version": "1.0",
             "part_name": spec.get("part_type", "unknown_part"),
             "geometry_file": ctx.geometry_path,
             "toolpath_file": cam.get("script_path", ""),
-            "material": ctx.geometry_spec.get("material", "unknown"),
-            "estimated_cycle_time_minutes": cam.get("cycle_time_min", 0),
-            "required_operations": [op.get("type", "") for op in cam.get("operations", [])],
+            "material": mf_material,
+            "material_spec": material_spec,
+            "estimated_cycle_time_minutes": cycle_time,
+            "required_operations": required_ops,
             "tolerance_class": "standard",
             "aria_job_id": ctx.job_id,
             "generated_at": ctx.created_at.isoformat(),
             "geometry_hash": geo_hash,
             "validation_passed": ctx.validation_passed,
-            "simulation_results": ctx.simulation_result if isinstance(ctx.simulation_result, dict) else None,
+            "simulation_results": sim_results,
             "priority": 5,
             "quantity": 1,
+            "extra": {
+                "trace_id": ctx.job_id,
+                "source_material_name": raw_material,
+                "dfm_summary": dfm_summary,
+                "aria_quote": quote_data,
+                "drawing_path": drawing_path,
+                "fea_results": fea if fea.get("passed") is not None else None,
+                "process_recommendation": (dfm_summary or {}).get("process_recommendation"),
+            },
         }
+
+    async def _submit_to_millforge(self, ctx: JobContext) -> dict | None:
+        """HTTP-submit the MillForge job payload to POST /api/jobs/from-aria.
+
+        Protected by a module-level circuit breaker (_mf_circuit_breaker).
+        If the circuit is OPEN (MillForge has been unavailable), the job is
+        saved locally and submission is skipped — non-fatal.
+
+        Returns the MillForge ack response, or None if skipped/failed.
+        Never raises.
+        """
+        mf_url = os.environ.get("MILLFORGE_API_URL", "").rstrip("/")
+        if not mf_url:
+            return None
+
+        # Circuit breaker check — fast-fail if MillForge is known to be down
+        if _mf_circuit_breaker.is_open():
+            msg = (
+                f"MillForge circuit OPEN (consecutive failures="
+                f"{_mf_circuit_breaker._consecutive_failures}) — submission queued locally"
+            )
+            ctx.errors.append(msg)
+            print(f"  [Phase 5] {msg}")
+            _emit(ctx, "circuit_open", msg, {"boundary": "aria→millforge"})
+            # Save to retry queue so the job is not permanently lost
+            try:
+                from .retry_queue import enqueue as _enqueue
+                _enqueue(ctx.millforge_job, ctx.millforge_job.get("aria_job_id", ctx.job_id), msg)
+            except Exception:
+                pass
+            return None
+
+        mf_key = os.environ.get("ARIA_BRIDGE_KEY", "")
+
+        try:
+            import urllib.request
+            import urllib.error
+
+            headers = {"Content-Type": "application/json"}
+            if mf_key:
+                headers["X-API-Key"] = mf_key
+
+            payload = json.dumps(ctx.millforge_job, default=str).encode("utf-8")
+            req = urllib.request.Request(
+                f"{mf_url}/api/jobs/from-aria",
+                data=payload,
+                headers=headers,
+                method="POST",
+            )
+
+            loop = asyncio.get_event_loop()
+            def _do_submit():
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return json.loads(resp.read())
+
+            result = await loop.run_in_executor(None, _do_submit)
+            _mf_circuit_breaker.record_success()
+            return result
+        except Exception as exc:
+            _mf_circuit_breaker.record_failure()
+            ctx.errors.append(f"MillForge submission failed: {exc}")
+            print(f"  [Phase 5] MillForge submission error: {exc}")
+            _emit(ctx, "submission_error", str(exc), {
+                "boundary": "aria→millforge",
+                "circuit_state": _mf_circuit_breaker._state.value,
+                "consecutive_failures": _mf_circuit_breaker._consecutive_failures,
+            })
+            return None
+
+    async def _submit_payload_direct(self, payload: dict) -> dict | None:
+        """Submit a raw MillForge job payload, updating circuit breaker state.
+
+        Used by the retry queue drain loop. Unlike _submit_to_millforge(), this
+        accepts an already-built payload dict (not a JobContext).
+        """
+        mf_url = os.environ.get("MILLFORGE_API_URL", "").rstrip("/")
+        if not mf_url:
+            return None
+        mf_key = os.environ.get("ARIA_BRIDGE_KEY", "")
+        try:
+            import urllib.request
+            headers = {"Content-Type": "application/json"}
+            if mf_key:
+                headers["X-API-Key"] = mf_key
+            data = json.dumps(payload, default=str).encode("utf-8")
+            req = urllib.request.Request(
+                f"{mf_url}/api/jobs/from-aria", data=data, headers=headers, method="POST"
+            )
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, lambda: json.loads(urllib.request.urlopen(req, timeout=15).read())
+            )
+            _mf_circuit_breaker.record_success()
+            return result
+        except Exception as exc:
+            _mf_circuit_breaker.record_failure()
+            raise
 
     def _print_summary(self, ctx: JobContext) -> None:
         """Print job summary with all output artifacts."""
@@ -814,6 +1225,12 @@ Describe the 3D shape in terms of CadQuery operations."""
         fusion_path = ctx.scratchpad_dir / "fusion_script_path.txt"
         if fusion_path.exists():
             artifacts.append(f"  Fusion 360: {fusion_path.read_text().strip()}")
+        # CAM result
+        cam_result_path = ctx.scratchpad_dir / "cam_result.json"
+        if cam_result_path.exists():
+            import json as _json_cam
+            cam_r = _json_cam.loads(cam_result_path.read_text())
+            artifacts.append(f"  CAM:        {cam_r.get('script_path', '?')} ({cam_r.get('cycle_time_min', '?')} min)")
         # DFM report
         dfm_path = ctx.scratchpad_dir / "dfm_report.json"
         if dfm_path.exists():

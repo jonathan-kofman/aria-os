@@ -7,7 +7,7 @@ import traceback
 from typing import Any, Callable
 
 from .design_state import DesignState
-from .ollama_config import OLLAMA_HOST, OLLAMA_TIMEOUT, CONTEXT_LIMITS
+from .ollama_config import OLLAMA_HOST, OLLAMA_TIMEOUT, OLLAMA_WARMUP_TIMEOUT, CONTEXT_LIMITS
 
 
 class BaseAgent:
@@ -183,14 +183,55 @@ def _call_ollama(prompt: str, system: str, model: str, json_mode: bool = False) 
         return None
 
 
-def is_ollama_available() -> bool:
-    """Quick health check — is Ollama running?"""
+def is_ollama_available(model: str | None = None) -> bool:
+    """
+    Check if Ollama is running AND the requested model is loaded.
+
+    If `model` is provided, also verifies the model appears in /api/tags.
+    If the model is listed but hasn't been warmed up yet, sends a tiny
+    warmup prompt with a short timeout — if no token arrives in
+    OLLAMA_WARMUP_TIMEOUT seconds the model is considered not ready and
+    we fall through to template generation rather than hanging for 90s.
+    """
     import urllib.request
     import urllib.error
+    import json as _json
 
+    # ── 1. Is Ollama reachable? ──────────────────────────────────────────────
     try:
         req = urllib.request.Request(f"{OLLAMA_HOST}/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
-            return resp.status == 200
+            if resp.status != 200:
+                return False
+            tags_data = _json.loads(resp.read())
     except Exception:
         return False
+
+    if model is None:
+        return True  # caller only wanted a ping check
+
+    # ── 2. Is the model listed? ──────────────────────────────────────────────
+    loaded_models = [m.get("name", "") for m in tags_data.get("models", [])]
+    # Allow prefix match: "qwen2.5-coder:7b" matches "qwen2.5-coder:7b-instruct-q4_K_M"
+    model_base = model.split(":")[0]
+    if not any(model_base in m for m in loaded_models):
+        return False  # model not pulled — skip agent mode
+
+    # ── 3. Warmup probe — does the model actually respond? ───────────────────
+    try:
+        probe = _json.dumps({
+            "model": model,
+            "prompt": "Hi",
+            "stream": False,
+            "options": {"num_predict": 1},
+        }).encode()
+        preq = urllib.request.Request(
+            f"{OLLAMA_HOST}/api/generate",
+            data=probe,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(preq, timeout=OLLAMA_WARMUP_TIMEOUT) as r:
+            return r.status == 200
+    except Exception:
+        return False  # model listed but not inference-ready — skip agent mode

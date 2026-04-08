@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>ARIA-OS</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<!-- Three.js for STL 3D preview -->
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three'
+import { STLLoader } from 'three/addons/loaders/STLLoader.js'
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+window.THREE = THREE; window.STLLoader = STLLoader; window.OrbitControls = OrbitControls
+</script>
+<style>
+  [x-cloak]{display:none!important}
+  *{box-sizing:border-box}
+  body{background:#0a0b0e;color:#cdd9e5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;margin:0;min-height:100vh;display:flex;flex-direction:column;overflow-y:auto}
+  .mono{font-family:'JetBrains Mono','Fira Code','Consolas',monospace}
+  .terminal{background:#0d1117;font-family:'JetBrains Mono','Fira Code','Consolas',monospace;font-size:12px;line-height:1.6}
+  .tl-default{color:#8b949e}
+  .tl-ok   {color:#56d364}
+  .tl-err  {color:#f85149}
+  .tl-warn {color:#e3b341}
+  .tl-hdr  {color:#58a6ff;font-weight:600}
+  .tl-dim  {color:#484f58}
+  .tl-price{color:#bc8cff}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spin{animation:spin .8s linear infinite;display:inline-block}
+  @keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 4px #388bfd}50%{opacity:.4;box-shadow:0 0 8px #58a6ff}}
+  .live-dot{animation:pulse 1.4s ease-in-out infinite}
+  ::-webkit-scrollbar{width:5px;height:5px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+  ::-webkit-scrollbar-thumb:hover{background:#484f58}
+  .surface{background:#161b22;border:1px solid #21262d;border-radius:6px}
+  .input-base{background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e6edf3;padding:8px 12px;width:100%;outline:none;transition:border-color .15s}
+  .input-base:focus{border-color:#388bfd}
+  .btn{padding:7px 16px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;border:none;outline:none}
+  .btn-primary{background:#238636;color:#fff}
+  .btn-primary:hover{background:#2ea043}
+  .btn-primary:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
+  .btn-stop{background:#da3633;color:#fff}
+  .btn-stop:hover{background:#f85149}
+  .btn-ghost{background:transparent;color:#8b949e;border:1px solid #30363d}
+  .btn-ghost:hover{background:#21262d;color:#cdd9e5}
+  .cmd-chip{padding:5px 12px;border-radius:20px;font-size:12px;cursor:pointer;border:1px solid #21262d;color:#8b949e;background:transparent;transition:all .12s;white-space:nowrap}
+  .cmd-chip:hover{border-color:#388bfd;color:#cdd9e5;background:#1f2a3a}
+  .cmd-chip.active{border-color:#388bfd;color:#58a6ff;background:#1f2a3a}
+  .tag{display:inline-block;padding:1px 8px;border-radius:12px;font-size:11px;font-weight:600}
+  .tag-running{background:#1f3a5f;color:#58a6ff}
+  .tag-done   {background:#1a3028;color:#56d364}
+  .tag-failed {background:#3d1c1c;color:#f85149}
+  .tag-stopped{background:#2d2219;color:#e3b341}
+  .tag-queued {background:#1e2432;color:#8b949e}
+  .tag-error  {background:#2d1c3d;color:#bc8cff}
+  .file-row{padding:8px 12px;border-bottom:1px solid #161b22;cursor:pointer;transition:background .1s}
+  .file-row:hover{background:#161b22}
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:100;padding:24px}
+  select.input-base option{background:#0d1117}
+
+  /* ── Mobile (≤768px) ─────────────────────────────── */
+  @media (max-width: 768px) {
+    body { font-size: 13px; }
+
+    .sidebar-left,
+    .sidebar-right { display: none !important; }
+
+    .sidebar-left.drawer-open,
+    .sidebar-right.drawer-open {
+      display: flex !important;
+      position: fixed;
+      top: 0; bottom: 0; left: 0; right: 0;
+      width: 100% !important;
+      height: 100vh !important;
+      z-index: 80;
+      background: #0a0b0e;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    .center-col { width: 100% !important; min-width: 0 !important; }
+
+    .header-subtitle { display: none; }
+    .header-file-count { display: none; }
+
+    .cmd-chips-row {
+      flex-wrap: nowrap !important;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: 4px;
+    }
+    .cmd-chips-row::-webkit-scrollbar { display: none; }
+
+    .btn { padding: 10px 18px; font-size: 14px; }
+    .btn-ghost { padding: 8px 14px; }
+    .cmd-chip { padding: 8px 14px; font-size: 13px; }
+
+    .modal-overlay { padding: 0 !important; align-items: flex-end !important; }
+    .modal-overlay > div {
+      width: 100% !important;
+      max-width: 100% !important;
+      height: 90vh !important;
+      border-radius: 12px 12px 0 0 !important;
+      overflow-y: auto;
+    }
+
+    .terminal { font-size: 11px !important; }
+
+    textarea.input-base { font-size: 14px !important; }
+
+    .pipeline-banner-goal { display: none; }
+    .pipeline-banner-img  { display: none; }
+
+    .file-row { padding: 12px 14px !important; }
+
+    .mobile-fabs { display: block !important; }
+    .mobile-drawer-close { display: flex !important; }
+  }
+
+  .drawer-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 79;
+  }
+  .drawer-backdrop.active { display: block; }
+</style>
+</head>
+<body x-data="ariaApp()" x-cloak>
+
+<!-- Mobile FAB buttons — only visible on small screens -->
+<div style="display:none" class="mobile-fabs">
+  <button @click="openRunsDrawer()"
+          style="position:fixed;bottom:72px;left:16px;z-index:70;width:48px;height:48px;border-radius:50%;background:#161b22;border:1px solid #30363d;color:#8b949e;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,.4)"
+          title="Run history">&#9776;</button>
+  <button @click="openFilesDrawer()"
+          style="position:fixed;bottom:72px;right:16px;z-index:70;width:48px;height:48px;border-radius:50%;background:#161b22;border:1px solid #30363d;color:#8b949e;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,.4)"
+          title="Output files">&#128193;</button>
+</div>
+
+<!-- Drawer backdrop -->
+<div class="drawer-backdrop"
+     :class="{'active': showRunsDrawer || showFilesDrawer}"
+     @click="closeRunsDrawer(); closeFilesDrawer()"></div>
+
+<!-- ═══ PIPELINE BANNER (shown when opened from StructSight) ═══ -->
+<div x-show="fromVisualization" style="background:linear-gradient(90deg,#0d2318,#0d1a2e);border-bottom:1px solid #238636;padding:8px 20px;display:flex;align-items:center;gap:16px;flex-shrink:0;font-size:12px">
+  <div style="display:flex;align-items:center;gap:8px">
+    <span style="color:#56d364;font-weight:700">StructSight</span>
+    <span style="color:#30363d">→</span>
+    <span style="color:#58a6ff;font-weight:700">ARIA-OS</span>
+    <span style="color:#30363d">→</span>
+    <span style="color:#8b949e">MillForge AI</span>
+  </div>
+  <div class="pipeline-banner-goal" style="color:#8b949e;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" x-text="'Generating: ' + (goal || 'loading...')"></div>
+  <template x-if="siteImageB64">
+    <img class="pipeline-banner-img" :src="'data:' + siteImageType + ';base64,' + siteImageB64"
+         style="height:32px;width:48px;object-fit:cover;border-radius:4px;border:1px solid #30363d;flex-shrink:0"
+         title="StructSight site photo"/>
+  </template>
+  <span x-show="activeRun" class="tag" :class="'tag-'+(activeRun?.status||'queued')" x-text="activeRun?.status"></span>
+</div>
+
+<!-- ═══ HEADER ═══ -->
+<header style="background:#0d1117;border-bottom:1px solid #21262d;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;position:sticky;top:0;z-index:10">
+  <div style="display:flex;align-items:center;gap:10px">
+    <div style="width:28px;height:28px;background:linear-gradient(135deg,#238636,#388bfd);border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:#fff">A</div>
+    <span style="font-weight:600;font-size:15px;color:#e6edf3">ARIA-OS</span>
+    <span class="header-subtitle" style="color:#484f58;font-size:12px">Engineering Pipeline</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:#484f58">
+    <span x-show="activeRun && activeRun.status==='running'" class="tag tag-running" x-text="'Running · ' + activeRunId"></span>
+    <span class="header-file-count" x-text="outputFiles.length + ' files in outputs/'"></span>
+    <button class="btn btn-ghost" style="padding:4px 10px;font-size:12px" @click="loadOutputs()">Refresh</button>
+    <!-- Backend URL config (for Vercel / remote deployments) -->
+    <div style="position:relative">
+      <button @click="showApiSetting=!showApiSetting; apiBaseInput=apiBase"
+              class="btn btn-ghost" style="padding:4px 10px;font-size:12px"
+              :style="apiBase !== window.location.origin.replace(/\\/$/,'') ? 'color:#58a6ff;border-color:#388bfd' : ''"
+              title="Configure backend URL">&#9881;</button>
+      <div x-show="showApiSetting" @click.outside="showApiSetting=false"
+           style="position:absolute;right:0;top:calc(100% + 6px);background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;width:360px;z-index:50;box-shadow:0 8px 32px rgba(0,0,0,.5)">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:6px;font-weight:600">BACKEND URL</div>
+        <div style="font-size:11px;color:#484f58;margin-bottom:8px">Point this UI at your ARIA-OS FastAPI server. Leave blank to use same-origin (local dev).</div>
+        <div style="display:flex;gap:6px">
+          <input x-model="apiBaseInput" @keydown.enter="saveApiBase()" type="text"
+                 placeholder="https://your-backend.railway.app"
+                 style="flex:1;background:#0d1117;border:1px solid #388bfd;color:#e6edf3;border-radius:6px;padding:5px 10px;font-size:12px"/>
+          <button @click="saveApiBase()" style="background:#238636;border:none;color:#fff;padding:5px 12px;border-radius:6px;font-size:12px;cursor:pointer">Save</button>
+          <button @click="clearApiBase()" style="background:#21262d;border:1px solid #30363d;color:#8b949e;padding:5px 10px;border-radius:6px;font-size:12px;cursor:pointer" title="Reset to local">↺</button>
+        </div>
+        <div style="margin-top:6px;font-size:11px;color:#484f58" x-text="'Current: ' + apiBase"></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ═══ BODY ═══ -->
+<div style="display:flex;flex:1;min-height:0">
+
+  <!-- LEFT: Run history -->
+  <div class="sidebar-left" :class="{'drawer-open': showRunsDrawer}" style="width:220px;flex-shrink:0;border-right:1px solid #21262d;display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow:hidden;align-self:flex-start">
+    <div class="mobile-drawer-close" style="display:none;padding:10px 12px;border-bottom:1px solid #21262d;justify-content:space-between;align-items:center">
+      <span style="font-size:12px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.05em">Run History</span>
+      <button @click="closeRunsDrawer()" style="background:none;border:none;color:#8b949e;font-size:18px;cursor:pointer;padding:4px">&#10005;</button>
+    </div>
+    <div style="padding:10px 12px 6px;font-size:11px;font-weight:600;color:#484f58;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #161b22">Runs</div>
+    <div style="flex:1;overflow-y:auto">
+      <div x-show="runs.length===0" style="padding:16px 12px;font-size:12px;color:#484f58">No runs yet.</div>
+      <template x-for="r in runs" :key="r.id">
+        <div @click="selectRun(r.id)"
+             style="padding:9px 12px;border-bottom:1px solid #161b22;cursor:pointer;transition:background .1s"
+             :style="activeRunId===r.id ? 'background:#161b22;border-left:2px solid #388bfd' : 'border-left:2px solid transparent'"
+             class="hover:bg-[#161b22]"
+             :title="r.status==='running' ? 'Click to view live output' : 'Click to replay output'">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
+            <div style="display:flex;align-items:center;gap:5px">
+              <span class="mono" style="font-size:10px;color:#484f58" x-text="r.id"></span>
+              <!-- live pulse dot -->
+              <span x-show="r.status==='running'" class="live-dot" style="width:6px;height:6px;border-radius:50%;background:#58a6ff;display:inline-block"></span>
+            </div>
+            <span class="tag" :class="'tag-'+r.status" x-text="r.status"></span>
+          </div>
+          <div style="font-size:12px;color:#8b949e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" x-text="r.goal || r.command"></div>
+          <div style="font-size:11px;color:#484f58;margin-top:2px" x-text="r.elapsed + 's  ·  ' + r.command"></div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- CENTER -->
+  <div class="center-col" style="flex:1;display:flex;flex-direction:column;min-width:0">
+
+    <!-- Command + input area -->
+    <div style="padding:16px;border-bottom:1px solid #21262d;flex-shrink:0">
+
+      <!-- Command chips -->
+      <div class="cmd-chips-row" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px">
+        <template x-for="g in commandGroups" :key="g.group">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:10px;color:#484f58;font-weight:600;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap" x-text="g.group + ':'"></span>
+            <template x-for="cmd in g.cmds" :key="cmd.id">
+              <button class="cmd-chip" :class="{active: selectedCommand===cmd.id}"
+                      @click="selectCommand(cmd.id)" :title="cmd.hint" x-text="cmd.label">
+              </button>
+            </template>
+          </div>
+        </template>
+      </div>
+
+      <!-- Input row -->
+      <div style="display:flex;gap:10px;align-items:flex-start">
+        <div style="flex:1">
+          <textarea x-model="goal" class="input-base mono" rows="3"
+                    :placeholder="currentCmd.placeholder || 'Enter goal or file path...'"
+                    style="resize:none;font-size:13px"
+                    @keydown.ctrl.enter.prevent="running ? stopRun() : startRun()"></textarea>
+          <!-- Quick-fill examples -->
+          <div x-show="currentCmd.examples && currentCmd.examples.length" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">
+            <span style="font-size:11px;color:#484f58;padding:2px 0">e.g.</span>
+            <template x-for="ex in currentCmd.examples" :key="ex">
+              <button @click="goal=ex" style="font-size:11px;color:#388bfd;background:transparent;border:none;cursor:pointer;padding:2px 4px;border-radius:4px;font-family:inherit" class="hover:bg-[#1f2a3a]" x-text="ex"></button>
+            </template>
+          </div>
+        </div>
+
+        <!-- Flags (contextual) -->
+        <div x-show="currentCmd.hasFlags" style="display:flex;flex-direction:column;gap:6px;min-width:130px">
+          <select x-model="material" class="input-base" style="font-size:12px;padding:6px 10px">
+            <option value="">material: auto</option>
+            <option>steel_mild</option>
+            <option>steel_stainless</option>
+            <option>aluminum_6061</option>
+            <option>titanium</option>
+            <option>abs_plastic</option>
+            <option>pla_plastic</option>
+            <option>nylon</option>
+            <option>brass</option>
+          </select>
+          <select x-model="machine" class="input-base" style="font-size:12px;padding:6px 10px">
+            <option value="">machine: auto</option>
+            <option>Generic VMC</option>
+            <option>3-axis CNC</option>
+            <option>5-axis CNC</option>
+            <option>Lathe</option>
+            <option>FDM Printer</option>
+            <option>SLA Printer</option>
+          </select>
+        </div>
+
+        <!-- Run / Stop -->
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button @click="startRun()" :disabled="running" class="btn btn-primary" style="white-space:nowrap">
+            <span x-show="!running">&#9654; Run</span>
+            <span x-show="running" class="spin">&#10227;</span>
+          </button>
+          <button x-show="running" @click="stopRun()" class="btn btn-stop" style="font-size:12px">&#9632; Stop</button>
+          <div x-show="lastStatus && !running" style="font-size:11px;text-align:center"
+               :style="lastStatus==='done' ? 'color:#56d364' : 'color:#f85149'"
+               x-text="lastStatus==='done' ? '✓ done' : '✗ ' + lastStatus">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MillForge panel (shown after a successful run) -->
+    <div x-show="mfVisible" style="background:#0d1a12;border-top:1px solid #238636;padding:12px 16px;flex-shrink:0">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:28px;height:28px;background:linear-gradient(135deg,#238636,#1a7f37);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;flex-shrink:0">M</div>
+          <div>
+            <div style="font-size:13px;font-weight:600;color:#e6edf3">Send to MillForge AI</div>
+            <div style="font-size:11px;color:#8b949e">Upload finished part for automated manufacturing scheduling</div>
+          </div>
+        </div>
+        <!-- STL selector + material -->
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <select x-model="mfStlPath" style="background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:5px 10px;font-size:12px;max-width:260px">
+            <option value="">Select STL output...</option>
+            <template x-for="f in stlOutputs" :key="f.path">
+              <option :value="f.path" x-text="f.name"></option>
+            </template>
+          </select>
+          <button x-show="mfStlPath" @click="openStlPreview(mfStlPath)"
+                  style="background:#1f2a3a;border:1px solid #30363d;color:#8b949e;padding:5px 10px;border-radius:6px;font-size:12px;cursor:pointer;white-space:nowrap;flex-shrink:0"
+                  class="hover:border-[#388bfd] hover:text-white">Preview 3D</button>
+          <select x-model="mfMaterial" style="background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:5px 10px;font-size:12px">
+            <option value="steel_mild">Steel (Mild)</option>
+            <option value="steel_stainless">Steel (Stainless)</option>
+            <option value="aluminum_6061">Aluminum 6061</option>
+            <option value="titanium">Titanium</option>
+            <option value="brass">Brass</option>
+          </select>
+          <input x-model.number="mfQty" type="number" min="1" max="10000" style="background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:5px 10px;font-size:12px;width:70px" placeholder="Qty"/>
+          <button @click="sendToMillforge()" :disabled="!mfStlPath || mfSending"
+                  style="background:#238636;border:none;color:#fff;padding:6px 14px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s"
+                  :style="(!mfStlPath || mfSending) ? 'background:#21262d;color:#484f58;cursor:not-allowed' : ''">
+            <span x-show="!mfSending">Send to MillForge →</span>
+            <span x-show="mfSending">Sending...</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Quote result -->
+      <div x-show="mfQuote" style="margin-top:12px;background:#0a0b0e;border:1px solid #21262d;border-radius:8px;padding:12px 16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+          <div style="display:flex;gap:24px;flex-wrap:wrap">
+            <div>
+              <div style="font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:.05em">Dimensions</div>
+              <div style="font-size:14px;color:#e6edf3;font-weight:600;font-family:monospace" x-text="mfQuote?.cad?.dimensions || '—'"></div>
+            </div>
+            <div>
+              <div style="font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:.05em">Complexity</div>
+              <div style="font-size:14px;color:#e6edf3;font-weight:600" x-text="mfQuote?.cad?.complexity ?? '—'"></div>
+            </div>
+            <div x-show="mfQuote?.quote?.unit_price_usd">
+              <div style="font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:.05em">Unit Price</div>
+              <div style="font-size:18px;color:#56d364;font-weight:700" x-text="'$' + (mfQuote?.quote?.unit_price_usd?.toFixed(2) || '—')"></div>
+            </div>
+            <div x-show="mfQuote?.quote?.estimated_lead_time_days">
+              <div style="font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:.05em">Lead Time</div>
+              <div style="font-size:14px;color:#e6edf3;font-weight:600" x-text="(mfQuote?.quote?.estimated_lead_time_days?.toFixed(1) || '—') + ' days'"></div>
+            </div>
+            <div x-show="mfQuote?.quote?.carbon_footprint_kg_co2">
+              <div style="font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:.05em">CO₂</div>
+              <div style="font-size:14px;color:#e3b341;font-weight:600" x-text="(mfQuote?.quote?.carbon_footprint_kg_co2?.toFixed(1) || '—') + ' kg'"></div>
+            </div>
+          </div>
+          <a :href="mfQuote?.millforge_ui || 'http://localhost:5173'" target="_blank"
+             style="background:#238636;color:#fff;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap">
+            Open MillForge →
+          </a>
+        </div>
+        <div x-show="mfQuote?.quote?.quote_id" style="margin-top:6px;font-size:11px;color:#484f58" x-text="'Quote ID: ' + mfQuote?.quote?.quote_id"></div>
+      </div>
+      <!-- CAM import section -->
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #21262d">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-size:11px;color:#8b949e;white-space:nowrap">Send full CAM job:</span>
+          <select x-model="mfCamDir" style="background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:4px 10px;font-size:12px;flex:1;min-width:200px">
+            <option value="">Select CAM output (setup_sheet.json)...</option>
+            <template x-for="d in camOutputs" :key="d">
+              <option :value="d" x-text="d.split('/').slice(-1)[0]"></option>
+            </template>
+          </select>
+
+          <!-- Token required indicator -->
+          <span x-show="!mfHasToken" style="font-size:11px;color:#e3b341">⚠ MillForge login required</span>
+          <button x-show="!mfHasToken" @click="mfShowTokenInput=!mfShowTokenInput"
+                  style="font-size:11px;background:#21262d;border:1px solid #30363d;color:#8b949e;padding:4px 10px;border-radius:6px;cursor:pointer">
+            Link account
+          </button>
+
+          <button @click="sendCamToMillforge()" :disabled="!mfCamDir || !mfHasToken || mfCamSending"
+                  style="background:#1f3a5f;border:1px solid #388bfd;color:#58a6ff;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s"
+                  :style="(!mfCamDir || !mfHasToken || mfCamSending) ? 'opacity:.4;cursor:not-allowed' : ''">
+            <span x-show="!mfCamSending">Import as MillForge Job →</span>
+            <span x-show="mfCamSending">Importing...</span>
+          </button>
+        </div>
+
+        <!-- Token input -->
+        <div x-show="mfShowTokenInput" style="margin-top:8px;display:flex;gap:8px;align-items:center">
+          <input x-model="mfTokenInput" type="password" placeholder="Paste MillForge JWT token..."
+                 style="background:#0d1117;border:1px solid #388bfd;color:#e6edf3;border-radius:6px;padding:5px 10px;font-size:12px;flex:1"/>
+          <button @click="saveToken()" style="background:#238636;border:none;color:#fff;padding:5px 12px;border-radius:6px;font-size:12px;cursor:pointer">Save</button>
+          <span style="font-size:11px;color:#484f58">Get token: MillForge → Login → Copy JWT from browser DevTools → Application → Cookies</span>
+        </div>
+
+        <!-- CAM job result -->
+        <div x-show="mfCamResult" style="margin-top:8px;background:#0a0b0e;border:1px solid #388bfd;border-radius:8px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+          <div>
+            <span style="color:#56d364;font-size:13px;font-weight:600">✓ Job created in MillForge</span>
+            <span style="font-size:12px;color:#8b949e;margin-left:8px" x-text="'ID: ' + (mfCamResult?.job?.id || '—') + '  ·  Stage: ' + (mfCamResult?.job?.stage || '—')"></span>
+          </div>
+          <a :href="mfCamResult?.millforge_ui || 'http://localhost:5173'" target="_blank"
+             style="background:#1f3a5f;border:1px solid #388bfd;color:#58a6ff;padding:5px 14px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none">
+            View in MillForge →
+          </a>
+        </div>
+      </div>
+
+      <div x-show="mfError" style="margin-top:8px;font-size:12px;color:#f85149" x-text="mfError"></div>
+    </div>
+
+    <!-- Terminal -->
+    <div class="terminal" style="display:flex;flex-direction:column;min-height:600px">
+      <div style="padding:6px 14px;border-bottom:1px solid #21262d;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-size:11px;color:#484f58;font-weight:600;text-transform:uppercase;letter-spacing:.05em">Output</span>
+          <span x-show="running" class="live-dot" style="width:6px;height:6px;border-radius:50%;background:#58a6ff;display:inline-block"></span>
+          <span x-show="running" style="font-size:11px;color:#58a6ff">LIVE</span>
+          <span style="font-size:11px;color:#484f58" x-text="termLines.length + ' lines'"></span>
+        </div>
+        <button @click="termLines=[]" style="font-size:11px;color:#484f58;background:none;border:none;cursor:pointer" class="hover:text-white">Clear</button>
+      </div>
+      <div x-ref="termBody" style="flex:1;overflow-y:auto;padding:10px 14px;min-height:540px">
+        <div x-show="termLines.length===0 && !running" style="color:#484f58;font-size:12px">Ready. Select a command and click Run.</div>
+        <div x-show="termLines.length===0 && running" style="color:#484f58;font-size:12px;display:flex;align-items:center;gap:8px">
+          <span class="spin">&#10227;</span> Waiting for pipeline output...
+          <span style="color:#30363d">(LLM warmup can take 10–30s)</span>
+        </div>
+        <template x-for="(line,i) in termLines" :key="i">
+          <div :class="'tl-'+lineClass(line.text)" x-text="line.text || '\u00a0'"></div>
+        </template>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- RIGHT: Output files -->
+  <div class="sidebar-right" :class="{'drawer-open': showFilesDrawer}" style="width:260px;flex-shrink:0;border-left:1px solid #21262d;display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow:hidden;align-self:flex-start">
+    <div class="mobile-drawer-close" style="display:none;padding:10px 12px;border-bottom:1px solid #21262d;justify-content:space-between;align-items:center">
+      <span style="font-size:12px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.05em">Output Files</span>
+      <button @click="closeFilesDrawer()" style="background:none;border:none;color:#8b949e;font-size:18px;cursor:pointer;padding:4px">&#10005;</button>
+    </div>
+    <div style="padding:10px 12px 6px;border-bottom:1px solid #161b22;flex-shrink:0">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <span style="font-size:11px;font-weight:600;color:#484f58;text-transform:uppercase;letter-spacing:.05em">Files</span>
+        <span style="font-size:11px;color:#388bfd" x-text="filteredFiles.length"></span>
+      </div>
+      <input x-model="fileFilter" type="text" placeholder="Filter files..." class="input-base" style="font-size:12px;padding:5px 10px;margin-bottom:6px"/>
+      <div style="display:flex;gap:4px;flex-wrap:wrap">
+        <template x-for="t in fileTypes" :key="t">
+          <button @click="activeFileType=activeFileType===t?'':t"
+                  style="font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid #21262d;cursor:pointer;transition:all .1s"
+                  :style="activeFileType===t ? 'background:#1f3a5f;color:#58a6ff;border-color:#388bfd' : 'background:transparent;color:#484f58'"
+                  x-text="t">
+          </button>
+        </template>
+      </div>
+    </div>
+    <div style="flex:1;overflow-y:auto">
+      <template x-for="f in filteredFiles" :key="f.path">
+        <div class="file-row" @click="openPreview(f)">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span x-text="fileIcon(f.kind)" style="font-size:14px;flex-shrink:0"></span>
+            <span style="font-size:12px;color:#cdd9e5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" x-text="f.name"></span>
+          </div>
+          <div style="margin-left:22px;font-size:11px;color:#484f58;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px" x-text="f.path.split('/').slice(1,-1).join('/')"></div>
+          <div style="margin-left:22px;font-size:10px;color:#30363d" x-text="fmtSize(f.size)"></div>
+        </div>
+      </template>
+      <div x-show="filteredFiles.length===0" style="padding:16px 12px;font-size:12px;color:#484f58">No files.</div>
+    </div>
+
+    <!-- MillForge Intel -->
+    <div style="border-top:1px solid #21262d;flex-shrink:0">
+      <button @click="showMillforgeIntel=!showMillforgeIntel; if(showMillforgeIntel && !millforgePipelineHealth) loadMillforgeIntel()"
+              style="width:100%;padding:8px 12px;display:flex;align-items:center;justify-content:space-between;background:transparent;border:none;cursor:pointer;color:#484f58;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em">
+        <span>MillForge Intel</span>
+        <span x-text="showMillforgeIntel ? '▾' : '▸'" style="font-size:10px"></span>
+      </button>
+      <div x-show="showMillforgeIntel" style="padding:0 12px 12px">
+        <!-- Connection status -->
+        <div style="margin-bottom:10px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+            <span style="font-size:10px;color:#484f58;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Connection</span>
+            <button @click="loadMillforgeIntel()" style="font-size:10px;background:none;border:none;color:#388bfd;cursor:pointer;padding:0">&#x21bb;</button>
+          </div>
+          <template x-if="millforgePipelineHealth && millforgePipelineHealth.millforge">
+            <div>
+              <div x-show="millforgePipelineHealth.millforge.status === 'ok'" style="font-size:11px;color:#56d364;display:flex;align-items:center;gap:5px">
+                <span style="width:6px;height:6px;border-radius:50%;background:#56d364;display:inline-block"></span>
+                Connected
+              </div>
+              <div x-show="millforgePipelineHealth.millforge.status !== 'ok'" style="font-size:11px;color:#f85149;display:flex;align-items:center;gap:5px">
+                <span style="width:6px;height:6px;border-radius:50%;background:#f85149;display:inline-block"></span>
+                Unreachable
+              </div>
+            </div>
+          </template>
+          <template x-if="!millforgePipelineHealth || !millforgePipelineHealth.millforge">
+            <div style="font-size:11px;color:#484f58;display:flex;align-items:center;gap:5px">
+              <span style="width:6px;height:6px;border-radius:50%;background:#484f58;display:inline-block"></span>
+              Not configured
+            </div>
+          </template>
+        </div>
+
+        <!-- QC Memory -->
+        <div>
+          <div style="font-size:10px;color:#484f58;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">QC Memory</div>
+          <template x-if="millforgeQcMemory.length > 0">
+            <div style="font-size:11px">
+              <div style="display:grid;grid-template-columns:1fr 1fr 1.5fr;gap:2px 8px;color:#484f58;border-bottom:1px solid #21262d;padding-bottom:3px;margin-bottom:3px;font-weight:600">
+                <span>Material</span><span>Part</span><span>Defects</span>
+              </div>
+              <template x-for="(q, qi) in millforgeQcMemory" :key="qi">
+                <div style="display:grid;grid-template-columns:1fr 1fr 1.5fr;gap:2px 8px;color:#8b949e;padding:2px 0">
+                  <span x-text="q.material || '—'" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
+                  <span x-text="q.part || q.title || '—'" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
+                  <span x-text="q.defects || '—'" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
+                </div>
+              </template>
+            </div>
+          </template>
+          <div x-show="millforgeQcMemory.length === 0" style="font-size:11px;color:#484f58">No defect history yet.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══ FILE PREVIEW MODAL ═══ -->
+<div x-show="previewOpen" @click.self="previewOpen=false" class="modal-overlay">
+  <div class="surface" style="width:100%;max-width:800px;max-height:82vh;display:flex;flex-direction:column;border-radius:8px;overflow:hidden">
+    <div style="padding:12px 16px;border-bottom:1px solid #21262d;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <span style="font-weight:600;color:#e6edf3" x-text="previewFile.name"></span>
+      <div style="display:flex;gap:8px">
+        <a :href="previewFile.path ? apiBase + '/api/file?path=' + encodeURIComponent(previewFile.path) : '#'" download
+           class="btn btn-ghost" style="font-size:12px;padding:4px 12px;text-decoration:none">Download</a>
+        <button @click="copyPath()" class="btn btn-ghost" style="font-size:12px;padding:4px 12px">Copy Path</button>
+        <button @click="previewOpen=false" class="btn btn-ghost" style="font-size:12px;padding:4px 12px">✕</button>
+      </div>
+    </div>
+    <div style="flex:1;overflow:auto;padding:16px">
+      <img x-show="previewFile.path && ['png','svg'].includes(previewFile.kind)"
+           :src="previewFile.path ? apiBase + '/api/file?path=' + encodeURIComponent(previewFile.path) : ''"
+           style="max-width:100%;border-radius:4px;border:1px solid #21262d"/>
+      <pre x-show="!['png','svg'].includes(previewFile.kind)"
+           class="mono" style="font-size:12px;color:#cdd9e5;white-space:pre-wrap;word-break:break-all;margin:0"
+           x-text="previewContent"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ STL 3D PREVIEW MODAL ═══ -->
+<div x-show="stlModalOpen" @click.self="_threeCleanup(); stlModalOpen=false" class="modal-overlay">
+  <div class="surface" style="width:100%;max-width:900px;height:70vh;display:flex;flex-direction:column;border-radius:8px;overflow:hidden">
+    <div style="padding:12px 16px;border-bottom:1px solid #21262d;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <div>
+        <span style="font-weight:600;color:#e6edf3">3D Preview</span>
+        <span style="font-size:11px;color:#484f58;margin-left:8px" x-text="stlPath.split('/').pop()"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <span style="font-size:11px;color:#484f58">Drag to rotate · Scroll to zoom</span>
+        <span x-show="stlLoadError" style="font-size:11px;color:#f85149" x-text="stlLoadError"></span>
+        <button @click="_threeCleanup(); stlModalOpen=false" class="btn btn-ghost" style="font-size:12px;padding:4px 12px">✕</button>
+      </div>
+    </div>
+    <div x-ref="stlMount" style="flex:1;background:#0d1117;position:relative">
+      <div x-show="stlLoading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#484f58;font-size:13px">
+        <span class="spin" style="margin-right:8px">&#10227;</span> Loading STL...
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Backend URL ──────────────────────────────────────────────────────────────
+// Priority: localStorage > ?api= URL param > same origin (local dev)
+(function() {
+  const saved = localStorage.getItem('aria_api_base')
+  const param = new URLSearchParams(window.location.search).get('api')
+  if (!saved && param) localStorage.setItem('aria_api_base', param)
+})()
+function getApiBase() {
+  return (localStorage.getItem('aria_api_base') || window.location.origin).replace(/\/$/, '')
+}
+
+const COMMANDS = [
+  {
+    group: 'Generate',
+    cmds: [
+      { id:'generate', label:'CAD', hint:'Full CAD pipeline from natural language', hasFlags:true,
+        placeholder:'e.g. bracket 80x40x5mm with 4 M6 holes in steel',
+        examples:['bracket 80x40x5mm with 4 M6 holes','L-bracket 100x60x8mm aluminum with M4 holes','gear 20 teeth module 2 steel'] },
+      { id:'ecad', label:'ECAD/PCB', hint:'PCB design from natural language', hasFlags:false,
+        placeholder:'e.g. motor driver PCB 60x40mm with L298N H-bridge',
+        examples:['motor driver PCB 60x40mm with L298N','Arduino shield 68x53mm with 3 relay channels'] },
+      { id:'autocad', label:'AutoCAD DXF', hint:'2D DXF drawing', hasFlags:false,
+        placeholder:'e.g. floor plan 10x8m with 4 rooms',
+        examples:['floor plan 10x8m with 4 rooms','mounting plate 200x150mm 8 bolt holes on 25mm grid'] },
+      { id:'assemble', label:'Assemble', hint:'Multi-part assembly', hasFlags:false,
+        placeholder:'e.g. motor mount: base plate, 2 side brackets, M6 bolts',
+        examples:['motor mount assembly: base plate 100x80mm, two side brackets, 4 M6 bolts'] },
+    ]
+  },
+  {
+    group: 'Analyze',
+    cmds: [
+      { id:'analyze', label:'FEA', hint:'Physics/FEA analysis — provide STEP path', hasFlags:false,
+        placeholder:'e.g. outputs/cad/step/llm_bracket_m6_holes.step',
+        examples:['outputs/cad/step/llm_bracket_m6_holes.step'] },
+      { id:'quote', label:'Quote', hint:'Manufacturing cost quote — provide STEP path', hasFlags:false,
+        placeholder:'outputs/cad/step/llm_bracket_m6_holes.step',
+        examples:['outputs/cad/step/llm_bracket_m6_holes.step'] },
+      { id:'cem', label:'Physics', hint:'Full CEM physics check', hasFlags:false,
+        placeholder:'e.g. steel shaft 20mm diameter 500mm long under 50Nm torque',
+        examples:['steel shaft 20mm diameter 500mm long under 50Nm torque'] },
+      { id:'material-study', label:'Materials', hint:'Material comparison — provide STEP path', hasFlags:false,
+        placeholder:'outputs/cad/step/llm_bracket_m6_holes.step',
+        examples:['outputs/cad/step/llm_bracket_m6_holes.step'] },
+    ]
+  },
+  {
+    group: 'Manufacture',
+    cmds: [
+      { id:'cam', label:'CAM', hint:'Generate toolpath — provide STEP path', hasFlags:true,
+        placeholder:'e.g. outputs/cad/step/llm_bracket_m6_holes.step',
+        examples:['outputs/cad/step/llm_bracket_m6_holes.step'] },
+      { id:'draw', label:'Drawing', hint:'Engineering drawing — provide STEP path', hasFlags:false,
+        placeholder:'outputs/cad/step/llm_bracket_m6_holes.step',
+        examples:['outputs/cad/step/llm_bracket_m6_holes.step'] },
+      { id:'verify', label:'Verify', hint:'Check STL/STEP geometry', hasFlags:false,
+        placeholder:'e.g. outputs/cad/stl/llm_bracket_m6_holes.stl',
+        examples:['outputs/cad/stl/llm_bracket_m6_holes.stl','outputs/test_box_with_holes.stl'] },
+    ]
+  },
+  {
+    group: 'Advanced',
+    cmds: [
+      { id:'optimize', label:'Optimize', hint:'Parametric optimization', hasFlags:false,
+        placeholder:'e.g. outputs/cad/step/bracket.step minimize weight',
+        examples:['outputs/cad/step/llm_bracket_m6_holes.step minimize weight keep safety factor above 3'] },
+      { id:'lattice', label:'Lattice', hint:'Lattice structure generation', hasFlags:false,
+        placeholder:'e.g. cube 50x50x50mm gyroid lattice 30% infill',
+        examples:['cube 50x50x50mm gyroid lattice 30% infill'] },
+      { id:'scenario', label:'Scenario', hint:'Physics scenario simulation', hasFlags:false,
+        placeholder:'e.g. drop test from 2m onto concrete',
+        examples:['drop test from 2m onto concrete'] },
+      { id:'modify', label:'Modify', hint:'Modify existing part script', hasFlags:false,
+        placeholder:'e.g. outputs/cad/cadquery/part.py  add two M6 holes on the right side',
+        examples:[] },
+    ]
+  },
+  {
+    group: 'Utilities',
+    cmds: [
+      { id:'list',     label:'List',     hint:'List all generated parts', hasFlags:false, placeholder:'(no input needed)', examples:[] },
+      { id:'validate', label:'Validate', hint:'Validate all outputs',     hasFlags:false, placeholder:'(no input needed)', examples:[] },
+      { id:'view',     label:'View STEP',hint:'Open STEP viewer',         hasFlags:false,
+        placeholder:'outputs/cad/step/llm_bracket_m6_holes.step',
+        examples:['outputs/cad/step/llm_bracket_m6_holes.step'] },
+      { id:'image',    label:'Render',   hint:'Render STL to PNG',        hasFlags:false,
+        placeholder:'outputs/cad/stl/llm_bracket_m6_holes.stl',
+        examples:['outputs/cad/stl/llm_bracket_m6_holes.stl'] },
+    ]
+  },
+]
+
+function ariaApp() {
+  return {
+    selectedCommand: 'generate',
+    goal: '',
+    material: '',
+    machine: '',
+    running: false,
+    activeRunId: null,
+    lastStatus: '',
+    termLines: [],
+    runs: [],
+    outputFiles: [],
+    fileFilter: '',
+    activeFileType: '',
+    previewOpen: false,
+    previewFile: {name:'',path:'',kind:''},
+    previewContent: '',
+    commandGroups: COMMANDS,
+    fileTypes: ['step','stl','svg','png','dxf','json','py','md'],
+    fromVisualization: false,
+    siteImageB64: '',
+    siteImageType: 'image/jpeg',
+    // STL 3D preview
+    stlModalOpen: false,
+    stlPath: '',
+    stlLoading: false,
+    stlLoadError: '',
+    _threeRenderer: null,
+    _threeAnimId: null,
+    // MillForge
+    mfVisible: false,
+    mfStlPath: '',
+    mfMaterial: 'steel_mild',
+    mfQty: 1,
+    mfSending: false,
+    mfQuote: null,
+    mfError: '',
+    mfCamDir: '',
+    mfCamSending: false,
+    mfCamResult: null,
+    mfHasToken: false,
+    mfTokenInput: '',
+    mfShowTokenInput: false,
+    _pollTimer: null,
+    _evtSource: null,
+    apiBase: getApiBase(),
+    showApiSetting: false,
+    apiBaseInput: '',
+    showRunsDrawer: false,
+    showFilesDrawer: false,
+    showMillforgeIntel: false,
+    millforgePipelineHealth: null,
+    millforgeQcMemory: [],
+
+    get currentCmd() {
+      for (const g of COMMANDS)
+        for (const c of g.cmds)
+          if (c.id === this.selectedCommand) return c
+      return {}
+    },
+
+    get activeRun() {
+      return this.runs.find(r => r.id === this.activeRunId) || null
+    },
+
+    get stlOutputs() {
+      return this.outputFiles.filter(f => f.kind === 'stl').slice(0, 50)
+    },
+
+    get camOutputs() {
+      // Find unique CAM dirs that contain a setup_sheet.json
+      const dirs = new Set()
+      this.outputFiles.filter(f => f.name === 'setup_sheet.json').forEach(f => {
+        dirs.add(f.path.split('/').slice(0, -1).join('/'))
+      })
+      return [...dirs].slice(0, 20)
+    },
+
+    get filteredFiles() {
+      let fs = this.outputFiles
+      if (this.activeFileType) fs = fs.filter(f => f.kind === this.activeFileType)
+      if (this.fileFilter) {
+        const q = this.fileFilter.toLowerCase()
+        fs = fs.filter(f => f.path.toLowerCase().includes(q) || f.name.toLowerCase().includes(q))
+      }
+      return fs.slice(0, 300)
+    },
+
+    async init() {
+      // Check if opened from StructSight via ?from_vis=<run_id>
+      const params = new URLSearchParams(window.location.search)
+      const fromVis = params.get('from_vis')
+      if (fromVis) {
+        this.fromVisualization = true
+        this.activeRunId = fromVis
+        this.running = true
+      }
+
+      await Promise.all([this.loadOutputs(), this.loadRuns(), this.checkMfToken(), this.loadMillforgeIntel()])
+      setInterval(() => this.loadRuns(), 5000)
+
+      // If opened from StructSight, auto-attach to the run stream
+      if (fromVis) {
+        // Get run details for banner + site image
+        try {
+          const r = await fetch(`${this.apiBase}/api/run/${fromVis}`)
+          if (r.ok) {
+            const d = await r.json()
+            this.goal = d.goal || ''
+            this.siteImageB64 = d.site_image_b64 || ''
+            this.siteImageType = d.site_image_type || 'image/jpeg'
+          }
+        } catch(e) {}
+        this._attachStream(fromVis, true)
+      }
+    },
+
+    selectCommand(id) {
+      this.selectedCommand = id
+    },
+
+    lineClass(t) {
+      if (!t) return 'dim'
+      if (/\[FAIL\]|ERROR|Error|\[error\]|\[STOPPED\]/.test(t)) return 'err'
+      if (/\[OK\]|PASS|CONVERGED|✓|Done/.test(t)) return 'ok'
+      if (/===|---|OUTPUT FILES|NEXT STEPS|PIPELINE SUMMARY|AGENT LOOP/.test(t)) return 'hdr'
+      if (/\[WARN\]|DFM|\[QUOTE\]|\[CAM\]|CRIT|issue/.test(t)) return 'warn'
+      if (/\$[0-9]/.test(t)) return 'price'
+      if (/^\s*$/.test(t)) return 'dim'
+      return 'default'
+    },
+
+    fileIcon(k) {
+      return {step:'🧊',stl:'🔷',svg:'🖼️',png:'🖼️',dxf:'📐',json:'📋',py:'🐍',md:'📄',other:'📁'}[k] || '📁'
+    },
+
+    fmtSize(n) {
+      if (n < 1024) return n + 'B'
+      if (n < 1048576) return (n/1024).toFixed(1) + 'KB'
+      return (n/1048576).toFixed(1) + 'MB'
+    },
+
+    async startRun() {
+      if (this.running) return
+      this.termLines = []
+      this.lastStatus = ''
+      this.running = true
+
+      const flags = []
+      if (this.material) flags.push('--material', this.material)
+      if (this.machine)  flags.push('--machine', this.machine)
+
+      let res
+      try {
+        res = await fetch(this.apiBase + '/api/run', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({command: this.selectedCommand, goal: this.goal, flags}),
+        })
+      } catch(e) {
+        this.termLines.push({text: '[ERROR] Server unreachable: ' + e.message})
+        this.running = false
+        return
+      }
+
+      if (!res.ok) {
+        const err = await res.json()
+        this.termLines.push({text: '[ERROR] ' + (err.detail || 'Unknown error')})
+        this.running = false
+        return
+      }
+
+      const {run_id} = await res.json()
+      this.activeRunId = run_id
+      await this.loadRuns()
+      this._attachStream(run_id, true)
+    },
+
+    async stopRun() {
+      if (!this.activeRunId) return
+      try {
+        await fetch(`${this.apiBase}/api/run/${this.activeRunId}/stop`, {method:'POST'})
+      } catch(e) {}
+      this.running = false
+      this.lastStatus = 'stopped'
+      if (this._evtSource) { this._evtSource.close(); this._evtSource = null }
+      this.termLines.push({text: '[STOPPED] Run cancelled by user.'})
+      this.loadRuns()
+    },
+
+    async selectRun(id) {
+      if (this.running && id !== this.activeRunId) return
+      this.activeRunId = id
+      this.termLines = []
+
+      // Close any existing stream first
+      if (this._evtSource) { this._evtSource.close(); this._evtSource = null }
+
+      const run = this.runs.find(r => r.id === id)
+      const isLive = run?.status === 'running' || run?.status === 'queued'
+
+      if (isLive) {
+        // Live run — keep stream open, update running state
+        this.running = true
+        this._attachStream(id, true)
+      } else {
+        // Completed run — replay lines then close
+        this._attachStream(id, false)
+      }
+    },
+
+    // Attach (or re-attach) an SSE stream for a run.
+    // isLive=true keeps the stream open and updates running state on done.
+    // isLive=false closes after all lines are received (replay mode).
+    _attachStream(id, isLive) {
+      if (this._evtSource) { this._evtSource.close(); this._evtSource = null }
+      const es = new EventSource(`${this.apiBase}/api/run/${id}/stream`)
+      this._evtSource = es
+      es.onmessage = (e) => {
+        const d = JSON.parse(e.data)
+        if (d.done) {
+          es.close(); this._evtSource = null
+          if (isLive) {
+            this.running = false
+            this.lastStatus = d.status
+            this.loadRuns()
+            this.loadOutputs().then(() => {
+              if (d.status === 'done' && this.stlOutputs.length > 0) {
+                this.mfVisible = true; this.mfQuote = null; this.mfError = ''
+                this.mfStlPath = this.stlOutputs[0].path
+              }
+            })
+            this.loadMillforgeIntel()
+          }
+          return
+        }
+        if (d.text !== undefined) {
+          this.termLines.push({text: d.text})
+          this.$nextTick(() => { window.scrollTo({top: document.body.scrollHeight, behavior: 'instant'}) })
+        }
+      }
+      es.onerror = () => {
+        es.close(); this._evtSource = null
+        if (isLive) { this.running = false; this.loadRuns() }
+      }
+      // For replay mode, close after 8s max in case the done event is missed
+      if (!isLive) setTimeout(() => { try { es.close(); this._evtSource = null } catch(_){} }, 8000)
+    },
+
+    async loadRuns() {
+      try {
+        const r = await fetch(this.apiBase + '/api/runs')
+        const d = await r.json()
+        this.runs = d.runs || []
+      } catch(e) {}
+    },
+
+    async loadOutputs() {
+      try {
+        const r = await fetch(this.apiBase + '/api/outputs')
+        const d = await r.json()
+        this.outputFiles = d.files || []
+      } catch(e) {}
+    },
+
+    saveApiBase() {
+      const val = (this.apiBaseInput || '').replace(/\/$/, '').trim()
+      if (val) {
+        localStorage.setItem('aria_api_base', val)
+      } else {
+        localStorage.removeItem('aria_api_base')
+      }
+      this.apiBase = getApiBase()
+      this.showApiSetting = false
+      this.loadRuns()
+      this.loadOutputs()
+    },
+
+    clearApiBase() {
+      localStorage.removeItem('aria_api_base')
+      this.apiBase = getApiBase()
+      this.apiBaseInput = this.apiBase
+    },
+
+    async loadMillforgeIntel() {
+      try {
+        const r = await fetch(this.apiBase + '/api/pipeline/health')
+        if (r.ok) this.millforgePipelineHealth = await r.json()
+      } catch(e) { this.millforgePipelineHealth = null }
+      try {
+        const r = await fetch(this.apiBase + '/api/memory/qc-summary?limit=5')
+        if (r.ok) { const d = await r.json(); this.millforgeQcMemory = d.entries || d || [] }
+        else this.millforgeQcMemory = []
+      } catch(e) { this.millforgeQcMemory = [] }
+    },
+
+    openRunsDrawer()  { this.showRunsDrawer = true;  document.body.style.overflow = 'hidden'; },
+    closeRunsDrawer() { this.showRunsDrawer = false; document.body.style.overflow = ''; },
+    openFilesDrawer() { this.showFilesDrawer = true;  document.body.style.overflow = 'hidden'; },
+    closeFilesDrawer(){ this.showFilesDrawer = false; document.body.style.overflow = ''; },
+
+    async checkMfToken() {
+      try {
+        const r = await fetch(this.apiBase + '/api/millforge/token')
+        const d = await r.json()
+        this.mfHasToken = d.has_token
+      } catch(e) {}
+    },
+
+    async saveToken() {
+      if (!this.mfTokenInput.trim()) return
+      try {
+        await fetch(this.apiBase + '/api/millforge/token', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({token: this.mfTokenInput.trim()}),
+        })
+        this.mfHasToken = true
+        this.mfShowTokenInput = false
+        this.mfTokenInput = ''
+      } catch(e) {}
+    },
+
+    async sendCamToMillforge() {
+      if (!this.mfCamDir || this.mfCamSending) return
+      this.mfCamSending = true
+      this.mfCamResult = null
+      this.mfError = ''
+      try {
+        const r = await fetch(this.apiBase + '/api/send-cam-to-millforge', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({cam_dir: this.mfCamDir}),
+        })
+        const d = await r.json()
+        if (!r.ok) { this.mfError = d.detail || 'MillForge error'; return }
+        this.mfCamResult = d
+      } catch(e) {
+        this.mfError = 'Could not reach server: ' + e.message
+      } finally {
+        this.mfCamSending = false
+      }
+    },
+
+    async sendToMillforge() {
+      if (!this.mfStlPath || this.mfSending) return
+      this.mfSending = true
+      this.mfQuote = null
+      this.mfError = ''
+      try {
+        const r = await fetch(this.apiBase + '/api/send-to-millforge', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            stl_path: this.mfStlPath,
+            material: this.mfMaterial,
+            quantity: this.mfQty || 1,
+          }),
+        })
+        if (!r.ok) {
+          const e = await r.json()
+          this.mfError = e.detail || 'MillForge error'
+          return
+        }
+        this.mfQuote = await r.json()
+      } catch(e) {
+        this.mfError = 'Could not reach server: ' + e.message
+      } finally {
+        this.mfSending = false
+      }
+    },
+
+    async openPreview(f) {
+      this.previewFile = f
+      this.previewContent = ''
+      this.previewOpen = true
+      if (!['png','svg'].includes(f.kind)) {
+        try {
+          const r = await fetch(this.apiBase + '/api/file?path=' + encodeURIComponent(f.path))
+          const text = await r.text()
+          this.previewContent = text.slice(0, 60000) + (text.length > 60000 ? '\n\n[truncated]' : '')
+        } catch(e) {
+          this.previewContent = 'Could not load file.'
+        }
+      }
+    },
+
+    copyPath() {
+      navigator.clipboard.writeText(this.previewFile.path).catch(()=>{})
+    },
+
+    // ── Three.js STL preview ──────────────────────────────────────────────────
+
+    async openStlPreview(path) {
+      this.stlPath = path
+      this.stlLoadError = ''
+      this.stlModalOpen = true
+      await this.$nextTick()
+      this._setupThree()
+    },
+
+    _threeCleanup() {
+      if (this._threeAnimId) { cancelAnimationFrame(this._threeAnimId); this._threeAnimId = null }
+      if (this._threeRenderer) {
+        try { this._threeRenderer.dispose() } catch(_) {}
+        this._threeRenderer = null
+      }
+    },
+
+    async _setupThree() {
+      this._threeCleanup()
+      const container = this.$refs.stlMount
+      if (!container) return
+      if (!window.THREE) { this.stlLoadError = 'Three.js not loaded yet — try again in a moment.'; return }
+
+      this.stlLoading = true
+      const { THREE, STLLoader, OrbitControls } = window
+
+      const w = container.clientWidth || 640, h = Math.max(container.clientHeight, 380)
+      const renderer = new THREE.WebGLRenderer({ antialias: true })
+      renderer.setSize(w, h)
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+      renderer.setClearColor(0x0d1117)
+      container.innerHTML = ''
+      container.appendChild(renderer.domElement)
+      this._threeRenderer = renderer
+
+      const scene = new THREE.Scene()
+      scene.add(new THREE.AmbientLight(0xffffff, 0.5))
+      const sun = new THREE.DirectionalLight(0xffffff, 1.2)
+      sun.position.set(5, 10, 7)
+      scene.add(sun)
+      const fill = new THREE.DirectionalLight(0x88aaff, 0.4)
+      fill.position.set(-5, -3, -5)
+      scene.add(fill)
+
+      const camera = new THREE.PerspectiveCamera(45, w / h, 0.01, 100000)
+      const controls = new OrbitControls(camera, renderer.domElement)
+      controls.enableDamping = true
+      controls.dampingFactor = 0.08
+
+      try {
+        const resp = await fetch(this.apiBase + '/api/file?path=' + encodeURIComponent(this.stlPath))
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        const buf = await resp.arrayBuffer()
+        const geo = new STLLoader().parse(buf)
+        geo.computeBoundingBox()
+        const box = geo.boundingBox
+        const center = new THREE.Vector3()
+        box.getCenter(center)
+        geo.translate(-center.x, -center.y, -center.z)
+        const size = new THREE.Vector3()
+        box.getSize(size)
+        const maxDim = Math.max(size.x, size.y, size.z) || 1
+        camera.position.set(maxDim * 0.8, maxDim * 0.6, maxDim * 1.8)
+        camera.near = maxDim * 0.001
+        camera.far  = maxDim * 100
+        camera.updateProjectionMatrix()
+        controls.update()
+        const mat = new THREE.MeshPhongMaterial({ color: 0x388bfd, specular: 0x222233, shininess: 60, side: THREE.DoubleSide })
+        scene.add(new THREE.Mesh(geo, mat))
+        // Grid
+        const grid = new THREE.GridHelper(maxDim * 3, 10, 0x21262d, 0x21262d)
+        grid.position.y = -size.y / 2
+        scene.add(grid)
+      } catch(e) {
+        this.stlLoadError = 'Failed to load STL: ' + e.message
+      }
+
+      this.stlLoading = false
+      const animate = () => {
+        if (!this._threeRenderer) return
+        this._threeAnimId = requestAnimationFrame(animate)
+        controls.update()
+        renderer.render(scene, camera)
+      }
+      animate()
+    },
+  }
+}
+</script>
+</body>
+</html>

@@ -414,4 +414,67 @@ def scan_directory(
             print(f"    {fname}: {err}")
         print()
 
+    # Auto-push catalog to MillForge if configured
+    if entries:
+        _push_catalog_to_millforge(entries, catalog_path)
+
     return entries
+
+
+def _push_catalog_to_millforge(
+    entries: List["CatalogEntry"],
+    catalog_path: Optional[str | Path] = None,
+) -> None:
+    """Push completed scan catalog to MillForge's /api/aria-scan/import endpoint.
+
+    Non-fatal — logs warnings on failure. Only runs when MILLFORGE_API_URL is set.
+    """
+    import os
+    mf_url = os.environ.get("MILLFORGE_API_URL", "").rstrip("/")
+    if not mf_url:
+        return
+
+    # Build catalog JSON from entries
+    catalog_data = []
+    for entry in entries:
+        catalog_data.append({
+            "id": entry.id,
+            "source_file": entry.source_file,
+            "topology": entry.topology,
+            "material": entry.material,
+            "confidence": entry.confidence,
+            "bounding_box": {
+                "x": entry.bounding_box.x,
+                "y": entry.bounding_box.y,
+                "z": entry.bounding_box.z,
+            } if entry.bounding_box else None,
+            "tags": entry.tags,
+            "primitives_summary": entry.primitives_summary,
+        })
+
+    try:
+        import urllib.request
+        import json as _json
+
+        mf_key = os.environ.get("ARIA_BRIDGE_KEY", "")
+        headers = {"Content-Type": "application/json"}
+        if mf_key:
+            headers["X-API-Key"] = mf_key
+
+        payload = _json.dumps({
+            "catalog": catalog_data,
+            "source": "aria_scan_pipeline",
+            "catalog_path": str(catalog_path) if catalog_path else None,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{mf_url}/api/aria-scan/import",
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = _json.loads(resp.read())
+            print(f"  [SCAN] Pushed {len(catalog_data)} entries to MillForge: {result.get('status', 'ok')}")
+    except Exception as exc:
+        print(f"  [SCAN] MillForge catalog push failed (non-fatal): {exc}")
