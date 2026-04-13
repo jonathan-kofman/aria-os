@@ -33,3 +33,5 @@ Thumbs.db
 
 # Private
 .millforge/
+frontend/node_modules/
+frontend/dist/
