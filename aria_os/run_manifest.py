@@ -9,12 +9,24 @@ Every pipeline run produces:
 
 The run_id is a timestamp + short UUID: 20260409T215033_a3f1c9b2
 Concurrent runs never share a directory.
+
+Schema versions
+---------------
+1.0  Single-process legacy schema (no operations array)
+2.0  Multi-process bridge V2 (operations[] populated from DFM or explicit)
+2.1  Adds pipeline_stats + mesh_stats blocks for per-run quality telemetry:
+       - pipeline_stats: agent iterations used, wall time, success_agent,
+         llm_calls broken down by provider, llm_total_calls
+       - mesh_stats: triangle count, bbox, volume_cm3, watertight flag
+     Older fields are unchanged so existing readers (MillForge bridge,
+     dashboard run history) keep working.
 """
 from __future__ import annotations
 
 import json
 import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -63,6 +75,79 @@ def _git_commit(repo_root: Path) -> str | None:
         return None
 
 
+def _mesh_stats(stl_path: str | Path | None) -> dict[str, Any]:
+    """
+    Probe an STL for basic geometry stats. Best-effort: returns whatever
+    fields succeed and silently skips the rest. Never raises.
+
+    Lightweight enough to run in the manifest hot path — it's a single
+    trimesh.load + a couple of property accesses, no remeshing.
+    """
+    out: dict[str, Any] = {}
+    if not stl_path:
+        return out
+    p = Path(stl_path)
+    if not p.is_file():
+        return out
+    try:
+        import trimesh  # noqa: PLC0415
+        mesh = trimesh.load(str(p), force="mesh")
+        if hasattr(mesh, "vertices") and hasattr(mesh, "faces"):
+            out["triangle_count"] = int(len(mesh.faces))
+            out["vertex_count"] = int(len(mesh.vertices))
+            ext = mesh.bounding_box.extents
+            out["bbox_mm"] = [round(float(x), 3) for x in ext]
+            try:
+                vol_mm3 = float(mesh.volume)
+                out["volume_cm3"] = round(vol_mm3 / 1000.0, 3)
+            except Exception:
+                pass
+            try:
+                out["watertight"] = bool(mesh.is_watertight)
+            except Exception:
+                pass
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def _pipeline_stats(
+    session: dict[str, Any],
+    started_at: float | None,
+    agent_iterations: int | None,
+) -> dict[str, Any]:
+    """
+    Build a per-run pipeline_stats block from session data. All fields are
+    optional — if the orchestrator didn't record them, the field is None
+    or absent rather than fabricated.
+    """
+    stats: dict[str, Any] = {
+        "agent_iterations_used": session.get("agent_iterations_used", agent_iterations),
+        "stalled": bool(session.get("agent_stalled", False)),
+        "success_agent": session.get("success_agent"),  # template | cadsmith | llm | refiner
+    }
+
+    if started_at is not None:
+        stats["wall_time_seconds"] = round(time.time() - started_at, 2)
+    elif session.get("wall_time_seconds") is not None:
+        stats["wall_time_seconds"] = round(float(session["wall_time_seconds"]), 2)
+
+    # LLM call counts. The llm_client emits print() lines like "[LLM] anthropic"
+    # but here we expect the orchestrator to aggregate and stash structured counts
+    # in session["llm_calls"] = {"anthropic": int, "gemini": int, ...}.
+    llm_calls = session.get("llm_calls") or {}
+    if isinstance(llm_calls, dict):
+        stats["llm_calls"] = {k: int(v) for k, v in llm_calls.items() if isinstance(v, (int, float))}
+        stats["llm_total_calls"] = int(sum(stats["llm_calls"].values()))
+
+    # Failure history (one entry per failed iteration). Useful for debugging.
+    failures = session.get("agent_failures")
+    if isinstance(failures, list):
+        stats["agent_failures"] = failures[-10:]  # cap to last 10
+
+    return stats
+
+
 def create_run(
     *,
     run_id: str,
@@ -72,10 +157,16 @@ def create_run(
     agent_mode: bool = True,
     agent_iterations: int | None = None,
     repo_root: Path,
+    started_at: float | None = None,
 ) -> Path:
     """
     Create outputs/runs/<run_id>/, copy artifacts, write run_manifest.json.
     Returns the run directory Path.
+
+    started_at: optional time.time() value captured at orchestrator start.
+                When provided, manifest.pipeline_stats.wall_time_seconds is
+                populated from (now - started_at). The orchestrator should
+                pass this; older callers that don't pass it still work.
     """
     run_dir = repo_root / "outputs" / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -123,7 +214,16 @@ def create_run(
                 }
             ]
 
-    schema_ver = "2.0" if operations else "1.0"
+    # Schema version: 2.1 once the new pipeline_stats / mesh_stats blocks land,
+    # 2.0 when only operations[] is populated, 1.0 otherwise.
+    if operations:
+        schema_ver = "2.1"
+    elif session.get("agent_iterations_used") or session.get("llm_calls"):
+        # Have telemetry but no operations array — still 2.1 so readers know
+        # the pipeline_stats fields are available.
+        schema_ver = "2.1"
+    else:
+        schema_ver = "1.0"
 
     # Build manifest
     manifest: dict[str, Any] = {
@@ -165,6 +265,12 @@ def create_run(
 
         # V2: multi-process operations array (populated from DFM or explicit session data)
         "operations": operations,
+
+        # V2.1: per-run quality telemetry (agent iterations, LLM calls, wall time)
+        "pipeline_stats": _pipeline_stats(session, started_at, agent_iterations),
+
+        # V2.1: lightweight STL geometry stats (triangle count, bbox, watertight)
+        "mesh_stats": _mesh_stats(copied_stl or stl_src),
     }
 
     manifest_path = run_dir / "run_manifest.json"

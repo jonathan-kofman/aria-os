@@ -31,6 +31,11 @@ from pydantic import BaseModel
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYTHON = sys.executable
+# When the dashboard spawns python subprocesses, force unbuffered stdout
+# (`python -u`) so output line-streams immediately into the run-record.
+# Without this, a quick-exiting subprocess can drop everything written
+# in the last 4KB of buffered stdout.
+PYTHON_ARGS_PREFIX = ["-u"]
 RUNNER = str(REPO_ROOT / "run_aria_os.py")
 STATIC = Path(__file__).resolve().parent / "static"
 RUN_LOG_PATH = REPO_ROOT / "outputs" / "dashboard_run_log.json"
@@ -310,6 +315,11 @@ def _millforge_jobs_deeplink(api_url: str, job_id: int | None = None) -> str:
 # Helpers
 # --------------------------------------------------------------------------- #
 
+def _python_cmd() -> list[str]:
+    """`python -u` so subprocess stdout streams unbuffered into the run record."""
+    return [PYTHON, *PYTHON_ARGS_PREFIX]
+
+
 def _build_argv(req: RunRequest) -> list[str]:
     """Translate a RunRequest into a run_aria_os.py argv list."""
     cmd = req.command.strip().lower()
@@ -317,122 +327,122 @@ def _build_argv(req: RunRequest) -> list[str]:
     goal = req.goal.strip()
 
     if cmd == "generate":
-        # python run_aria_os.py "goal text"
+        # python -u run_aria_os.py "goal text"
         if not goal:
             raise ValueError("goal is required for generate")
-        return [PYTHON, RUNNER, goal]
+        return [*_python_cmd(), RUNNER, goal]
 
     if cmd == "list":
-        return [PYTHON, RUNNER, "--list"]
+        return [*_python_cmd(), RUNNER, "--list"]
 
     if cmd == "validate":
-        return [PYTHON, RUNNER, "--validate"]
+        return [*_python_cmd(), RUNNER, "--validate"]
 
     if cmd in ("cam",):
         # --cam <step_file> [--material X] [--machine Y]
         if not goal:
             raise ValueError("goal (step file path) is required for cam")
-        return [PYTHON, RUNNER, "--cam", goal] + flags
+        return [*_python_cmd(), RUNNER, "--cam", goal] + flags
 
     if cmd == "cam-validate":
-        return [PYTHON, RUNNER, "--cam-validate"] + flags
+        return [*_python_cmd(), RUNNER, "--cam-validate"] + flags
 
     if cmd == "setup":
         # --setup <step> <cam_script>
         parts = goal.split(None, 1)
         if len(parts) < 2:
             raise ValueError("setup needs: <step_file> <cam_script>")
-        return [PYTHON, RUNNER, "--setup", parts[0], parts[1]] + flags
+        return [*_python_cmd(), RUNNER, "--setup", parts[0], parts[1]] + flags
 
     if cmd in ("verify",):
         if not goal:
             raise ValueError("goal (stl/step path) is required for verify")
-        return [PYTHON, RUNNER, "--verify", goal]
+        return [*_python_cmd(), RUNNER, "--verify", goal]
 
     if cmd in ("analyze", "analyze-part"):
         if not goal:
             raise ValueError("goal (step path) is required for analyze")
-        return [PYTHON, RUNNER, "--analyze-part", goal]
+        return [*_python_cmd(), RUNNER, "--analyze-part", goal]
 
     if cmd in ("quote",):
         if not goal:
             raise ValueError("goal (step path) is required for quote")
-        return [PYTHON, RUNNER, "--quote", goal]
+        return [*_python_cmd(), RUNNER, "--quote", goal]
 
     if cmd in ("draw",):
         if not goal:
             raise ValueError("goal (step path) is required for draw")
-        return [PYTHON, RUNNER, "--draw", goal]
+        return [*_python_cmd(), RUNNER, "--draw", goal]
 
     if cmd in ("ecad",):
         if not goal:
             raise ValueError("goal is required for ecad")
-        return [PYTHON, RUNNER, "--ecad", goal]
+        return [*_python_cmd(), RUNNER, "--ecad", goal]
 
     if cmd in ("autocad",):
         if not goal:
             raise ValueError("goal is required for autocad")
-        return [PYTHON, RUNNER, "--autocad", goal]
+        return [*_python_cmd(), RUNNER, "--autocad", goal]
 
     if cmd in ("assemble", "assembly"):
         if not goal:
             raise ValueError("goal is required for assemble")
-        return [PYTHON, RUNNER, "--assemble", goal]
+        return [*_python_cmd(), RUNNER, "--assemble", goal]
 
     if cmd in ("optimize",):
         if not goal:
             raise ValueError("goal is required for optimize")
-        return [PYTHON, RUNNER, "--optimize", goal]
+        return [*_python_cmd(), RUNNER, "--optimize", goal]
 
     if cmd in ("modify",):
         parts = goal.split(None, 1)
         if len(parts) < 2:
             raise ValueError("modify needs: <script.py> <change description>")
-        return [PYTHON, RUNNER, "--modify", parts[0], parts[1]]
+        return [*_python_cmd(), RUNNER, "--modify", parts[0], parts[1]]
 
     if cmd in ("view",):
         if not goal:
             raise ValueError("goal (step path) is required for view")
-        return [PYTHON, RUNNER, "--view", goal]
+        return [*_python_cmd(), RUNNER, "--view", goal]
 
     if cmd in ("image",):
         if not goal:
             raise ValueError("goal (stl path) is required for image")
-        return [PYTHON, RUNNER, "--image", goal]
+        return [*_python_cmd(), RUNNER, "--image", goal]
 
     if cmd in ("cem", "cem-full"):
         if not goal:
             raise ValueError("goal is required for cem")
-        return [PYTHON, RUNNER, "--cem-full", goal]
+        return [*_python_cmd(), RUNNER, "--cem-full", goal]
 
     if cmd in ("cem-advise",):
         if not goal:
             raise ValueError("goal is required for cem-advise")
-        return [PYTHON, RUNNER, "--cem-advise", goal]
+        return [*_python_cmd(), RUNNER, "--cem-advise", goal]
 
     if cmd in ("material-study",):
         if not goal:
             raise ValueError("goal (step path) is required for material-study")
-        return [PYTHON, RUNNER, "--material-study", goal]
+        return [*_python_cmd(), RUNNER, "--material-study", goal]
 
     if cmd in ("lattice",):
         if not goal:
             raise ValueError("goal is required for lattice")
-        return [PYTHON, RUNNER, "--lattice", goal]
+        return [*_python_cmd(), RUNNER, "--lattice", goal]
 
     if cmd in ("scenario",):
         if not goal:
             raise ValueError("goal is required for scenario")
-        return [PYTHON, RUNNER, "--scenario", goal]
+        return [*_python_cmd(), RUNNER, "--scenario", goal]
 
     if cmd in ("system",):
         if not goal:
             raise ValueError("goal is required for system")
-        return [PYTHON, RUNNER, "--system", goal]
+        return [*_python_cmd(), RUNNER, "--system", goal]
 
     # Fallback: treat as raw goal
     if goal:
-        return [PYTHON, RUNNER, goal]
+        return [*_python_cmd(), RUNNER, goal]
     raise ValueError(f"Unknown command: {cmd}")
 
 
@@ -1092,7 +1102,7 @@ async def react_generate_from_image(
         raise HTTPException(status_code=500, detail=f"failed to persist upload: {exc}")
 
     # Spawn `python run_aria_os.py --image <photo> [hint]`
-    argv = [PYTHON, RUNNER, "--image", str(image_path)]
+    argv = [*_python_cmd(), RUNNER, "--image", str(image_path)]
     if goal.strip():
         argv.append(goal.strip())
 
