@@ -1,0 +1,83 @@
+{
+  "igl_version": "1.0",
+  "part": {
+    "name": "Turbine Mount Bracket",
+    "units": "inches",
+    "material": "6061-T6 Aluminum"
+  },
+  "stock": {
+    "type": "block",
+    "x": 6.0,
+    "y": 4.0,
+    "z": 2.0
+  },
+  "features": [
+    {
+      "id": "f1",
+      "type": "pocket",
+      "params": {
+        "face": "top",
+        "profile": "rectangle",
+        "center_x": 2.0,
+        "center_y": 2.0,
+        "length": 2.5,
+        "width": 1.8,
+        "depth": 0.5,
+        "corner_radius": 0.125,
+        "draft_angle": 0
+      }
+    },
+    {
+      "id": "f2",
+      "type": "pocket",
+      "params": {
+        "face": "top",
+        "profile": "circular",
+        "center_x": 4.5,
+        "center_y": 2.0,
+        "diameter": 1.5,
+        "depth": 0.75,
+        "corner_radius": 0
+      }
+    },
+    {
+      "id": "f3",
+      "type": "hole_pattern",
+      "params": {
+        "face": "top",
+        "pattern": "rectangular",
+        "start_x": 0.75,
+        "start_y": 0.75,
+        "spacing_x": 4.5,
+        "spacing_y": 2.5,
+        "count_x": 2,
+        "count_y": 2,
+        "diameter": 0.266,
+        "depth": 0.75,
+        "hole_type": "tapped",
+        "thread": "1/4-20 UNC"
+      }
+    },
+    {
+      "id": "f4",
+      "type": "fillet",
+      "params": {
+        "target": "f1",
+        "edges": "all_vertical",
+        "radius": 0.125
+      }
+    },
+    {
+      "id": "f5",
+      "type": "chamfer",
+      "params": {
+        "edges": "all_top_outer",
+        "size": 0.030
+      }
+    }
+  ],
+  "metadata": {
+    "generated_by": "aria-os",
+    "source_prompt": "6x4x2 inch turbine mount bracket with pockets and tapped mounting holes"
+  }
+}

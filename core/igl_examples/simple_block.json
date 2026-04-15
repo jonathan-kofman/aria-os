@@ -1,0 +1,32 @@
+{
+  "igl_version": "1.0",
+  "part": {
+    "name": "Simple Block With Hole",
+    "units": "mm",
+    "material": "6061-T6 Aluminum"
+  },
+  "stock": {
+    "type": "block",
+    "x": 50.0,
+    "y": 30.0,
+    "z": 10.0
+  },
+  "features": [
+    {
+      "id": "f1",
+      "type": "hole",
+      "params": {
+        "face": "top",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "diameter": 6.0,
+        "depth": "through",
+        "hole_type": "plain"
+      }
+    }
+  ],
+  "metadata": {
+    "generated_by": "aria-os",
+    "source_prompt": "50x30x10mm aluminum block with 6mm through hole in the center"
+  }
+}

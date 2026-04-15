@@ -1,0 +1,99 @@
+{
+  "igl_version": "1.0",
+  "part": {
+    "name": "Complex L-Bracket with Ribs",
+    "units": "mm",
+    "material": "6061-T6 Aluminum"
+  },
+  "stock": {
+    "type": "block",
+    "x": 100.0,
+    "y": 80.0,
+    "z": 60.0
+  },
+  "features": [
+    {
+      "id": "f1",
+      "type": "cutout",
+      "params": {
+        "face": "front",
+        "profile": "rectangle",
+        "center_x": 10.0,
+        "center_y": 20.0,
+        "length": 80.0,
+        "width": 40.0,
+        "depth": "through",
+        "corner_radius": 5.0
+      }
+    },
+    {
+      "id": "f2",
+      "type": "hole_pattern",
+      "params": {
+        "face": "bottom",
+        "pattern": "rectangular",
+        "start_x": -40.0,
+        "start_y": -30.0,
+        "spacing_x": 80.0,
+        "spacing_y": 60.0,
+        "count_x": 2,
+        "count_y": 2,
+        "diameter": 6.6,
+        "depth": "through",
+        "hole_type": "plain"
+      }
+    },
+    {
+      "id": "f3",
+      "type": "hole_pattern",
+      "params": {
+        "face": "back",
+        "pattern": "rectangular",
+        "start_x": -40.0,
+        "start_y": -20.0,
+        "spacing_x": 80.0,
+        "spacing_y": 40.0,
+        "count_x": 2,
+        "count_y": 2,
+        "diameter": 8.5,
+        "depth": "through",
+        "hole_type": "counterbore",
+        "cbore_diameter": 15.0,
+        "cbore_depth": 5.0
+      }
+    },
+    {
+      "id": "f4",
+      "type": "rib",
+      "params": {
+        "face": "left",
+        "start_x": 0.0,
+        "start_y": 0.0,
+        "end_x": 40.0,
+        "end_y": 40.0,
+        "thickness": 5.0,
+        "height": 30.0
+      }
+    },
+    {
+      "id": "f5",
+      "type": "fillet",
+      "params": {
+        "edges": "all_outer_vertical",
+        "radius": 3.0
+      }
+    },
+    {
+      "id": "f6",
+      "type": "chamfer",
+      "params": {
+        "edges": "all_top",
+        "size": 1.0
+      }
+    }
+  ],
+  "metadata": {
+    "generated_by": "aria-os",
+    "source_prompt": "100x80x60mm L-bracket with front cutout, tapped mounting holes, counterbored rear holes, side rib"
+  }
+}

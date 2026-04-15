@@ -1,0 +1,52 @@
+{
+  "igl_version": "1.0",
+  "part": {
+    "name": "Bolted Flange",
+    "units": "mm",
+    "material": "Stainless Steel 316"
+  },
+  "stock": {
+    "type": "cylinder",
+    "diameter": 120.0,
+    "height": 15.0
+  },
+  "features": [
+    {
+      "id": "f1",
+      "type": "hole",
+      "params": {
+        "face": "top",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "diameter": 50.0,
+        "depth": "through",
+        "hole_type": "plain"
+      }
+    },
+    {
+      "id": "f2",
+      "type": "hole_pattern",
+      "params": {
+        "face": "top",
+        "pattern": "circular",
+        "bolt_circle_diameter": 90.0,
+        "count": 6,
+        "diameter": 8.5,
+        "depth": "through",
+        "hole_type": "plain"
+      }
+    },
+    {
+      "id": "f3",
+      "type": "chamfer",
+      "params": {
+        "edges": "all_outer",
+        "size": 0.5
+      }
+    }
+  ],
+  "metadata": {
+    "generated_by": "aria-os",
+    "source_prompt": "120mm OD flange, 50mm bore, 15mm thick, 6 bolt holes on 90mm PCD"
+  }
+}

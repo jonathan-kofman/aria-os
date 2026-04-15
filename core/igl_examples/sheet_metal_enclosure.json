@@ -1,0 +1,67 @@
+{
+  "igl_version": "1.0",
+  "part": {
+    "name": "Sheet Metal Enclosure",
+    "units": "mm",
+    "material": "Aluminum 5052"
+  },
+  "stock": {
+    "type": "block",
+    "x": 200.0,
+    "y": 100.0,
+    "z": 1.5
+  },
+  "features": [
+    {
+      "id": "f1",
+      "type": "bend",
+      "params": {
+        "face": "top",
+        "axis": "y",
+        "position": -40.0,
+        "angle": 90.0,
+        "radius": 2.0
+      }
+    },
+    {
+      "id": "f2",
+      "type": "bend",
+      "params": {
+        "face": "top",
+        "axis": "y",
+        "position": 40.0,
+        "angle": 90.0,
+        "radius": 2.0
+      }
+    },
+    {
+      "id": "f3",
+      "type": "hole_pattern",
+      "params": {
+        "face": "top",
+        "pattern": "rectangular",
+        "start_x": -80.0,
+        "start_y": -40.0,
+        "spacing_x": 160.0,
+        "spacing_y": 80.0,
+        "count_x": 2,
+        "count_y": 2,
+        "diameter": 4.2,
+        "depth": "through",
+        "hole_type": "plain"
+      }
+    },
+    {
+      "id": "f4",
+      "type": "relief",
+      "params": {
+        "radius": 1.0,
+        "target": "f1"
+      }
+    }
+  ],
+  "metadata": {
+    "generated_by": "aria-os",
+    "source_prompt": "200x100x1.5mm aluminum enclosure, U-shape with two 90° bends and mounting holes"
+  }
+}
