@@ -121,9 +121,10 @@ async def pipeline_health():
             return {"status": "error", "error": str(e)}
 
     loop = asyncio.get_event_loop()
+    # MillForge exposes GET /health (not /api/health). StructSight may vary by app.
     structsight_health, millforge_health = await asyncio.gather(
         loop.run_in_executor(None, _probe, f"{STRUCTSIGHT_URL}/api/health"),
-        loop.run_in_executor(None, _probe, f"{MILLFORGE_URL}/api/health"),
+        loop.run_in_executor(None, _probe, f"{MILLFORGE_URL.rstrip('/')}/health"),
         return_exceptions=True,
     )
 
@@ -214,6 +215,22 @@ class MillForgeCamRequest(BaseModel):
 
 class MillForgeTokenRequest(BaseModel):
     token: str
+
+
+def _millforge_ui_base(api_url: str) -> str:
+    """Map MillForge API origin (e.g. :8000) to Vite dev UI origin (e.g. :5173)."""
+    u = (api_url or "").rstrip("/")
+    if ":8000" in u:
+        return u.replace(":8000", ":5173", 1)
+    return u or "http://localhost:5173"
+
+
+def _millforge_jobs_deeplink(api_url: str, job_id: int | None = None) -> str:
+    """Open Jobs tab and optionally focus a job (session cookie is unchanged — same origin)."""
+    base = _millforge_ui_base(api_url).rstrip("/")
+    if job_id is not None:
+        return f"{base}/?tab=jobs&job={int(job_id)}"
+    return f"{base}/?tab=jobs"
 
 
 # --------------------------------------------------------------------------- #
@@ -596,7 +613,14 @@ async def send_cam_to_millforge(req: MillForgeCamRequest):
         )
         with _ur.urlopen(mf_req, timeout=15) as r:
             job = json.loads(r.read())
-        return {"status": "created", "job": job, "millforge_ui": req.millforge_url.replace(":8000", ":5173")}
+        jid = job.get("id")
+        ui = _millforge_ui_base(base)
+        return {
+            "status": "created",
+            "job": job,
+            "millforge_ui": ui,
+            "millforge_job_url": _millforge_jobs_deeplink(base, jid),
+        }
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
         detail = json.loads(body).get("detail", body[:200]) if body.startswith("{") else body[:200]
@@ -679,13 +703,15 @@ async def send_to_millforge(req: MillForgeRequest):
     except Exception:
         pass  # quote is best-effort; cad_result is enough to show useful info
 
+    ui = _millforge_ui_base(base)
     return {
         "stl_file": full.name,
         "material": mf_material,
         "quantity": req.quantity,
         "cad": cad_result,
         "quote": quote_result,
-        "millforge_ui": req.millforge_url.replace(":8000", ":5173"),
+        "millforge_ui": ui,
+        "millforge_jobs_url": _millforge_jobs_deeplink(base, None),
     }
 
 
@@ -702,22 +728,13 @@ async def from_visualization(req: VisualizationRequest):
     if not goal:
         raise HTTPException(status_code=400, detail="item_description is required")
 
-    # Enrich the goal with material/connection considerations
-    extra_context_parts = []
-    for c in req.considerations:
-        lower = c.lower()
-        if any(kw in lower for kw in ["steel", "aluminum", "material", "gauge",
-                                       "thickness", "weld", "bolt", "anchor",
-                                       "concrete", "load", "connection"]):
-            extra_context_parts.append(c[:120])
+    # Keep the goal concise — the full context is saved to the JSON file
+    # and injected by the coordinator during spec extraction.
+    # The goal should be a short, actionable CAD description (≤300 chars).
+    MAX_GOAL = 300
 
-    # Also fold AI description into the goal for better spec extraction
-    if req.description:
-        desc_summary = req.description[:200].rstrip(".")
-        goal = f"{goal} — {desc_summary}"
-
-    if extra_context_parts:
-        goal = f"{goal}. {'; '.join(extra_context_parts)}"
+    if len(goal) > MAX_GOAL:
+        goal = goal[:MAX_GOAL].rsplit(" ", 1)[0]
 
     run_id = str(uuid.uuid4())[:8]
 
@@ -793,8 +810,22 @@ async def get_run_status(run_id: str):
         "returncode": rec.get("returncode"),
     }
 
-    # Extract generation results from output lines (scan for known patterns)
+    # Extract generation results + current stage from output lines
     lines_text = [l.get("text", "") for l in rec.get("lines", [])]
+    phase_labels = {
+        "[Phase 1]": "Researching materials & standards",
+        "[Phase 2]": "Building geometry spec",
+        "[Phase 3]": "Generating CAD geometry",
+        "[Phase 4]": "Running CAM + simulation",
+        "[Phase 5]": "Final assembly & MillForge",
+    }
+    current_stage = None
+    for line in lines_text:
+        for marker, label in phase_labels.items():
+            if marker in line:
+                current_stage = label
+    result["current_stage"] = current_stage
+
     for line in reversed(lines_text):
         if "STEP:" in line and "KB" in line:
             result["step_path"] = line.split("STEP:")[-1].strip().split("(")[0].strip()
@@ -930,6 +961,97 @@ async def qc_memory_summary(material: str = "", part_type: str = "", limit: int 
         return {"entries": list(reversed(entries)), "total": len(entries)}
     except Exception as exc:
         return {"entries": [], "total": 0, "error": str(exc)}
+
+
+# --------------------------------------------------------------------------- #
+# React frontend compatibility routes
+# Used by the Vite dashboard at https://aria-os-dashboard.vercel.app/.
+# Mirrors the route surface in dashboard/aria_server.py so the React SPA
+# can talk to this server without requiring a separate process.
+# --------------------------------------------------------------------------- #
+
+
+class _GenerateRequest(BaseModel):
+    goal: str
+    max_attempts: int = 3
+
+
+@app.post("/api/generate")
+async def react_generate(req: _GenerateRequest):
+    """
+    Compat shim for the React SPA. Delegates to the existing `start_run`
+    handler so all run registry / streaming machinery keeps working.
+    """
+    return await start_run(RunRequest(command="generate", goal=req.goal))
+
+
+@app.get("/api/parts")
+async def react_list_parts():
+    """List generated parts from the learning log (used by the React SPA)."""
+    log_path = REPO_ROOT / "outputs" / "cad" / "learning_log.json"
+    if not log_path.is_file():
+        return {"parts": []}
+    try:
+        data = json.loads(log_path.read_text(encoding="utf-8"))
+        return {"parts": data if isinstance(data, list) else []}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/parts/{part_id}/stl")
+async def react_get_stl(part_id: str):
+    """Serve the STL file for a part (best-effort glob match in outputs/cad/stl/)."""
+    stl_dir = REPO_ROOT / "outputs" / "cad" / "stl"
+    matches = list(stl_dir.glob(f"*{part_id}*.stl")) if stl_dir.is_dir() else []
+    if not matches:
+        raise HTTPException(status_code=404, detail=f"No STL found for {part_id}")
+    stl_file = max(matches, key=lambda p: p.stat().st_mtime)
+    # Path-traversal guard
+    allowed_prefix = os.path.realpath(str(REPO_ROOT / "outputs"))
+    resolved = os.path.realpath(str(stl_file))
+    if not resolved.startswith(allowed_prefix + os.sep) and resolved != allowed_prefix:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return FileResponse(resolved, media_type="model/stl", filename=stl_file.name)
+
+
+@app.get("/api/sessions")
+async def react_list_sessions():
+    """List session-log files used by the React SPA."""
+    sessions_dir = REPO_ROOT / "sessions"
+    if not sessions_dir.is_dir():
+        return {"sessions": []}
+    files = sorted(sessions_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return {
+        "sessions": [
+            {"name": f.name, "size_bytes": f.stat().st_size}
+            for f in files[:50]
+        ]
+    }
+
+
+@app.get("/api/cem")
+async def react_cem_summary():
+    """Latest CEM check results from the learning log."""
+    log_path = REPO_ROOT / "outputs" / "cad" / "learning_log.json"
+    if not log_path.is_file():
+        return {"cem": []}
+    try:
+        data = json.loads(log_path.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return {"cem": []}
+        cem_entries = [
+            {
+                "part_id":    e.get("part_id"),
+                "goal":       e.get("goal", ""),
+                "cem_passed": e.get("cem_passed"),
+                "timestamp":  e.get("timestamp", ""),
+            }
+            for e in reversed(data)
+            if "cem_passed" in e
+        ]
+        return {"cem": cem_entries[:100]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # Serve static files (index.html etc.)
