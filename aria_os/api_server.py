@@ -114,11 +114,26 @@ class GenerateResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _check_cadquery() -> dict:
+    """
+    Probe whether cadquery is importable from the running Python process.
+    Catches ALL exceptions (not just ImportError) so issues like a broken
+    OCP native binding surface in the health endpoint instead of being
+    silently mislabeled as "not installed".
+    """
+    import sys
     try:
         import cadquery  # noqa: F401
-        return {"available": True, "version": getattr(cadquery, "__version__", "unknown")}
-    except ImportError:
-        return {"available": False, "reason": "cadquery not installed"}
+        return {
+            "available": True,
+            "version": getattr(cadquery, "__version__", "unknown"),
+            "executable": sys.executable,
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "executable": sys.executable,
+        }
 
 
 def _check_grasshopper() -> dict:
