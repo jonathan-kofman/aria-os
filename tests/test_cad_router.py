@@ -60,6 +60,27 @@ class TestSelectCadTool:
         result = select_cad_tool("cam collar", plan)
         assert result == "grasshopper"
 
+    def test_impeller_routes_cadquery_not_grasshopper(self):
+        # "impeller" was incorrectly in GRASSHOPPER_KEYWORDS — now hard-override to CQ
+        result = select_cad_tool("centrifugal impeller 150mm OD", self._plan())
+        assert result == "cadquery"
+
+    def test_involute_gear_routes_cadquery(self):
+        # "involute" was incorrectly in GRASSHOPPER_KEYWORDS — now hard-override to CQ
+        result = select_cad_tool("involute spur gear 24 teeth", self._plan())
+        assert result == "cadquery"
+
+    def test_sheet_metal_feature_routes_cadquery(self):
+        # sheet_metal feature type: was routing to "fusion" (non-existent), now cadquery
+        plan = self._plan(features=[{"type": "sheet_metal", "description": "formed panel"}])
+        result = select_cad_tool("sheet metal bracket", plan)
+        assert result == "cadquery"
+
+    def test_lattice_feature_routes_fusion360(self):
+        plan = self._plan(features=[{"type": "lattice", "description": "gyroid lattice"}])
+        result = select_cad_tool("lattice housing", plan)
+        assert result == "fusion360"
+
 
 # ---------------------------------------------------------------------------
 # CADRouter.route
