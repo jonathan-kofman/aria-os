@@ -1291,9 +1291,9 @@ export default function App() {
 
   useEffect(() => {
     fetch("/api/parts")
-      .then(r => r.ok ? r.json() : [])
+      .then(r => r.ok ? r.json() : { parts: [] })
       .then(data => {
-        const arr = Array.isArray(data) ? data : [];
+        const arr = Array.isArray(data) ? data : (data?.parts || []);
         setParts(arr);
         if (arr.length > 0) setSelectedPart(arr[0]);
       })
