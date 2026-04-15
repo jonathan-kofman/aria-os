@@ -28,6 +28,10 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
+# Diagnostic: prove stdout capture works for the dashboard subprocess wrapper.
+# Remove once /api/run/<id>.lines is reliably non-empty.
+print(f"[STARTUP] run_aria_os.py PID={os.getpid()} argv={sys.argv[1:]}", flush=True)
+
 # Repo root
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
