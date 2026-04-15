@@ -91,6 +91,42 @@ def _save_run_log() -> None:
 
 _load_run_log()
 
+
+def _warmup_imports() -> dict[str, Any]:
+    """
+    Pre-import the heavy CAD/scientific packages once at server startup so:
+
+    1. The OS file cache is warm — subprocess `python run_aria_os.py ...`
+       loads cadquery / OCP / VTK / matplotlib from page cache, not disk,
+       saving 5-10s of cold-start per generation.
+
+    2. If cadquery is broken (libGL.so.1 missing, etc.), the dashboard
+       process logs the failure on boot rather than silently degrading
+       /api/pipeline/health and waiting for the first user request.
+
+    Wrapped in try/except per-import so a single broken dep doesn't kill
+    the dashboard — it just logs and continues.
+    """
+    results: dict[str, Any] = {}
+    targets = ["numpy", "trimesh", "matplotlib.pyplot", "cadquery"]
+    t0 = time.time()
+    for name in targets:
+        try:
+            __import__(name)
+            results[name] = "ok"
+        except Exception as exc:
+            results[name] = f"FAIL: {type(exc).__name__}: {exc}"
+            _log.warning("warmup: %s failed: %s", name, exc)
+    elapsed = round(time.time() - t0, 2)
+    results["_elapsed_seconds"] = elapsed
+    _log.info("warmup imports finished in %.2fs: %s", elapsed, results)
+    return results
+
+
+# Run warmup at module import (i.e. once per uvicorn worker startup).
+# Stored on the module so /api/pipeline/health can surface it.
+_WARMUP_RESULTS = _warmup_imports()
+
 # MillForge JWT token store (set via /api/millforge/token or MILLFORGE_JWT env var)
 _mf_token: str = os.environ.get("MILLFORGE_JWT", "")
 
@@ -122,6 +158,7 @@ async def version_info():
         "started_at": _PROCESS_START_ISO,
         "uptime_seconds": round(time.time() - _PROCESS_START_TS, 1),
         "python_executable": sys.executable,
+        "warmup": _WARMUP_RESULTS,
     }
 
 
