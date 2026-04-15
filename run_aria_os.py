@@ -12,12 +12,34 @@
   --system-dry-run      Show full subsystem + parts breakdown without generating
 """
 import sys
+import os
 import json
+from datetime import datetime, timezone
 from pathlib import Path
+
+# Force UTF-8 stdout on Windows (avoids UnicodeEncodeError for σ, ⁴, · etc.)
+# line_buffering=True ensures print() flushes on every newline, even when
+# stdout is connected to a pipe instead of a terminal. Without this the
+# dashboard's subprocess wrapper drops everything written to stdout when
+# the script exits quickly, because reconfigure() defaults line_buffering
+# to False which defeats `python -u`.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 # Repo root
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+
+# Load .env — must happen before any aria_os imports so API keys are available
+_env_file = ROOT / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 
 def run_modify(base_part_path: str, modification: str):
@@ -648,7 +670,7 @@ def run_lattice(args: list[str]):
     from rich.console import Console
 
     console = Console(highlight=False, emoji=False)
-    backend = "fusion"
+    backend = "sdf"  # default: fastest, no external deps
     if "--backend" in args:
         try:
             backend = args[args.index("--backend") + 1]
@@ -679,8 +701,41 @@ def run_lattice(args: list[str]):
     wall_mm   = float(get_arg("--strut",     "1.5"))
     part_name = get_arg("--name", "lattice_panel")
 
+    if backend in ("sdf", "numpy"):
+        # Fastest: pure numpy SDF + marching cubes
+        from pathlib import Path as _P
+        from aria_os.generators.sdf_generator import SDFScene, sdf_gyroid, sdf_schwarz_p, sdf_diamond, sdf_lattice_cubic, sdf_box, op_intersection
+        ROOT = _P(__file__).resolve().parent
+        out_stl = str(ROOT / "outputs" / "cad" / "stl" / f"{part_name}.stl")
+        _P(out_stl).parent.mkdir(parents=True, exist_ok=True)
+
+        scene = SDFScene(resolution=max(0.5, cell_size / 10))
+        tpms_map = {"gyroid": sdf_gyroid, "schwarz_p": sdf_schwarz_p, "diamond": sdf_diamond,
+                     "honeycomb": sdf_lattice_cubic, "octet": sdf_lattice_cubic, "arc_weave": sdf_gyroid}
+        tpms_fn = tpms_map.get(pattern, sdf_gyroid)
+        lattice = tpms_fn(cell_size=cell_size, thickness=wall_mm) if pattern in ("gyroid", "schwarz_p", "diamond") else tpms_fn(cell_size=cell_size, beam_radius=wall_mm / 2)
+
+        # Clip to bounding box
+        bounding = sdf_box(center=(width_mm/2, height_mm/2, depth_mm/2), size=(width_mm, height_mm, depth_mm))
+        result = op_intersection(bounding, lattice)
+
+        import time
+        t0 = time.time()
+        bounds = ((0, 0, 0), (width_mm, height_mm, depth_mm))
+        mesh = scene.to_mesh(result, bounds)
+        stl_path = scene.export_stl(mesh, out_stl)
+        stats = scene.mesh_stats(mesh)
+        elapsed = time.time() - t0
+
+        dims = stats["dimensions_mm"]
+        console.print(f"\n[SDF] {pattern} lattice: {dims[0]:.0f}x{dims[1]:.0f}x{dims[2]:.0f}mm")
+        console.print(f"  Mesh: {stats['vertices']} verts, {stats['faces']} faces")
+        console.print(f"  Time: {elapsed:.1f}s")
+        console.print(f"  STL:  {stl_path}")
+        return
+
     if backend == "fusion":
-        # Primary: generate Fusion 360 script via Design Extension lattice
+        # Generate Fusion 360 script via Design Extension lattice
         from pathlib import Path as _P
         from aria_os.fusion_generator import write_fusion_artifacts
         ROOT = _P(__file__).resolve().parent
@@ -855,7 +910,103 @@ def _get_cli_arg(flag: str, default: str = None) -> str | None:
     return value
 
 
+def _run_check() -> None:
+    """Validate the environment before running jobs. Exits 0 if all OK, 1 if not."""
+    import shutil
+    ok = True
+
+    def _ok(msg: str) -> None:
+        print(f"  OK  {msg}")
+
+    def _fail(msg: str, hint: str = "") -> None:
+        nonlocal ok
+        ok = False
+        print(f"  FAIL  {msg}")
+        if hint:
+            print(f"        -> {hint}")
+
+    def _warn(msg: str) -> None:
+        print(f"  WARN  {msg}")
+
+    print("\nARIA-OS environment check\n" + "-" * 40)
+
+    # CadQuery
+    try:
+        import cadquery  # noqa: F401
+        _ok("cadquery importable")
+    except ImportError:
+        _fail("cadquery not installed",
+              "conda install -c conda-forge cadquery   OR   pip install cadquery")
+
+    # trimesh
+    try:
+        import trimesh  # noqa: F401
+        _ok("trimesh importable")
+    except ImportError:
+        _fail("trimesh not installed", "pip install trimesh")
+
+    # ezdxf
+    try:
+        import ezdxf  # noqa: F401
+        _ok("ezdxf importable")
+    except ImportError:
+        _fail("ezdxf not installed", "pip install ezdxf")
+
+    # Ollama
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3) as r:
+            if r.status == 200:
+                _ok("Ollama running (localhost:11434)")
+            else:
+                _fail("Ollama returned non-200", "ollama serve")
+    except Exception:
+        _fail("Ollama not reachable", "start Ollama: ollama serve")
+
+    # API keys — check env and .env
+    from aria_os.llm_client import get_anthropic_key, get_google_key, get_groq_key
+    ant = get_anthropic_key(ROOT)
+    goo = get_google_key(ROOT)
+    grq = get_groq_key(ROOT)
+    if ant:
+        _ok(f"ANTHROPIC_API_KEY set ({ant[:12]}...)")
+    else:
+        _warn("ANTHROPIC_API_KEY not set (code generation will use Gemini/Ollama fallback)")
+    if goo:
+        _ok(f"GOOGLE_API_KEY set ({goo[:12]}...)")
+    else:
+        _warn("GOOGLE_API_KEY not set (visual verification will use Ollama only — lower quality)")
+    if grq:
+        _ok(f"GROQ_API_KEY set ({grq[:12]}...)")
+    else:
+        _warn("GROQ_API_KEY not set (optional free-tier fallback vision)")
+
+    if not ant and not goo:
+        _fail("No cloud LLM keys set — template parts will work but novel parts will fail",
+              "Add GOOGLE_API_KEY or ANTHROPIC_API_KEY to .env")
+
+    # Output dirs
+    for d in ["outputs/cad/step", "outputs/cad/stl", "outputs/screenshots"]:
+        p = ROOT / d
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            _ok(f"output dir writable: {d}")
+        except Exception as e:
+            _fail(f"Cannot create output dir {d}: {e}")
+
+    print("-" * 40)
+    if ok:
+        print("All checks passed. Ready to run.\n")
+    else:
+        print("Some checks FAILED. Fix the issues above before running jobs.\n")
+        sys.exit(1)
+
+
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "--check":
+        _run_check()
+        return
+
     if len(sys.argv) >= 2 and sys.argv[1] == "--full":
         if len(sys.argv) < 3:
             print("Usage: python run_aria_os.py --full \"part description\"")
@@ -894,6 +1045,45 @@ def main():
         base_part_path = sys.argv[2]
         modification = " ".join(sys.argv[3:])
         run_modify(base_part_path, modification)
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "--refine":
+        # --refine "changes"                     -- auto-finds most recent script
+        # --refine <stub_or_path> "changes"      -- explicit target
+        from aria_os.modifier import PartModifier
+        mod = PartModifier(repo_root=ROOT)
+        args = sys.argv[2:]
+        if len(args) == 0:
+            print("Usage: python run_aria_os.py --refine \"changes\"")
+            print("       python run_aria_os.py --refine <script_or_keyword> \"changes\"")
+            sys.exit(1)
+        elif len(args) == 1:
+            modification = args[0]
+            script = mod.find_latest_script()
+            if script is None:
+                print("No generated scripts found in outputs/cad/generated_code/")
+                sys.exit(1)
+        else:
+            # Could be a path/stub or a keyword — if last arg looks like a sentence, treat it as modification
+            modification = args[-1]
+            stub = " ".join(args[:-1])
+            # Try exact path first
+            candidate = Path(stub)
+            if not candidate.is_absolute():
+                candidate = (ROOT / stub).resolve()
+            if candidate.exists():
+                script = candidate
+            else:
+                script = mod.find_latest_script(keyword=stub)
+                if script is None:
+                    print(f"No script found matching: {stub!r}")
+                    sys.exit(1)
+        original_goal = mod.extract_goal(script)
+        print(f"Refining: {script.name}")
+        if original_goal:
+            print(f"Original: {original_goal[:120]}")
+        print(f"Change:   {modification}")
+        print()
+        run_modify(str(script), modification)
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "--cam":
         if len(sys.argv) < 3:
@@ -1053,6 +1243,17 @@ def main():
         )
         print(f"[autocad] DXF  : {_autocad_path}")
         print(f"[autocad] JSON : {_autocad_path.with_suffix('.json')}")
+        # ── DXF post-generation validation ────────────────────────────────
+        try:
+            import ezdxf as _ezdxf_check
+            _dxf_readback = _ezdxf_check.readfile(str(_autocad_path))
+            _dxf_n = len(list(_dxf_readback.modelspace()))
+            _dxf_kb = _autocad_path.stat().st_size // 1024
+            print(f"[autocad] DXF validated: {_dxf_kb} KB, {_dxf_n} entities, parseable OK")
+        except ImportError:
+            print("[autocad] DXF validation skipped (ezdxf not available)")
+        except Exception as _dxf_val_exc:
+            print(f"[autocad] DXF validation FAILED: {_dxf_val_exc}")
         print(f"[autocad] To view: python run_aria_os.py --review-view {_autocad_path}")
         if _autocad_view:
             print("[autocad] Viewer open — press Ctrl+C to exit.")
@@ -1433,9 +1634,14 @@ def main():
         return
 
     # --- --image: analyse a photo and derive a goal, then run pipeline ---
-    if len(sys.argv) >= 2 and sys.argv[1] == "--image":
+    # Uses the fast image-to-CAD path that skips research, DFM, quote, CAM,
+    # drawing, and CEM to keep runtime under ~60s.
+    # Pass --image-full to force the complete pipeline instead.
+    if len(sys.argv) >= 2 and sys.argv[1] in ("--image", "--image-full"):
+        _image_full = sys.argv[1] == "--image-full"
         if len(sys.argv) < 3:
             print("Usage: python run_aria_os.py --image <photo.jpg> [\"optional hint\"] [--preview]")
+            print("       python run_aria_os.py --image-full <photo.jpg> [\"hint\"] [--preview]  # full pipeline")
             sys.exit(1)
         _argv_rest = sys.argv[2:]
         _preview = "--preview" in _argv_rest
@@ -1449,8 +1655,12 @@ def main():
             print("[IMAGE] Could not extract a goal from the image. Provide a hint with a description.")
             sys.exit(1)
         print(f"[IMAGE] Goal: {_goal}")
-        from aria_os import run
-        run(_goal, repo_root=ROOT, preview=_preview)
+        if _image_full:
+            from aria_os import run
+            run(_goal, repo_root=ROOT, preview=_preview)
+        else:
+            from aria_os import run_image_fast
+            run_image_fast(_goal, repo_root=ROOT, preview=_preview)
         print("Done.")
         return
 
@@ -1503,6 +1713,25 @@ def main():
         print("Done.")
         return
 
+    # --- --terrain: synthetic terrain DXF + STL from natural language ---
+    if len(sys.argv) >= 2 and sys.argv[1] == "--terrain":
+        if len(sys.argv) < 3:
+            print('Usage: python run_aria_os.py --terrain "mountain terrain 5km x 5km with 200m peak"')
+            sys.exit(1)
+        _terrain_desc = " ".join(sys.argv[2:])
+        from aria_os.generators.terrain_generator import generate_terrain
+        _tout = ROOT / "outputs" / "terrain"
+        _tres = generate_terrain(_terrain_desc, output_dir=str(_tout))
+        print(f"[Terrain] DXF : {_tres.get('dxf_path', 'n/a')}")
+        print(f"[Terrain] STL : {_tres.get('stl_path', 'n/a')}")
+        print(f"[Terrain] type: {_tres.get('terrain_type', '?')}  "
+              f"size: {_tres.get('width_m', '?')}m x {_tres.get('height_m', '?')}m  "
+              f"peak: {_tres.get('peak_elevation_m', '?')}m")
+        print(f"[Terrain] contours: {_tres.get('n_contours', '?')}  "
+              f"resolution: {_tres.get('grid_resolution', '?')}")
+        print("Done.")
+        return
+
     # --- --catalog-search: similarity search with natural language ---
     if len(sys.argv) >= 2 and sys.argv[1] == "--catalog-search":
         if len(sys.argv) < 3:
@@ -1519,7 +1748,8 @@ def main():
         print("       python run_aria_os.py \"part description\" --cfd   # force CFD after export")
         print("       python run_aria_os.py --analyze-part outputs/cad/step/aria_spool.step")
         print("       python run_aria_os.py --view <file.stl|file.step>  # open existing file in 3D viewer")
-        print("       python run_aria_os.py --image <photo.jpg> [\"hint\"] [--preview]")
+        print("       python run_aria_os.py --image <photo.jpg> [\"hint\"] [--preview]        # fast: CAD only")
+        print("       python run_aria_os.py --image-full <photo.jpg> [\"hint\"] [--preview]   # full pipeline")
         print("       python run_aria_os.py --scenario \"real-world situation\" [--auto-confirm]")
         print("       python run_aria_os.py --scenario-dry-run \"real-world situation\"")
         print("       python run_aria_os.py --system \"design a desktop CNC router 300x300x100mm\" [--auto-confirm]")
@@ -1558,7 +1788,7 @@ def main():
     _no_agent = "--no-agent" in _args
     _agent_mode_flag = "--agent-mode" in _args
     _coordinator_mode = "--coordinator" in _args
-    _max_agent_iter = 5
+    _max_agent_iter = 3
     for i, a in enumerate(_args):
         if a == "--max-agent-iterations" and i + 1 < len(_args):
             try:
@@ -1606,9 +1836,50 @@ def main():
         print("Done.")
         sys.exit(0)
 
+    # Unique run ID — timestamp + 8-char hex. Concurrent runs never collide.
+    import uuid as _uuid
+    _run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + _uuid.uuid4().hex[:8]
+
     from aria_os import run
-    session = run(goal, repo_root=ROOT, preview=_preview,
-                  agent_mode=_agent_mode, max_agent_iterations=_max_agent_iter)
+    try:
+        session = run(goal, repo_root=ROOT, preview=_preview,
+                      agent_mode=_agent_mode, max_agent_iterations=_max_agent_iter)
+    except ConnectionRefusedError:
+        print("\nERROR: Cannot connect to Ollama.")
+        print("  Start it with:  ollama serve")
+        print("  Then retry.\n")
+        sys.exit(1)
+    except ImportError as _ie:
+        print(f"\nERROR: Missing dependency — {_ie}")
+        print("  Run:  python run_aria_os.py --check  to diagnose.\n")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        sys.exit(130)
+    except Exception as _e:
+        print(f"\nERROR: Pipeline failed — {_e}")
+        print("  Run with --check to validate your environment.")
+        print("  For details run:  python run_aria_os.py --check")
+        if os.environ.get("ARIA_DEBUG"):
+            raise
+        sys.exit(1)
+
+    # Write run manifest + copy artifacts to outputs/runs/<run_id>/
+    if isinstance(session, dict):
+        try:
+            from aria_os.run_manifest import create_run as _create_run
+            _run_dir = _create_run(
+                run_id=_run_id,
+                goal=goal,
+                session=session,
+                spec=session.get("spec"),
+                agent_mode=_agent_mode,
+                agent_iterations=session.get("agent_iterations"),
+                repo_root=ROOT,
+            )
+            print(f"\n[RUN] {_run_dir.relative_to(ROOT)}")
+        except Exception as _me:
+            pass  # manifest failure never breaks the main flow
 
     # --render: save a PNG preview of the generated STL
     if _render and isinstance(session, dict):
