@@ -679,10 +679,23 @@ async def stop_run(run_id: str):
 
 
 @app.get("/api/run/{run_id}")
-async def get_run(run_id: str):
+async def get_run(run_id: str, include_lines: bool = True, limit: int = 500):
+    """
+    Fetch a run record. By default the response includes the last `limit`
+    captured stdout/stderr lines; pass include_lines=false to skip them
+    when polling status only. Cap defaults to 500 lines to avoid huge
+    payloads on long runs.
+    """
     if run_id not in _runs:
         raise HTTPException(status_code=404, detail="run not found")
-    rec = {k: v for k, v in _runs[run_id].items() if k not in ("lines", "proc")}
+    raw = _runs[run_id]
+    rec = {k: v for k, v in raw.items() if k != "proc"}
+    if include_lines:
+        lines = raw.get("lines", []) or []
+        rec["lines"] = lines[-limit:] if limit and len(lines) > limit else lines
+        rec["lines_total"] = len(lines)
+    else:
+        rec.pop("lines", None)
     return rec
 
 
