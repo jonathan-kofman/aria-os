@@ -308,6 +308,10 @@ def run_dfm_analysis(
 
     # ── Compute score ───────────────────────────────────────────────────
     score = _compute_score(all_issues)
+    # Cap score when LLM was unavailable — deterministic checks alone are incomplete.
+    # A score of 100 without LLM analysis is meaningless: cap at 75 to signal uncertainty.
+    if not llm_used and not skip_llm:
+        score = min(score, 75.0)
     passed = score >= 50 and not any(i["severity"] == "critical" for i in all_issues)
 
     # ── Build geometry summary ──────────────────────────────────────────

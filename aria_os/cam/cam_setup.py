@@ -23,19 +23,23 @@ from typing import Optional
 
 
 # ─── MRR constants (mm³/min) for cycle-time estimation ────────────────────────
+# MRR values: realistic for 3-axis VMC, 20mm endmill, moderate feeds
+# These are AVERAGE MRR including rapids, repositioning, and finish passes
+# (not peak roughing MRR which would be 5-10x higher)
 _MRR_BY_MATERIAL: dict[str, float] = {
-    "aluminium_6061": 5000.0,
-    "aluminium_7075": 4500.0,
-    "steel_mild":     1200.0,
-    "steel_4140":      800.0,
-    "stainless_316":   600.0,
-    "x1_420i":         700.0,
-    "inconel_718":     200.0,
-    "titanium_ti6al4v": 350.0,
-    "pla":            8000.0,
-    "abs":            7000.0,
+    "aluminium_6061": 40000.0,   # ~40 cm³/min avg including finish
+    "aluminium_7075": 35000.0,
+    "6061-T6":        40000.0,   # alias
+    "steel_mild":      8000.0,
+    "steel_4140":      5000.0,
+    "stainless_316":   3000.0,
+    "x1_420i":         4000.0,
+    "inconel_718":     1000.0,
+    "titanium_ti6al4v": 2000.0,
+    "pla":            80000.0,
+    "abs":            60000.0,
 }
-_MRR_DEFAULT = 1000.0
+_MRR_DEFAULT = 10000.0
 
 CAM_SETUP_SCHEMA_VERSION = "1.0"
 
@@ -222,9 +226,31 @@ def estimate_cycle_time(
         try:
             x, y, z = bb["x_mm"], bb["y_mm"], bb["z_mm"]
             stock_volume = (x + 6.0) * (y + 6.0) * (z + 4.0)
-            part_volume = x * y * z * 0.4
+
+            # Try to get actual part volume from STEP (much more accurate than 40% estimate)
+            actual_volume = None
+            if step_path:
+                try:
+                    import cadquery as cq
+                    shape = cq.importers.importStep(step_path)
+                    actual_volume = shape.val().Volume()
+                except Exception:
+                    pass
+
+            if actual_volume and actual_volume > 0:
+                part_volume = actual_volume
+            else:
+                # Fallback: estimate based on part complexity
+                # Shelled/hollow parts ~15-25% of bbox, solid prismatic ~50-70%
+                part_volume = x * y * z * 0.4
+
             removal_volume = max(stock_volume - part_volume, 0.0)
-            cycle_min = removal_volume / mrr
+
+            # Add realistic non-cutting time: tool changes, rapid moves, etc.
+            n_ops = len(operations)
+            non_cutting_min = n_ops * 1.5 + 5.0  # 1.5 min per tool change + 5 min setup
+
+            cycle_min = removal_volume / mrr + non_cutting_min
             return round(cycle_min, 1)
         except (KeyError, ZeroDivisionError, TypeError):
             pass  # fall through to heuristic

@@ -106,6 +106,27 @@ def generate_dxf_from_goal(
         drawn_by=params.get("drawn_by", ""),
         project=params.get("project", ""),
     )
+
+    # ── DXF validation: verify file is non-empty and parseable by ezdxf ───
+    try:
+        _dxf_size = dxf_path.stat().st_size
+        if _dxf_size == 0:
+            print(f"[autocad] WARNING — DXF file is empty (0 bytes)")
+        else:
+            try:
+                import ezdxf
+                _doc = ezdxf.readfile(str(dxf_path))
+                _n_entities = len(list(_doc.modelspace()))
+                print(f"[autocad] DXF validated: {_dxf_size // 1024} KB, "
+                      f"{_n_entities} entities, parseable OK")
+            except ImportError:
+                print(f"[autocad] DXF size OK ({_dxf_size // 1024} KB) — "
+                      f"ezdxf not available for parse check")
+            except Exception as _dxf_parse_exc:
+                print(f"[autocad] WARNING — DXF parse error: {_dxf_parse_exc}")
+    except Exception as _dxf_val_exc:
+        print(f"[autocad] DXF validation skipped: {_dxf_val_exc}")
+
     return dxf_path
 
 
@@ -149,4 +170,25 @@ def generate_autocad(
 
     print(f"[autocad] DXF written: {dxf_path}")
     print(f"[autocad] sidecar JSON: {dxf_path.with_suffix('.json')}")
+
+    # ── DXF validation: verify file is non-empty and parseable by ezdxf ───
+    try:
+        _dxf_size = dxf_path.stat().st_size
+        if _dxf_size == 0:
+            print(f"[autocad] WARNING — DXF file is empty (0 bytes)")
+        else:
+            try:
+                import ezdxf
+                _doc = ezdxf.readfile(str(dxf_path))
+                _n_entities = len(list(_doc.modelspace()))
+                print(f"[autocad] DXF validated: {_dxf_size // 1024} KB, "
+                      f"{_n_entities} entities, parseable OK")
+            except ImportError:
+                print(f"[autocad] DXF size OK ({_dxf_size // 1024} KB) — "
+                      f"ezdxf not available for parse check")
+            except Exception as _dxf_parse_exc:
+                print(f"[autocad] WARNING — DXF parse error: {_dxf_parse_exc}")
+    except Exception as _dxf_val_exc:
+        print(f"[autocad] DXF validation skipped: {_dxf_val_exc}")
+
     return dxf_path

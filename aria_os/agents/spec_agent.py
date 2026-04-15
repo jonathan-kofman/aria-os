@@ -19,11 +19,16 @@ Output a JSON object with these fields (omit any that aren't specified):
   "depth_mm": <depth in mm>,
   "length_mm": <length in mm>,
   "wall_mm": <wall thickness in mm>,
-  "n_teeth": <tooth count>,
-  "n_bolts": <bolt count>,
+  "n_teeth": <tooth count for gears/ratchets>,
+  "n_bolts": <bolt/hole count>,
   "bolt_dia_mm": <bolt diameter in mm>,
+  "n_blades": <blade or vane count for impellers/fans/propellers>,
+  "blade_sweep": <"backward", "forward", "radial", "backward_curved", "forward_swept">,
+  "blade_angle_deg": <numeric sweep angle in degrees if stated>,
+  "n_fins": <fin count for heat sinks>,
+  "n_spokes": <spoke or arm count for wheels>,
   "material": <material name>,
-  "part_type": <type like "bracket", "housing", "phone_case", "gear">
+  "part_type": <type like "bracket", "housing", "phone_case", "gear", "impeller">
 }
 
 Use TOOL_CALL: extract_dimensions(goal) to get regex-based extraction as a starting point.
@@ -73,22 +78,26 @@ class SpecAgent(BaseAgent):
 
         # Check if we have all the params needed for the detected template
         _TEMPLATE_REQUIRED = {
-            "bracket":      {"width_mm", "height_mm", "thickness_mm"},
-            "base_plate":   {"width_mm", "height_mm", "thickness_mm"},
-            "flat_plate":   {"width_mm", "height_mm", "thickness_mm"},
-            "housing":      {"od_mm", "height_mm"},
-            "flange":       {"od_mm", "bore_mm", "thickness_mm", "n_bolts"},
-            "shaft":        {"diameter_mm", "length_mm"},
-            "gear":         {"od_mm", "n_teeth", "height_mm"},
-            "spacer":       {"od_mm", "height_mm"},
-            "ratchet_ring": {"od_mm", "n_teeth", "thickness_mm"},
-            "spool":        {"od_mm", "height_mm"},
-            "cam_collar":   {"od_mm", "height_mm"},
-            "brake_drum":   {"od_mm", "height_mm"},
-            "pulley":       {"od_mm", "height_mm"},
-            "pin":          {"diameter_mm", "length_mm"},
-            "tube":         {"od_mm", "length_mm"},
-            "lre_nozzle":   {"od_mm", "length_mm"},
+            "bracket":             {"width_mm", "height_mm", "thickness_mm"},
+            "base_plate":          {"width_mm", "height_mm", "thickness_mm"},
+            "flat_plate":          {"width_mm", "height_mm", "thickness_mm"},
+            "housing":             {"od_mm", "height_mm"},
+            "flange":              {"od_mm", "bore_mm", "thickness_mm", "n_bolts"},
+            "shaft":               {"diameter_mm", "length_mm"},
+            "gear":                {"od_mm", "n_teeth", "height_mm"},
+            "spacer":              {"od_mm", "height_mm"},
+            "ratchet_ring":        {"od_mm", "n_teeth", "thickness_mm"},
+            "spool":               {"od_mm", "height_mm"},
+            "cam_collar":          {"od_mm", "height_mm"},
+            "brake_drum":          {"od_mm", "height_mm"},
+            "pulley":              {"od_mm", "height_mm"},
+            "pin":                 {"diameter_mm", "length_mm"},
+            "tube":                {"od_mm", "length_mm"},
+            "lre_nozzle":          {"od_mm", "length_mm"},
+            "impeller":            {"od_mm", "bore_mm", "height_mm", "n_blades"},
+            "centrifugal_impeller":{"od_mm", "bore_mm", "height_mm", "n_blades"},
+            "fan":                 {"od_mm", "bore_mm", "n_blades"},
+            "heat_sink":           {"width_mm", "height_mm", "n_fins"},
         }
         pt = state.spec.get("part_type", "")
         required = _TEMPLATE_REQUIRED.get(pt, set())

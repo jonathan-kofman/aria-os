@@ -96,7 +96,7 @@ Write the numpy SDF script. Print ARIA_STL_OUTPUT:{stl_path} when done."""
     script = None
     try:
         from ..llm_client import call_llm
-        script = call_llm(prompt, _SDF_SYSTEM_PROMPT, repo_root)
+        script = call_llm(prompt, system=_SDF_SYSTEM_PROMPT, repo_root=repo_root)
     except Exception as exc:
         logger.warning("SDF LLM call failed: %s", exc)
 

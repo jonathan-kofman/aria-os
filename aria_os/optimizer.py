@@ -178,18 +178,27 @@ class PartOptimizer:
             bbox = None
             weight_g = None
             sf = cem_result.static_min_sf
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    bbox = meta.get("bbox_mm") or {}
-                    vol_mm3 = float(bbox.get("x", 0.0)) * float(bbox.get("y", 0.0)) * float(bbox.get("z", 0.0))
-                    # Approximate weight using 6061 density and fill factor
-                    density = 2700.0  # kg/m^3
-                    fill_factor = 0.6
-                    weight_kg = vol_mm3 * 1e-9 * density * fill_factor
-                    weight_g = weight_kg * 1000.0
-                except Exception:
-                    pass
+
+            # Get actual volume from STEP file (much more accurate than bbox estimate)
+            try:
+                import cadquery as cq
+                shape = cq.importers.importStep(str(step_path))
+                actual_vol_mm3 = shape.val().Volume()
+                bb = shape.val().BoundingBox()
+                bbox = {"x": bb.xlen, "y": bb.ylen, "z": bb.zlen}
+                density = 2700.0  # kg/m^3 (default 6061-T6)
+                weight_g = actual_vol_mm3 * 1e-9 * density * 1000.0
+            except Exception:
+                # Fallback to meta file
+                if meta_path.exists():
+                    try:
+                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                        bbox = meta.get("bbox_mm") or {}
+                        vol_mm3 = float(bbox.get("x", 0)) * float(bbox.get("y", 0)) * float(bbox.get("z", 0))
+                        density = 2700.0
+                        weight_g = vol_mm3 * 1e-9 * density * 0.4 * 1000.0
+                    except Exception:
+                        pass
 
             score = _compute_score(goal, sf, weight_g, bbox)
 

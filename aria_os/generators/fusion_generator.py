@@ -382,6 +382,165 @@ _SCRIPT_MAP: dict = {
 }
 
 
+_FUSION_LLM_SYSTEM = """\
+You are an expert Autodesk Fusion 360 Python API programmer. Generate a complete
+Fusion 360 script that creates geometry using the Fusion API.
+
+CRITICAL: This script runs INSIDE Fusion 360 via exec(). Do NOT define run(context).
+The variables 'app', 'ui', 'design', 'rootComp', 'math', 'adsk' are pre-defined.
+Design is already set to PARAMETRIC mode — every feature will appear in the timeline.
+Do NOT set designType. Do NOT close the document. Do NOT call app.documents.add().
+
+Fusion API patterns:
+  # Sketch + extrude
+  sk = rootComp.sketches.add(rootComp.xYConstructionPlane)
+  circles = sk.sketchCurves.sketchCircles
+  circles.addByCenterRadius(adsk.core.Point3D.create(0,0,0), RADIUS_CM)
+  ext_input = rootComp.features.extrudeFeatures.createInput(sk.profiles.item(0), adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+  ext_input.setDistanceExtent(False, adsk.core.ValueInput.createByReal(HEIGHT_CM))
+  rootComp.features.extrudeFeatures.add(ext_input)
+
+  # Revolve
+  rev_input = rootComp.features.revolveFeatures.createInput(profile, axis, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+  rev_input.setAngleExtent(False, adsk.core.ValueInput.createByReal(math.pi * 2))
+  rootComp.features.revolveFeatures.add(rev_input)
+
+  # Sweep
+  sweep_input = rootComp.features.sweepFeatures.createInput(profile, path, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+  rootComp.features.sweepFeatures.add(sweep_input)
+
+  # Loft
+  loft_input = rootComp.features.loftFeatures.createInput(adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+  loft_input.loftSections.add(profile1)
+  loft_input.loftSections.add(profile2)
+  rootComp.features.loftFeatures.add(loft_input)
+
+  # Circular pattern
+  pat_input = rootComp.features.circularPatternFeatures.createInput(objects, axis)
+  pat_input.quantity = adsk.core.ValueInput.createByReal(N)
+  rootComp.features.circularPatternFeatures.add(pat_input)
+
+  # Boolean combine
+  combine_input = rootComp.features.combineFeatures.createInput(target_body, tool_bodies)
+  combine_input.operation = adsk.fusion.FeatureOperations.CutFeatureOperation  # or JoinFeatureOperation
+  rootComp.features.combineFeatures.add(combine_input)
+
+  # Fillet
+  fillet_input = rootComp.features.filletFeatures.createInput()
+  fillet_input.addConstantRadiusEdgeSet(edges, adsk.core.ValueInput.createByReal(R_CM), True)
+  rootComp.features.filletFeatures.add(fillet_input)
+
+CRITICAL PATTERNS THAT WORK (copy these exactly for internal features):
+
+  # BOLT HOLES on a flange (6 holes on PCD):
+  bolt_sk = rootComp.sketches.add(rootComp.xYConstructionPlane)
+  bolt_sk.sketchCurves.sketchCircles.addByCenterRadius(
+      adsk.core.Point3D.create(PCD_CM/2, 0, 0), BOLT_R_CM)
+  bolt_prof = bolt_sk.profiles.item(0)
+  bolt_ext = rootComp.features.extrudeFeatures.createInput(
+      bolt_prof, adsk.fusion.FeatureOperations.CutFeatureOperation)
+  bolt_ext.setAllExtent(adsk.fusion.ExtentDirections.PositiveExtentDirection)
+  bolt_feat = rootComp.features.extrudeFeatures.add(bolt_ext)
+  # Circular pattern the bolt hole
+  pat_bodies = adsk.core.ObjectCollection.create()
+  pat_bodies.add(bolt_feat)
+  z_axis = rootComp.zConstructionAxis
+  pat_input = rootComp.features.circularPatternFeatures.createInput(pat_bodies, z_axis)
+  pat_input.quantity = adsk.core.ValueInput.createByReal(6)
+  rootComp.features.circularPatternFeatures.add(pat_input)
+
+  # INTERNAL RIB inside a shelled body (create as separate body then join):
+  rib_plane = rootComp.xZConstructionPlane  # or yZConstructionPlane
+  rib_sk = rootComp.sketches.add(rib_plane)
+  rib_sk.sketchCurves.sketchLines.addTwoPointRectangle(
+      adsk.core.Point3D.create(INNER_R_CM, 0, 0),
+      adsk.core.Point3D.create(OUTER_R_CM, RIB_HEIGHT_CM, 0))
+  rib_ext = rootComp.features.extrudeFeatures.createInput(
+      rib_sk.profiles.item(0),
+      adsk.fusion.FeatureOperations.NewBodyFeatureOperation)  # NOT Cut!
+  rib_ext.setSymmetricExtent(adsk.core.ValueInput.createByReal(RIB_THICK_CM/2), True)
+  rib_body = rootComp.features.extrudeFeatures.add(rib_ext).bodies.item(0)
+  # Join rib to main body
+  main_body = rootComp.bRepBodies.item(0)
+  combine_input = rootComp.features.combineFeatures.createInput(main_body, adsk.core.ObjectCollection.create())
+  combine_input.toolBodies.add(rib_body)
+  combine_input.operation = adsk.fusion.FeatureOperations.JoinFeatureOperation
+  rootComp.features.combineFeatures.add(combine_input)
+
+  # OUTLET PIPE from top face (extrude UP from top):
+  top_face = None
+  for face in rootComp.bRepBodies.item(0).faces:
+      normal = face.geometry.normal if hasattr(face.geometry, 'normal') else None
+      if normal and abs(normal.z - 1.0) < 0.01:
+          bb = face.boundingBox
+          if bb.maxPoint.z > top_face_z if top_face else True:
+              top_face = face
+              top_face_z = bb.maxPoint.z
+  pipe_sk = rootComp.sketches.add(top_face)
+  pipe_sk.sketchCurves.sketchCircles.addByCenterRadius(
+      adsk.core.Point3D.create(0, 0, 0), PIPE_R_CM)
+  pipe_ext = rootComp.features.extrudeFeatures.createInput(
+      pipe_sk.profiles.item(0),
+      adsk.fusion.FeatureOperations.JoinFeatureOperation)
+  pipe_ext.setDistanceExtent(False, adsk.core.ValueInput.createByReal(PIPE_H_CM))
+  rootComp.features.extrudeFeatures.add(pipe_ext)
+
+RULES:
+- ALL dimensions in CM (Fusion internal units). Convert mm to cm: divide by 10.
+- Use rootComp (pre-defined), not root.
+- Do NOT define run(context) — the code runs via exec() directly.
+- Do NOT import adsk — it's pre-defined.
+- Do NOT call app.documents.add() — document is already created.
+- Use math (pre-defined) for trig.
+- For complex parts: build features step by step. Each sketch → extrude/revolve/sweep → combine.
+- For blades/vanes: create one blade via sweep along a path, then circular pattern.
+
+Output ONLY Python code. No markdown fences.
+"""
+
+
+def _script_llm_fusion(plan: dict, goal: str, stl_path: str, step_path: str, cem: dict) -> str:
+    """Generate Fusion script via LLM for complex parts without a template."""
+    from ..llm_client import call_llm
+
+    params = plan.get("params", {})
+    param_str = ", ".join(f"{k}={v}" for k, v in params.items()) if params else "none"
+
+    user_prompt = (
+        f"Create Fusion 360 geometry for: {goal}\n"
+        f"Parameters: {param_str}\n"
+        f"Use sweep for curved features, revolve for axisymmetric parts, "
+        f"circular pattern for repeated features.\n"
+        f"Remember: all dimensions in CM (divide mm by 10)."
+    )
+
+    response = call_llm(user_prompt, system=_FUSION_LLM_SYSTEM)
+    if not response:
+        # Fall back to parametric template
+        return _script_parametric(plan, goal, stl_path, step_path, cem)
+
+    code = response.strip()
+    # Strip markdown fences and any preamble text
+    if "```" in code:
+        # Extract content between first ``` and last ```
+        import re
+        match = re.search(r"```(?:python)?\s*\n(.*?)```", code, re.DOTALL)
+        if match:
+            code = match.group(1).strip()
+    elif not code.startswith(("import ", "#", "app", "design", "root")):
+        # Response starts with explanation text — find where Python code begins
+        lines = code.split("\n")
+        start = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith(("import ", "#", "app ", "design ", "root", "sk ", "hub", "OD", "HEIGHT")):
+                start = i
+                break
+        code = "\n".join(lines[start:])
+
+    return code
+
+
 def generate_fusion_script(
     plan: dict[str, Any],
     goal: str,
@@ -389,9 +548,24 @@ def generate_fusion_script(
     stl_path: str,
     repo_root: Optional[Path] = None,
 ) -> str:
-    cem  = load_cem_geometry(repo_root)
+    cem = load_cem_geometry(repo_root)
     mode = _detect_mode(goal)
-    return _SCRIPT_MAP.get(mode, _script_parametric)(plan, goal, stl_path, step_path, cem)
+
+    # For modes with templates, use them
+    if mode in _SCRIPT_MAP and mode != "parametric":
+        return _SCRIPT_MAP[mode](plan, goal, stl_path, step_path, cem)
+
+    # For parametric/sculpt/simulation: use LLM if goal is complex
+    goal_lower = goal.lower()
+    complex_keywords = ["blade", "impeller", "sweep", "loft", "curved", "spiral",
+                        "helix", "turbine", "propeller", "vane", "involute", "cam"]
+    if any(kw in goal_lower for kw in complex_keywords):
+        try:
+            return _script_llm_fusion(plan, goal, stl_path, step_path, cem)
+        except Exception:
+            pass
+
+    return _script_parametric(plan, goal, stl_path, step_path, cem)
 
 
 def write_fusion_artifacts(
@@ -402,7 +576,7 @@ def write_fusion_artifacts(
     repo_root: Optional[Path] = None,
 ) -> dict[str, str]:
     if repo_root is None:
-        repo_root = Path(__file__).resolve().parent.parent
+        repo_root = Path(__file__).resolve().parent.parent.parent
     part_slug   = (plan.get("part_id") or "aria_part").replace("/", "_")
     out_dir     = repo_root / "outputs" / "cad" / "fusion_scripts"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -420,6 +594,124 @@ def write_fusion_artifacts(
             "params": plan.get("params", {}),
         }, indent=2), encoding="utf-8",
     )
+    # Submit job to Fusion bridge (if running) for automatic execution
+    fusion_jobs_dir = repo_root / "outputs" / "cad" / "fusion_jobs"
+    fusion_jobs_dir.mkdir(parents=True, exist_ok=True)
+    job_data = {
+        "part_id": plan.get("part_id", ""),
+        "goal": goal,
+        "script": script,
+        "step_path": str(Path(step_path).resolve()).replace("\\", "/"),
+        "stl_path": str(Path(stl_path).resolve()).replace("\\", "/"),
+        "fusion_mode": mode,
+    }
+    job_path = fusion_jobs_dir / f"{part_slug}.json"
+    job_path.write_text(json.dumps(job_data, indent=2), encoding="utf-8")
+
+    # Poll for result (Fusion bridge picks up the job)
+    import time
+    from ..llm_client import call_llm
+    import re as _re
+
+    _MAX_FUSION_RETRIES = 3
+
+    for _fusion_attempt in range(_MAX_FUSION_RETRIES):
+        result_done = fusion_jobs_dir / f"_done_{part_slug}.json"
+        result_err = fusion_jobs_dir / f"_err_{part_slug}.json"
+        timeout = 120
+        t0 = time.time()
+        fusion_error = None
+
+        while time.time() - t0 < timeout:
+            if result_done.exists():
+                result_data = json.loads(result_done.read_text(encoding="utf-8"))
+                step_size = result_data.get('step_size', 0)
+                stl_size = result_data.get('stl_size', 0)
+                print(f"[FUSION] Job completed: STEP {step_size / 1024:.0f} KB, STL {stl_size / 1024:.0f} KB")
+
+                # Visual verification
+                _stl = result_data.get("stl_path", stl_path)
+                if Path(_stl).exists():
+                    try:
+                        from ..visual_verifier import verify_visual
+                        vis = verify_visual(
+                            result_data.get("step_path", step_path), _stl,
+                            goal, plan.get("params", {}), repo_root=repo_root,
+                        )
+                        conf = vis.get("confidence", 0)
+                        if vis.get("verified") and conf >= 0.90:
+                            print(f"[FUSION] Visual verification PASS ({conf:.0%})")
+                        else:
+                            issues = vis.get("issues", [])
+                            print(f"[FUSION] Visual verification: {conf:.0%} confidence")
+                            for iss in issues[:3]:
+                                print(f"  [VISUAL] {iss}")
+                    except Exception as ve:
+                        print(f"[FUSION] Visual verify skipped: {ve}")
+
+                return {
+                    "script_path": str(script_path),
+                    "params_path": str(params_path),
+                    "fusion_mode": mode,
+                    "step_path": result_data.get("step_path", ""),
+                    "stl_path": result_data.get("stl_path", ""),
+                }
+
+            if result_err.exists():
+                err_data = json.loads(result_err.read_text(encoding="utf-8"))
+                fusion_error = err_data.get("error", "unknown")
+                print(f"[FUSION] Job failed (attempt {_fusion_attempt + 1}): {fusion_error[:150]}")
+                # Clean up error file for retry
+                try:
+                    result_err.unlink()
+                except Exception:
+                    pass
+                break
+            time.sleep(2)
+        else:
+            print(f"[FUSION] Job timed out after {timeout}s.")
+            break
+
+        # Retry: feed error back to LLM and generate new script
+        if fusion_error and _fusion_attempt < _MAX_FUSION_RETRIES - 1:
+            print(f"[FUSION] Regenerating script with error feedback...")
+            retry_prompt = (
+                f"The previous Fusion 360 script failed with this error:\n{fusion_error[:500]}\n\n"
+                f"Fix the script for: {goal}\n"
+                f"Common fixes: use NewBodyFeatureOperation instead of CutFeatureOperation for features "
+                f"outside the body. Ensure sketches are on the correct face/plane. "
+                f"Use construction planes for offset sketches.\n"
+                f"All dimensions in CM. Do NOT set designType. Do NOT close document."
+            )
+            try:
+                response = call_llm(retry_prompt, system=_FUSION_LLM_SYSTEM)
+                if response:
+                    new_code = response.strip()
+                    if "```" in new_code:
+                        match = _re.search(r"```(?:python)?\s*\n(.*?)```", new_code, _re.DOTALL)
+                        if match:
+                            new_code = match.group(1).strip()
+                    elif not new_code.startswith(("import ", "#")):
+                        for i, line in enumerate(new_code.split("\n")):
+                            if line.strip().startswith(("import ", "#")):
+                                new_code = "\n".join(new_code.split("\n")[i:])
+                                break
+                    new_code = _re.sub(r".*designType.*\n", "", new_code)
+                    new_code = _re.sub(r".*doc\.close.*\n", "", new_code)
+                    new_code = _re.sub(r".*documents\.add.*\n", "", new_code)
+                    compile(new_code, "<retry>", "exec")
+                    # Update script and resubmit
+                    script_path.write_text(new_code, encoding="utf-8")
+                    job_data["script"] = new_code
+                    job_path.write_text(json.dumps(job_data, indent=2), encoding="utf-8")
+                    print(f"[FUSION] Retry script submitted ({len(new_code.splitlines())} lines)")
+                    continue
+            except Exception as retry_exc:
+                print(f"[FUSION] Retry generation failed: {retry_exc}")
+                break
+
+    print(f"[FUSION] All attempts exhausted. Script saved for manual execution.")
+
     return {
         "script_path": str(script_path),
         "params_path": str(params_path),

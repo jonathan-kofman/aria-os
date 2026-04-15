@@ -70,17 +70,24 @@ def run_gh_pipeline(
     # 3. Write artifacts
     artifacts = write_gh_artifacts(part_id, merged_params, repo_root=repo_root)
 
-    # 4. Execute CQ fallback for headless STEP/STL export
+    # 4. Try Rhino Compute first, fall back to CQ
     step_path = ""
     stl_path  = ""
     exec_error: Optional[str] = None
+    backend_used = "none"
 
     try:
-        step_path, stl_path = _exec_cq_fallback(
-            artifacts["cq_script"], part_id, repo_root
-        )
-    except Exception as exc:
-        exec_error = str(exc)
+        step_path, stl_path = _exec_rhino_compute(part_id, merged_params, repo_root)
+        backend_used = "rhino_compute"
+    except Exception as compute_exc:
+        # Rhino Compute unavailable or failed — fall back to CQ
+        try:
+            step_path, stl_path = _exec_cq_fallback(
+                artifacts["cq_script"], part_id, repo_root
+            )
+            backend_used = "cadquery_fallback"
+        except Exception as exc:
+            exec_error = f"Compute: {compute_exc}; CQ fallback: {exc}"
 
     # 5. Log entry
     elapsed = round(time.monotonic() - t0, 2)
@@ -93,6 +100,7 @@ def run_gh_pipeline(
         "cem_warnings": cem_warnings,
         "step_path":    step_path,
         "stl_path":     stl_path,
+        "backend":      backend_used,
         "elapsed_s":    elapsed,
         "error":        exec_error,
         "artifacts": {k: str(v) for k, v in artifacts.items()},
@@ -114,6 +122,50 @@ def run_gh_pipeline(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _exec_rhino_compute(
+    part_id: str, params: dict, repo_root: Path
+) -> tuple[str, str]:
+    """
+    Execute geometry via Rhino Compute and return (step_path, stl_path).
+    Raises if Compute is unavailable or solve fails.
+    """
+    from aria_os.compute_client import ComputeClient
+    from .gh_aria_parts import generate_gh_component_script
+
+    client = ComputeClient()
+    if not client.is_available():
+        raise ConnectionError("Rhino Compute not available")
+
+    # Build inputs from numeric params
+    values = client.make_input_list(
+        {k: v for k, v in params.items() if isinstance(v, (int, float))}
+    )
+
+    # Generate GH Python component script and encode as base64
+    import base64
+    script = generate_gh_component_script(part_id, params)
+    algo = base64.b64encode(script.encode("utf-8")).decode("ascii")
+
+    result = client.solve_grasshopper(algo_base64=algo, values=values)
+
+    # Extract geometry from response — write STEP/STL
+    out_dir = repo_root / "outputs" / "cad"
+    step_dir = out_dir / "step"
+    stl_dir = out_dir / "stl"
+    step_dir.mkdir(parents=True, exist_ok=True)
+    stl_dir.mkdir(parents=True, exist_ok=True)
+
+    step_path = str(step_dir / f"{part_id}.step")
+    stl_path = str(stl_dir / f"{part_id}.stl")
+
+    # Store raw Compute response for debugging
+    debug_path = out_dir / "grasshopper" / part_id / "compute_response.json"
+    debug_path.parent.mkdir(parents=True, exist_ok=True)
+    debug_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+    return step_path, stl_path
+
 
 def _run_cem_check(
     part_id: str,

@@ -10,7 +10,8 @@ from ..models.scan_models import CleanedMesh, DetectedPrimitive, PartFeatureSet
 
 
 # Minimum inlier fraction for a primitive to be accepted
-_MIN_INLIER_RATIO = 0.02  # 2% of total points
+_MIN_INLIER_RATIO = 0.02        # 2% of total points — planes and cylinders
+_MIN_INLIER_RATIO_SPHERE = 0.08  # 8% for spheres — higher bar to reject false positives on prismatic parts
 
 # RANSAC parameters
 _RANSAC_DISTANCE_THRESHOLD = 0.5  # mm
@@ -267,7 +268,27 @@ class FeatureExtractionAgent:
         inlier_mask = distances < _RANSAC_DISTANCE_THRESHOLD
         n_inliers = int(inlier_mask.sum())
 
-        if n_inliers < max(int(len(points) * _MIN_INLIER_RATIO), 10):
+        if n_inliers < max(int(len(points) * _MIN_INLIER_RATIO_SPHERE), 10):
+            return None
+
+        # Angular coverage check: inliers must span a significant solid angle.
+        # A flat patch that happens to lie on a large sphere will have tiny angular spread
+        # even if many points are within the distance threshold.
+        # Compute unit vectors from sphere center to each inlier, find their angular span.
+        inlier_pts = points[inlier_mask]
+        vecs = inlier_pts - center
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-9, 1.0, norms)
+        unit_vecs = vecs / norms
+        # Pairwise dot products to find max angular separation
+        # Use random subsample for speed
+        rng = np.random.RandomState(0)
+        sub = unit_vecs[rng.choice(len(unit_vecs), min(200, len(unit_vecs)), replace=False)]
+        dots = sub @ sub.T
+        dots = np.clip(dots, -1.0, 1.0)
+        max_angle_rad = float(np.arccos(np.min(dots)))  # max angular separation
+        # Require inliers to span at least 60 degrees — flat patches span <30 deg typically
+        if max_angle_rad < np.radians(60):
             return None
 
         area = 4 * np.pi * radius ** 2
@@ -287,7 +308,18 @@ class FeatureExtractionAgent:
 
     def _classify_topology(self, primitives: List[DetectedPrimitive], coverage: float) -> str:
         """Classify part topology based on detected primitives."""
-        if coverage < 0.4:
+        # Low coverage can result from non-watertight meshes or complex internal geometry.
+        # Use a lenient threshold (0.25) and fall back to primitive-count heuristics.
+        n_planes = sum(1 for p in primitives if p.type == "plane")
+        n_cylinders = sum(1 for p in primitives if p.type == "cylinder")
+
+        # Strong structural signals override low coverage
+        if coverage < 0.25:
+            # Even below 25% — if ≥5 planes detected, likely prismatic
+            if n_planes >= 5:
+                return "prismatic"
+            if n_cylinders >= 2:
+                return "turned_part"
             return "freeform"
 
         type_areas = {"plane": 0.0, "cylinder": 0.0, "sphere": 0.0, "cone": 0.0}
@@ -299,8 +331,11 @@ class FeatureExtractionAgent:
         if total < 1e-9:
             return "freeform"
 
-        cyl_frac = type_areas["cylinder"] / total
-        plane_frac = type_areas["plane"] / total
+        # Exclude sphere area from area fractions — spheres are often false positives
+        # on complex mechanical parts and should not dilute plane/cylinder fractions
+        cad_total = max(type_areas["plane"] + type_areas["cylinder"] + type_areas["cone"], 1.0)
+        cyl_frac = type_areas["cylinder"] / cad_total
+        plane_frac = type_areas["plane"] / cad_total
 
         # Check if cylinders share a common axis (turned part)
         cylinders = [p for p in primitives if p.type == "cylinder"]
@@ -308,7 +343,7 @@ class FeatureExtractionAgent:
             if len(cylinders) == 1 or self._axes_aligned(cylinders):
                 return "turned_part"
 
-        if plane_frac > 0.5:
+        if plane_frac > 0.4 or n_planes >= 5:
             return "prismatic"
 
         return "freeform"

@@ -423,25 +423,9 @@ def render_kicad_board(pcbnew_script: str | Path, out_png: str | Path,
     except Exception:
         pass
 
-    # Last resort: matplotlib placeholder noting SVG exists
-    try:
-        fig, ax = plt.subplots(figsize=(12, 9))
-        ax.set_facecolor("#1a1a2e")
-        fig.patch.set_facecolor("#1a1a2e")
-        ax.text(0.5, 0.5,
-                f"Board: {kicad_pcb.stem}\nSVG rendered by kicad-cli\n"
-                f"(install cairosvg or Inkscape for PNG conversion)",
-                ha='center', va='center', color='white', fontsize=12,
-                transform=ax.transAxes)
-        ax.axis('off')
-        fig.savefig(str(out_path), dpi=150, bbox_inches='tight',
-                    facecolor=fig.get_facecolor())
-        plt.close(fig)
-        print(f"[render_kicad] PNG placeholder (SVG at {svg_path.name}): {out_path}")
-        return True
-    except Exception as e:
-        print(f"[render_kicad] PNG fallback failed: {e}")
-        return False
+    # cairosvg/inkscape unavailable — return False so caller uses matplotlib BOM layout
+    print(f"[render_kicad] SVG at {svg_path.name} — no PNG converter, falling back to BOM layout render")
+    return False
 
 
 # ─── ECAD CHECKS ──────────────────────────────────────────────────────────────
@@ -588,7 +572,7 @@ def verify_ecad(bom_path: str | Path, render_png: bool = True) -> dict:
                             fontsize=4.5, color="#aaaaaa")
 
                 ax.set_xlim(-5, board_w + 5)
-                ax.set_ylim(-8, board_h + 5)
+                ax.set_ylim(board_h + 5, -8)  # invert: KiCad Y-down -> display correctly
                 ax.set_aspect("equal")
                 ax.set_xlabel("X (mm)", color="white")
                 ax.set_ylabel("Y (mm)", color="white")

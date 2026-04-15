@@ -39,9 +39,9 @@ class TestSelectCadTool:
         result = select_cad_tool("loft surface part", self._plan())
         assert result == "grasshopper"
 
-    def test_fusion_keyword_lattice(self):
+    def test_sdf_keyword_lattice(self):
         result = select_cad_tool("gyroid lattice infill", self._plan())
-        assert result == "fusion"
+        assert result == "sdf"
 
     def test_blender_keyword_remesh(self):
         result = select_cad_tool("mesh remesh cleanup", self._plan())

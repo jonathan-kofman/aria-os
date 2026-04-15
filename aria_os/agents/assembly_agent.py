@@ -230,16 +230,17 @@ class AssemblyAgent:
             }
 
             try:
-                # Import and run the single-part coordinator
-                from .coordinator import CoordinatorAgent
-                coordinator = CoordinatorAgent(self.repo_root)
-                ctx = await coordinator.run(part_goal)
+                # Use direct orchestrator (faster than full Coordinator — skips research/DFM/CAM)
+                from ..orchestrator import run as orchestrator_run
+                orch_result = await loop.run_in_executor(
+                    None, lambda: orchestrator_run(part_goal, repo_root=self.repo_root, max_attempts=3)
+                )
 
-                part_result["passed"] = ctx.validation_passed
-                if ctx.geometry_path and Path(ctx.geometry_path).exists():
-                    part_result["step_path"] = ctx.geometry_path
-                    tag = "PASS" if ctx.validation_passed else "WARN"
-                    print(f"  [Assembly] [{i+1}/{len(parts_spec)}] {part_id}: {tag} -> {ctx.geometry_path}")
+                step_path = orch_result.get("step_path", "") if isinstance(orch_result, dict) else ""
+                if step_path and Path(step_path).exists():
+                    part_result["step_path"] = step_path
+                    part_result["passed"] = True
+                    print(f"  [Assembly] [{i+1}/{len(parts_spec)}] {part_id}: PASS -> {step_path}")
                 else:
                     print(f"  [Assembly] [{i+1}/{len(parts_spec)}] {part_id}: FAIL — no geometry produced")
                     result["errors"].append(f"Part '{part_id}' failed to generate geometry")

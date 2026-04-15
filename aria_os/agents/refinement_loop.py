@@ -47,9 +47,15 @@ def run_agent_loop(state: DesignState) -> DesignState:
     evaluator  = EvalAgent(state.domain, state.repo_root)
     refiner    = RefinerAgent(state.repo_root)
 
-    # Phase 0: Web research — skip if user already specified enough dimensions
+    # Phase 0: Web research — skip if user already specified enough dimensions.
+    # Count numeric dimensions in the raw goal text (e.g. "60mm", "4 holes", "M8")
+    # to avoid slow web searches when the user has fully specified the part.
+    import re as _re_mod
+    _goal_dims = len(_re_mod.findall(r"\d+\s*(?:mm|cm|in|inch|m\b)", state.goal, _re_mod.I))
+    _goal_counts = len(_re_mod.findall(r"\b\d+\s*(?:x\s*)?\b(?:hole|bolt|fin|tooth|teeth|blade|vane|prong|tab|slot)", state.goal, _re_mod.I))
     _n_spec_dims = sum(1 for k, v in state.spec.items() if k.endswith("_mm") and v is not None)
-    if _n_spec_dims < 4:
+    _total_known = _n_spec_dims + _goal_dims + _goal_counts
+    if _total_known < 3:
         print(f"\n  [research] Gathering reference information from the web...")
         try:
             researcher.research(state)
@@ -58,7 +64,7 @@ def run_agent_loop(state: DesignState) -> DesignState:
         except Exception as _re:
             print(f"  [research] Skipped: {_re}")
     else:
-        print(f"\n  [research] Skipped — {_n_spec_dims} dimensions already in spec")
+        print(f"\n  [research] Skipped — {_total_known} dimensions/counts already in goal")
 
     # Phase 1: Spec extraction (runs once)
     print(f"\n  [iter 0] SpecAgent extracting constraints...")

@@ -5,7 +5,7 @@ RhinoCommon script generator for ARIA parts.
 Template map routes named parts to pre-built RhinoCommon geometry functions.
 Unknown parts fall back to LLM-generated RhinoCommon via generate_rhino_python().
 
-RHINO_COMPUTE_URL env var (default: http://localhost:6500) controls endpoint.
+RHINO_COMPUTE_URL env var (default: http://localhost:8081) controls endpoint.
 See docs/rhino_compute_setup.md for installation instructions.
 """
 import json
@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 from .. import event_bus
 
-RHINO_COMPUTE_URL = os.environ.get("RHINO_COMPUTE_URL", "http://localhost:6500")
+RHINO_COMPUTE_URL = os.environ.get("RHINO_COMPUTE_URL", "http://localhost:8081")
 
 # --------------------------------------------------------------------------- #
 # Shared script header / footer

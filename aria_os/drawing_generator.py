@@ -64,6 +64,17 @@ def generate_gdnt_drawing(
     )
 
     out_path.write_text(svg_content, encoding="utf-8")
+
+    # ── SVG validation: verify file exists and is non-trivial (> 1KB) ─────
+    try:
+        _svg_size = out_path.stat().st_size
+        if _svg_size < 1024:
+            print(f"[DRAWING] WARNING — SVG is only {_svg_size} bytes (< 1KB), may be empty or incomplete")
+        else:
+            print(f"[DRAWING] SVG validated: {out_path.name} ({_svg_size // 1024} KB)")
+    except Exception as _dv_exc:
+        print(f"[DRAWING] SVG validation skipped: {_dv_exc}")
+
     return out_path
 
 

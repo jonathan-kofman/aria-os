@@ -16,7 +16,29 @@ import webbrowser
 if sys.stdout and hasattr(sys.stdout, 'buffer'):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
+def _load_repo_dotenv() -> None:
+    """Load REPO_ROOT/.env into os.environ so MILLFORGE_* and keys apply without a shell export."""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / ".env"
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        val = val.strip()
+        if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            val = val[1:-1]
+        os.environ[key] = val
+
+
 if __name__ == "__main__":
+    _load_repo_dotenv()
     import argparse
     p = argparse.ArgumentParser(description="ARIA-OS Dashboard")
     # Railway sets PORT; local dev uses ARIA_PORT or 7860

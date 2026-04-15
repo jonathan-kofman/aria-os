@@ -1318,8 +1318,8 @@ export default function App() {
         setLogLines(prev => [...prev.slice(-200), `[${ts}] ${msg}`]);
         if (data.type === "complete" || data.type === "done") {
           setPipelineStatus("done");
-          fetch("/api/parts").then(r => r.ok ? r.json() : []).then(d => {
-            const arr = Array.isArray(d) ? d : [];
+          fetch("/api/parts").then(r => r.ok ? r.json() : { parts: [] }).then(d => {
+            const arr = Array.isArray(d) ? d : (d?.parts || []);
             setParts(arr);
             if (arr.length > 0) setSelectedPart(prev => prev || arr[0]);
           }).catch(() => {});

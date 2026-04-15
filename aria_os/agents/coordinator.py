@@ -584,7 +584,7 @@ Research findings:
 Create a complete step-by-step build recipe with exact dimensions."""
 
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, call_llm, prompt, system, ctx.repo_root)
+        response = await loop.run_in_executor(None, lambda: call_llm(prompt, system=system, repo_root=ctx.repo_root))
         return response or ""
 
     async def _classify_geometry_type(self, ctx: JobContext, spec: dict) -> dict:
@@ -619,7 +619,7 @@ geometry_type → kernel mapping:
 Spec: {json.dumps(spec, default=str)[:400]}"""
 
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, call_llm, prompt, system, ctx.repo_root)
+        response = await loop.run_in_executor(None, lambda: call_llm(prompt, system=system, repo_root=ctx.repo_root))
 
         default = {"geometry_type": "prismatic", "kernel": "cadquery", "rationale": "default fallback"}
         if not response:
@@ -661,10 +661,61 @@ Spec: {json.dumps(spec, default=str)[:400]}"""
         if kernel == "sdf":
             await self._phase_3_implicit(ctx)
             return
-        # Fusion/Grasshopper/Blender: scripts generated in Phase 4; use CadQuery
-        # for the STEP validation file. Kernel label still flows to the dashboard.
-        if kernel in ("fusion", "grasshopper", "blender"):
+        if kernel == "grasshopper":
+            await self._phase_3_grasshopper(ctx)
+            return
+        # Fusion/Blender: kernel label flows to dashboard; CadQuery produces STEP
+        if kernel in ("fusion", "blender"):
             _emit(ctx, "kernel_note", f"{kernel} script will be generated in Phase 4", {"kernel": kernel})
+
+        await self._phase_3_cadquery_loop(ctx)
+
+    # -- Phase 3 variant: Grasshopper artifact + CQ fallback --------------------
+
+    async def _phase_3_grasshopper(self, ctx: JobContext) -> None:
+        """Write Grasshopper Python component artifacts + run CQ fallback for STEP.
+
+        Does NOT require Rhino Compute. Produces:
+          outputs/cad/grasshopper/<part>/<part>_gh_component.py  — paste into GH
+          outputs/cad/grasshopper/<part>/<part>_cq_fallback.py   — headless CQ
+          outputs/cad/grasshopper/<part>/params.json
+        CadQuery fallback runs headlessly to produce the STEP/STL for the pipeline.
+        """
+        _emit(ctx, "phase", "Phase 3: Grasshopper (artifact mode)", {"phase": 3})
+        print(f"\n  [Phase 3] Grasshopper path: writing GH artifacts + CQ fallback...")
+
+        try:
+            from ..gh_integration.gh_to_step_bridge import run_gh_pipeline
+            import re
+
+            # Derive a part_id from goal (slug)
+            part_id = re.sub(r"[^a-z0-9]+", "_", ctx.goal.lower()).strip("_")[:40]
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, run_gh_pipeline, ctx.goal, part_id, ctx.repo_root, None
+            )
+
+            if result.get("step_path") and Path(result["step_path"]).exists():
+                ctx.geometry_path = result["step_path"]
+                ctx.stl_path = result.get("stl_path", "")
+                ctx.validation_passed = True
+                ctx.validation_report = {
+                    "converged": True, "kernel": "grasshopper",
+                    "geometry_type": ctx.geometry_type,
+                    "cem_passed": result.get("cem_passed"),
+                    "artifacts": result.get("artifacts", []),
+                }
+                print(f"  [Phase 3] GH PASS — STEP: {ctx.geometry_path}")
+                print(f"  [Phase 3] GH artifacts: {result.get('artifacts', [])}")
+                ctx.phases_completed.append("geometry")
+                _emit(ctx, "phase_complete", "Phase 3: Grasshopper", {
+                    "phase": 3, "kernel": "grasshopper",
+                    "artifacts": result.get("artifacts", [])})
+                return
+            else:
+                print(f"  [Phase 3] GH pipeline produced no STEP — falling back to CadQuery")
+        except Exception as exc:
+            print(f"  [Phase 3] GH error: {exc} — falling back to CadQuery")
 
         await self._phase_3_cadquery_loop(ctx)
 
@@ -1337,6 +1388,10 @@ Spec: {json.dumps(spec, default=str)[:400]}"""
             return None
 
         mf_key = os.environ.get("ARIA_BRIDGE_KEY", "")
+        mf_bearer = (
+            os.environ.get("MILLFORGE_JWT", "").strip()
+            or os.environ.get("MILLFORGE_SUBMIT_JWT", "").strip()
+        )
 
         try:
             import urllib.request
@@ -1345,16 +1400,19 @@ Spec: {json.dumps(spec, default=str)[:400]}"""
             headers = {"Content-Type": "application/json"}
             if mf_key:
                 headers["X-API-Key"] = mf_key
+            if mf_bearer:
+                headers["Authorization"] = f"Bearer {mf_bearer}"
 
-            payload = json.dumps(ctx.millforge_job, default=str).encode("utf-8")
+            payload_bytes = json.dumps(ctx.millforge_job, default=str).encode("utf-8")
             req = urllib.request.Request(
                 f"{mf_url}/api/jobs/from-aria",
-                data=payload,
+                data=payload_bytes,
                 headers=headers,
                 method="POST",
             )
 
             loop = asyncio.get_event_loop()
+
             def _do_submit():
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     return json.loads(resp.read())
@@ -1383,11 +1441,17 @@ Spec: {json.dumps(spec, default=str)[:400]}"""
         if not mf_url:
             return None
         mf_key = os.environ.get("ARIA_BRIDGE_KEY", "")
+        mf_bearer = (
+            os.environ.get("MILLFORGE_JWT", "").strip()
+            or os.environ.get("MILLFORGE_SUBMIT_JWT", "").strip()
+        )
         try:
             import urllib.request
             headers = {"Content-Type": "application/json"}
             if mf_key:
                 headers["X-API-Key"] = mf_key
+            if mf_bearer:
+                headers["Authorization"] = f"Bearer {mf_bearer}"
             data = json.dumps(payload, default=str).encode("utf-8")
             req = urllib.request.Request(
                 f"{mf_url}/api/jobs/from-aria", data=data, headers=headers, method="POST"

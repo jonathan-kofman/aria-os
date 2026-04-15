@@ -52,16 +52,19 @@ MATERIAL_RATES: dict[str, dict[str, float]] = {
 }
 
 # Material removal rates (min per cm3 of material removed)
+# Based on average MRR for 3-axis VMC including rapids, tool changes, finish passes
+# Aluminum: ~40 cm3/min avg → 0.025 min/cm3
+# Steel: ~8 cm3/min avg → 0.125 min/cm3
 REMOVAL_RATES: dict[str, float] = {
-    "aluminium":  0.8,
-    "aluminum":   0.8,
-    "steel":      2.5,
-    "stainless":  3.0,
-    "titanium":   5.0,
-    "inconel":    8.0,
-    "brass":      0.9,
-    "copper":     1.2,
-    "plastic":    0.5,
+    "aluminium":  0.025,
+    "aluminum":   0.025,
+    "steel":      0.125,
+    "stainless":  0.33,
+    "titanium":   0.50,
+    "inconel":    1.00,
+    "brass":      0.03,
+    "copper":     0.04,
+    "plastic":    0.012,
 }
 
 # Machine rates ($/min)

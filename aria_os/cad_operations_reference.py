@@ -160,6 +160,79 @@ vert = (cq.Workplane("XY").workplane(offset=THICKNESS/2)
     .center(0, -DEPTH/2 + THICKNESS/2)
     .box(W, THICKNESS, LEG_H).translate((0, 0, LEG_H/2)))
 result = base.union(vert)"""),
+
+    # ── Advanced sweeps ──────────────────────────────────────────────────
+    ("sweep_helix", "Helical sweep (springs, threads, augers)",
+     """# Helix path + circular profile sweep
+path = cq.Wire.makeHelix(PITCH, HEIGHT, RADIUS)
+result = cq.Workplane("XY").circle(WIRE_R).sweep(cq.Workplane().add(path), isFrenet=True)"""),
+
+    ("sweep_spline_3d", "Sweep along a 3D spline path",
+     """path = cq.Workplane("XZ").spline([(0,0), (20,15), (40,5), (60,20)])
+result = cq.Workplane("XY").circle(R).sweep(path, isFrenet=True)"""),
+
+    # ── Advanced revolve ─────────────────────────────────────────────────
+    ("revolve_partial", "Partial revolve (90/180/270 degrees)",
+     """profile = cq.Workplane("XZ").moveTo(R_IN, 0).lineTo(R_OUT, 0).lineTo(R_OUT, H).lineTo(R_IN, H).close()
+result = profile.revolve(ANGLE_DEG, (0,0,0), (0,1,0))"""),
+
+    # ── Spline profiles ──────────────────────────────────────────────────
+    ("spline_profile", "Smooth spline-based 2D profile → extrude",
+     """pts = [(0,0), (10,2), (20,8), (25,15), (20,20), (0,20)]
+result = cq.Workplane("XY").spline(pts).close().extrude(THICKNESS)"""),
+
+    ("tangent_arc", "Tangent arc continuation in 2D sketch",
+     """result = (cq.Workplane("XY")
+    .moveTo(0, 0).lineTo(20, 0)
+    .tangentArcPoint((30, 15), relative=False)
+    .lineTo(30, 30).lineTo(0, 30).close()
+    .extrude(THICKNESS))"""),
+
+    # ── Twist extrude ────────────────────────────────────────────────────
+    ("twist_extrude", "Twisted extrusion (decorative, vanes)",
+     """result = cq.Workplane("XY").polygon(N_SIDES, DIAMETER).twistExtrude(HEIGHT, TWIST_DEG)"""),
+
+    # ── Complex multi-body patterns ──────────────────────────────────────
+    ("radial_pattern", "Radial pattern of features (fan blades, gear teeth, spokes)",
+     """import math
+base = cq.Workplane("XY").circle(HUB_R).extrude(H)
+for i in range(N_FEATURES):
+    angle = i * 360 / N_FEATURES
+    feature = (cq.Workplane("XY")
+        .transformed(rotate=(0, 0, angle))
+        .center(FEATURE_R, 0)
+        .rect(FEATURE_W, FEATURE_T).extrude(H))
+    base = base.union(feature)
+result = base"""),
+
+    ("impeller_blades", "Radial blades with curvature (impeller, fan, turbine)",
+     """import math
+hub = cq.Workplane("XY").circle(HUB_R).extrude(H)
+for i in range(N_BLADES):
+    angle = i * 360 / N_BLADES
+    pts = []
+    for j in range(10):
+        r = HUB_R + j * (TIP_R - HUB_R) / 9
+        theta = math.radians(angle + j * BLADE_WRAP / 9)
+        pts.append((r * math.cos(theta), r * math.sin(theta)))
+    path = cq.Workplane("XY").spline(pts)
+    blade = cq.Workplane("XY").rect(BLADE_T, H).sweep(path)
+    hub = hub.union(blade)
+result = hub"""),
+
+    # ── Pipe fittings ────────────────────────────────────────────────────
+    ("pipe_elbow", "90-degree pipe elbow via sweep",
+     """import math
+arc_pts = [(0,0)] + [(BEND_R*math.sin(math.radians(a)), BEND_R*(1-math.cos(math.radians(a)))) for a in range(10, 100, 10)]
+path = cq.Workplane("XZ").spline(arc_pts)
+result = cq.Workplane("XY").circle(PIPE_OD/2).circle(PIPE_ID/2).sweep(path)"""),
+
+    ("flange", "Pipe flange with bolt holes",
+     """import math
+result = (cq.Workplane("XY")
+    .circle(FLANGE_OD/2).circle(PIPE_OD/2).extrude(FLANGE_T))
+pts = [(BCD/2*math.cos(i*2*math.pi/N_BOLTS), BCD/2*math.sin(i*2*math.pi/N_BOLTS)) for i in range(N_BOLTS)]
+result = result.faces(">Z").workplane().pushPoints(pts).circle(BOLT_DIA/2).cutThruAll()"""),
 ]
 
 

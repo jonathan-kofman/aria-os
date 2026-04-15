@@ -370,7 +370,7 @@ window.THREE = THREE; window.STLLoader = STLLoader; window.OrbitControls = Orbit
               <div style="font-size:14px;color:#e3b341;font-weight:600" x-text="(mfQuote?.quote?.carbon_footprint_kg_co2?.toFixed(1) || '—') + ' kg'"></div>
             </div>
           </div>
-          <a :href="mfQuote?.millforge_ui || 'http://localhost:5173'" target="_blank"
+          <a :href="mfQuote?.millforge_jobs_url || mfQuote?.millforge_ui || 'http://localhost:5173/?tab=jobs'" target="_blank" rel="noopener"
              style="background:#238636;color:#fff;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap">
             Open MillForge →
           </a>
@@ -417,7 +417,7 @@ window.THREE = THREE; window.STLLoader = STLLoader; window.OrbitControls = Orbit
             <span style="color:#56d364;font-size:13px;font-weight:600">✓ Job created in MillForge</span>
             <span style="font-size:12px;color:#8b949e;margin-left:8px" x-text="'ID: ' + (mfCamResult?.job?.id || '—') + '  ·  Stage: ' + (mfCamResult?.job?.stage || '—')"></span>
           </div>
-          <a :href="mfCamResult?.millforge_ui || 'http://localhost:5173'" target="_blank"
+          <a :href="mfCamResult?.millforge_job_url || mfCamResult?.millforge_ui || 'http://localhost:5173/?tab=jobs'" target="_blank" rel="noopener"
              style="background:#1f3a5f;border:1px solid #388bfd;color:#58a6ff;padding:5px 14px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none">
             View in MillForge →
           </a>
@@ -502,19 +502,19 @@ window.THREE = THREE; window.STLLoader = STLLoader; window.OrbitControls = Orbit
             <span style="font-size:10px;color:#484f58;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Connection</span>
             <button @click="loadMillforgeIntel()" style="font-size:10px;background:none;border:none;color:#388bfd;cursor:pointer;padding:0">&#x21bb;</button>
           </div>
-          <template x-if="millforgePipelineHealth && millforgePipelineHealth.millforge">
+          <template x-if="millforgePipelineHealth && millforgePipelineHealth.systems && millforgePipelineHealth.systems.millforge">
             <div>
-              <div x-show="millforgePipelineHealth.millforge.status === 'ok'" style="font-size:11px;color:#56d364;display:flex;align-items:center;gap:5px">
+              <div x-show="millforgePipelineHealth.systems.millforge.status === 'healthy'" style="font-size:11px;color:#56d364;display:flex;align-items:center;gap:5px">
                 <span style="width:6px;height:6px;border-radius:50%;background:#56d364;display:inline-block"></span>
                 Connected
               </div>
-              <div x-show="millforgePipelineHealth.millforge.status !== 'ok'" style="font-size:11px;color:#f85149;display:flex;align-items:center;gap:5px">
+              <div x-show="millforgePipelineHealth.systems.millforge.status !== 'healthy'" style="font-size:11px;color:#f85149;display:flex;align-items:center;gap:5px">
                 <span style="width:6px;height:6px;border-radius:50%;background:#f85149;display:inline-block"></span>
                 Unreachable
               </div>
             </div>
           </template>
-          <template x-if="!millforgePipelineHealth || !millforgePipelineHealth.millforge">
+          <template x-if="!millforgePipelineHealth || !millforgePipelineHealth.systems || !millforgePipelineHealth.systems.millforge">
             <div style="font-size:11px;color:#484f58;display:flex;align-items:center;gap:5px">
               <span style="width:6px;height:6px;border-radius:50%;background:#484f58;display:inline-block"></span>
               Not configured
@@ -784,6 +784,11 @@ function ariaApp() {
       }
 
       await Promise.all([this.loadOutputs(), this.loadRuns(), this.checkMfToken(), this.loadMillforgeIntel()])
+      // Show MillForge strip if outputs already exist (refresh / return visit) — not gated on mfHasToken
+      if (this.stlOutputs.length > 0 || this.camOutputs.length > 0) {
+        this.mfVisible = true
+        if (this.stlOutputs.length > 0 && !this.mfStlPath) this.mfStlPath = this.stlOutputs[0].path
+      }
       setInterval(() => this.loadRuns(), 5000)
 
       // If opened from StructSight, auto-attach to the run stream
@@ -912,9 +917,9 @@ function ariaApp() {
             this.lastStatus = d.status
             this.loadRuns()
             this.loadOutputs().then(() => {
-              if (d.status === 'done' && this.stlOutputs.length > 0) {
+              if (d.status === 'done' && (this.stlOutputs.length > 0 || this.camOutputs.length > 0)) {
                 this.mfVisible = true; this.mfQuote = null; this.mfError = ''
-                this.mfStlPath = this.stlOutputs[0].path
+                if (this.stlOutputs.length > 0) this.mfStlPath = this.stlOutputs[0].path
               }
             })
             this.loadMillforgeIntel()

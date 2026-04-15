@@ -107,7 +107,46 @@ class EvalAgent:
         if state.bbox and state.spec:
             self._check_bbox_vs_spec(state)
 
-        # 5. Physics (auto-detect FEA type — informational, not blocking)
+        # 6. Visual verification — catches missing features that metrics miss
+        # If no STL, generate one from STEP for visual checking
+        if (not stl_path or not Path(stl_path).exists()) and step_path and Path(step_path).exists():
+            try:
+                import cadquery as cq
+                shape = cq.importers.importStep(step_path)
+                stl_path = step_path.replace(".step", ".stl")
+                cq.exporters.export(shape, stl_path, exportType="STL")
+            except Exception:
+                pass
+
+        if stl_path and Path(stl_path).exists():
+            try:
+                from ..visual_verifier import verify_visual
+                vis = verify_visual(
+                    step_path, stl_path, state.goal,
+                    state.spec if isinstance(state.spec, dict) else {},
+                    repo_root=self.repo_root,
+                )
+                state.domain_results["visual"] = vis
+                conf = vis.get("confidence", 0)
+                verified = vis.get("verified")
+                if verified is False or (verified is True and conf < 0.90):
+                    failed_checks = [
+                        c for c in vis.get("checks", [])
+                        if isinstance(c, dict) and not c.get("found", True)
+                    ]
+                    for c in failed_checks:
+                        state.failures.append(
+                            f"visual: {c.get('feature', '?')} — {c.get('notes', 'not found')[:80]}"
+                        )
+                    for issue in vis.get("issues", [])[:3]:
+                        state.failures.append(f"visual: {issue}")
+                    print(f"    [VISUAL] FAIL — {conf:.0%}, {len(failed_checks)} features missing")
+                elif verified is True:
+                    print(f"    [VISUAL] PASS — {conf:.0%}")
+            except Exception as _ve:
+                print(f"    [VISUAL] skipped: {_ve}")
+
+        # 7. Physics (auto-detect FEA type — informational, not blocking)
         try:
             from ..physics_analyzer import analyze
             phys = analyze(

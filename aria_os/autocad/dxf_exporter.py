@@ -1824,6 +1824,19 @@ def generate_civil_dxf(
     # Save
     doc.saveas(str(output_path))
 
+    # ── DXF validation: verify file is non-empty and parseable by ezdxf ──────
+    try:
+        _dxf_size = output_path.stat().st_size
+        if _dxf_size < 100:
+            print(f"[DXF] WARNING -- DXF is only {_dxf_size} bytes, may be empty or corrupt")
+        else:
+            # Read it back to confirm ezdxf can parse it without errors
+            _readback = ezdxf.readfile(str(output_path))
+            _n_entities = len(list(_readback.modelspace()))
+            print(f"[DXF] Validated: {output_path.name} ({_dxf_size // 1024} KB, {_n_entities} entities)")
+    except Exception as _dxf_exc:
+        print(f"[DXF] Validation warning: {_dxf_exc}")
+
     # Write sidecar JSON (standards applied + metadata)
     meta_path = output_path.with_suffix(".json")
     meta = {

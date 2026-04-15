@@ -50,6 +50,32 @@ class PartModifier:
         self.generated_code_dir = self.repo_root / "outputs" / "cad" / "generated_code"
         self.generated_code_dir.mkdir(parents=True, exist_ok=True)
 
+    def find_latest_script(self, keyword: Optional[str] = None) -> Optional[Path]:
+        """Return the most recently modified .py in generated_code/, optionally filtered by keyword.
+
+        Excludes _modN files so we always target an original generated script.
+        """
+        candidates = [
+            p for p in self.generated_code_dir.glob("*.py")
+            if not re.search(r"_mod\d+\.py$", p.name)
+        ]
+        if keyword:
+            kw = keyword.lower()
+            candidates = [p for p in candidates if kw in p.name.lower()] or candidates
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    def extract_goal(self, script_path: Path) -> str:
+        """Read the ``# ARIA-GOAL:`` comment from the first line of a script, if present."""
+        try:
+            first = script_path.read_text(encoding="utf-8").splitlines()[0]
+            if first.startswith("# ARIA-GOAL:"):
+                return first[len("# ARIA-GOAL:"):].strip()
+        except Exception:
+            pass
+        return ""
+
     def modify(
         self,
         base_part_path: str,
@@ -114,7 +140,7 @@ class PartModifier:
         for attempt in range(1, max_attempts + 1):
             user_msg = self._build_mod_user(existing_code, modification, previous_code=last_code or None, previous_error=last_error or None)
             try:
-                code = self._call_llm(system, user_msg)
+                code = self._call_llm(system, user_msg, existing_code=existing_code)
             except RuntimeError as e:
                 last_error = str(e)
                 if attempt == max_attempts:
@@ -192,34 +218,57 @@ Output the full modified script so it can be executed as-is. Variable 'result' m
             lines.append("```")
         return "\n".join(lines)
 
-    def _call_llm(self, system: str, user: str) -> str:
+    def _call_llm(self, system: str, user: str, existing_code: str = "") -> str:
+        """Call LLM to apply modification.
+
+        Uses Anthropic prompt caching on the existing_code block (when provided)
+        so multi-attempt edits cost ~10% of normal input-token price on cache hits.
+        Cache requires >= 1024 tokens; most generated scripts qualify.
+        """
         api_key = llm_generator._get_api_key(self.repo_root)
         try:
             import anthropic
         except ImportError:
             raise RuntimeError("anthropic package required. pip install anthropic") from None
         client = anthropic.Anthropic(api_key=api_key)
-        model = "claude-sonnet-4-20250514"
+        model = "claude-sonnet-4-6"
+
+        # Build user content — cache the code block to save credits on retries
+        if existing_code and len(existing_code) > 500:
+            code_block = f"Here is existing CadQuery code:\n```\n{existing_code[:6000]}\n```\n"
+            modification_text = user.split("Modify it to:", 1)[-1].strip() if "Modify it to:" in user else user
+            user_content = [
+                {
+                    "type": "text",
+                    "text": code_block,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": f"Modify it to: {modification_text}\n\nOutput modified code only. Keep the same BBOX print and export lines at the end.",
+                },
+            ]
+        else:
+            user_content = user
+
         try:
             msg = client.messages.create(
                 model=model,
-                max_tokens=3000,
+                max_tokens=4000,
+                temperature=0,
+                system=system,
+                messages=[{"role": "user", "content": user_content}],
+                extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
+            )
+        except Exception as e:
+            # Retry without caching header on older SDK or model errors
+            msg = client.messages.create(
+                model=model,
+                max_tokens=4000,
                 temperature=0,
                 system=system,
                 messages=[{"role": "user", "content": user}],
             )
-        except Exception as e:
-            if "model" in str(e).lower() or "claude-sonnet-4-20250514" in str(e):
-                model = "claude-3-5-sonnet-20241022"
-                msg = client.messages.create(
-                    model=model,
-                    max_tokens=3000,
-                    temperature=0,
-                    system=system,
-                    messages=[{"role": "user", "content": user}],
-                )
-            else:
-                raise
         text = ""
         for b in msg.content:
             if hasattr(b, "text"):

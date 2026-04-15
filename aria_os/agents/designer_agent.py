@@ -38,34 +38,28 @@ class DesignerAgent(BaseAgent):
         The agent is still agentic: SpecAgent extracts params, EvalAgent validates.
         """
         if self.domain == "cad" and state.iteration <= 1 and not state.refinement_instructions:
-            # Check if the goal requires operations that templates can't do.
-            # Templates only produce box/cylinder/extrude/cut — if the user
-            # needs sweep, loft, revolve, shell, fillet, etc., skip template
-            # and let the LLM generate with the full operations reference.
-            _goal_lower = state.goal.lower()
-            _NEEDS_LLM_FEATURES = [
-                "sweep", "swept", "curved pipe", "pipe elbow", "bend",
-                "loft", "lofted", "transition", "taper",
-                "fillet", "round edge", "rounded edge", "smooth edge",
-                "chamfer", "bevel",
-                "shell", "thin wall", "hollow",  # shell != housing template
-                "split", "hinge", "clamp", "snap fit", "living hinge",
-                "spline", "organic", "sculpted", "freeform",
-                "helical", "helix", "spiral", "thread",
-                "rib", "stiffener", "gusset",
-                "boss", "standoff",
-                "pocket", "recess", "counterbore", "countersink",
-                "mirror", "symmetric",
-                "text", "engrave", "emboss",
-            ]
-            _needs_llm = any(kw in _goal_lower for kw in _NEEDS_LLM_FEATURES)
+            # ALWAYS try template first — templates are more reliable than LLM
+            template_used = self._try_template(state)
+            if template_used:
+                return
 
-            if _needs_llm:
-                print(f"  [{self.name}] Goal needs advanced features — skipping template, using LLM")
-            else:
-                template_used = self._try_template(state)
-                if template_used:
+            # No template — try CADSmith iterative loop for complex parts
+            print(f"  [{self.name}] No template — trying CADSmith loop")
+            try:
+                from ..generators.cadsmith_generator import cadsmith_generate
+                _cs_plan = {"part_id": state.part_id or "agent_part", "params": state.spec}
+                _cs_result = cadsmith_generate(
+                    state.goal, _cs_plan,
+                    str(state.repo_root / "outputs" / "cad" / "step" / f"{state.part_id or state.session_id}.step"),
+                    str(state.repo_root / "outputs" / "cad" / "stl" / f"{state.part_id or state.session_id}.stl"),
+                    repo_root=state.repo_root,
+                )
+                if _cs_result.get("step_path") and Path(_cs_result["step_path"]).exists():
+                    state.artifacts.update(_cs_result)
+                    print(f"  [{self.name}] CADSmith generated geometry")
                     return
+            except Exception as _cs_err:
+                print(f"  [{self.name}] CADSmith failed: {_cs_err}, falling back to LLM")
 
         # LLM-based generation
         # Build the user prompt from state
@@ -148,6 +142,9 @@ class DesignerAgent(BaseAgent):
 
         prompt = "\n".join(prompt_parts)
 
+        # Store iteration so _call_llm can route correctly
+        self._current_iteration = state.iteration
+
         # Call the LLM
         response = self.run(prompt, state)
 
@@ -185,45 +182,73 @@ class DesignerAgent(BaseAgent):
         state.code = code
         state.generation_error = ""
 
+        # For CAD domain: pre-check spec vs code before spending compute on execution.
+        # If critical mismatches are found (wrong count, missing dimension), regenerate
+        # once with explicit correction notes embedded in the prompt.
+        if self.domain == "cad" and not state.refinement_instructions:
+            spec_issues = _precheck_code_spec(code, state.spec)
+            if spec_issues:
+                print(f"  [{self.name}] Spec/code mismatch on iter {state.iteration} — regenerating:")
+                for issue in spec_issues:
+                    print(f"    ! {issue}")
+                correction_prompt = (
+                    "\n".join(prompt_parts)
+                    + "\n\n## CRITICAL CORRECTIONS FOR THIS ATTEMPT\n"
+                    + "The previous code had these spec mismatches that MUST be fixed:\n"
+                    + "\n".join(f"- {issue}" for issue in spec_issues)
+                    + "\n\nGenerate corrected code that addresses all of the above."
+                )
+                corrected_response = self.run(correction_prompt, state)
+                corrected_code = _extract_code(corrected_response) if corrected_response else ""
+                if corrected_code:
+                    # Verify correction improved things (fewer issues)
+                    remaining = _precheck_code_spec(corrected_code, state.spec)
+                    if len(remaining) < len(spec_issues):
+                        print(f"  [{self.name}] Correction reduced issues: {len(spec_issues)} → {len(remaining)}")
+                        code = corrected_code
+                        state.code = code
+                    else:
+                        print(f"  [{self.name}] Correction did not improve — keeping original")
+
         # For CAD domain: execute the code to produce STEP/STL
         if self.domain == "cad":
             self._execute_cad(state, code)
 
     def _call_llm(self, prompt: str) -> str | None:
-        """Override: for CAD code generation, try cloud LLMs first, then Gemma 4.
-        Local 7b models can't write complex CadQuery geometry reliably, but
-        Gemma 4 31B is large enough to produce working CadQuery.
-        Priority: Anthropic → Gemini → Gemma 4 31B → None.
-        Ollama default (7b) is still skipped for CAD — too unreliable."""
+        """Override: for CAD code generation, use cloud LLMs (local 7b too unreliable).
+
+        Iteration 1 — Anthropic first (highest quality for initial generation).
+        Iteration 2+ — Gemini first (faster/cheaper for refinement; Claude as fallback).
+        Gemma 4 31B is tried last if both cloud providers fail.
+        """
         if self._prefer_cloud and self.domain == "cad":
-            # Try Anthropic first (best code quality)
-            try:
-                from ..llm_client import _try_anthropic
-                response = _try_anthropic(prompt, self.system_prompt)
-                if response:
-                    return response
-            except Exception:
-                pass
-            # Try Gemini (fast, good code gen, rarely overloaded)
-            try:
-                from ..llm_client import _try_gemini
-                response = _try_gemini(prompt, self.system_prompt)
-                if response:
-                    return response
-            except Exception:
-                pass
-            # Try Gemma 4 31B via Ollama (strong enough for CadQuery at 31B params)
-            try:
-                from ..llm_client import _try_gemma
-                response = _try_gemma(prompt, self.system_prompt)
-                if response:
-                    return response
-            except Exception:
-                pass
-            # Do NOT use Ollama default (7b) for CadQuery — produces broken geometry
-            # (.cylinder() calls, missing features, syntax errors).
-            # Return None so caller falls back to deterministic template generation.
-            print(f"  [{self.name}] Cloud LLMs + Gemma 4 unavailable — falling back to template")
+            iteration = getattr(self, "_current_iteration", 1)
+            from ..llm_client import _try_anthropic, _try_gemini, _try_gemma
+
+            if iteration <= 1:
+                # Iter 1: best quality matters most — Claude first
+                providers = [
+                    ("Anthropic", lambda: _try_anthropic(prompt, self.system_prompt)),
+                    ("Gemini",    lambda: _try_gemini(prompt, self.system_prompt)),
+                    ("Gemma4",    lambda: _try_gemma(prompt, self.system_prompt)),
+                ]
+            else:
+                # Iter 2+: refinement — Gemini is faster and cheaper, Claude as backup
+                providers = [
+                    ("Gemini",    lambda: _try_gemini(prompt, self.system_prompt)),
+                    ("Anthropic", lambda: _try_anthropic(prompt, self.system_prompt)),
+                    ("Gemma4",    lambda: _try_gemma(prompt, self.system_prompt)),
+                ]
+
+            for name, fn in providers:
+                try:
+                    response = fn()
+                    if response:
+                        return response
+                except Exception:
+                    pass
+
+            print(f"  [{self.name}] All cloud LLMs unavailable — falling back to template")
             return None
         # Non-CAD domains: use Ollama (standard path)
         return super()._call_llm(prompt)
@@ -381,6 +406,87 @@ _exp.export(result, _stl,  _exp.ExportTypes.STL)
         except Exception as exc:
             state.generation_error = str(exc)[:500]
             print(f"  [{self.name}] Execution failed: {state.generation_error}")
+
+
+def _precheck_code_spec(code: str, spec: dict) -> list[str]:
+    """Scan generated CadQuery code for obvious spec-count/dimension mismatches.
+
+    Returns a list of human-readable issues.  Empty list = no problems found.
+
+    Catches the most common LLM mistake: using hardcoded defaults instead of the
+    spec values (e.g. range(4) when n_blades=6, or OD=160 when od_mm=150).
+    False positives are harmless — they add a correction note to the next prompt,
+    not a hard failure.
+    """
+    import re
+    issues: list[str] = []
+
+    # --- Count checks ---
+    # Collect all range(N) and standalone N = <int> from the code
+    loop_counts = [int(x) for x in re.findall(r'\brange\((\d+)\)\b', code) if 2 < int(x) < 500]
+    assign_counts = [int(x) for x in re.findall(r'\b[Nn]\s*=\s*(\d+)\b', code) if 2 < int(x) < 500]
+    all_counts = set(loop_counts + assign_counts)
+
+    for param, label in [
+        ("n_blades", "blades/vanes"),
+        ("n_fins",   "fins"),
+        ("n_spokes", "spokes"),
+        ("n_teeth",  "teeth"),
+    ]:
+        if not spec.get(param):
+            continue
+        expected = int(spec[param])
+        if expected in all_counts:
+            continue
+        # Literal might appear inside an expression, not just range()
+        if re.search(rf'\b{expected}\b', code):
+            continue
+        if all_counts:
+            closest = min(all_counts, key=lambda x: abs(x - expected))
+            issues.append(
+                f"COUNT MISMATCH: spec requires {expected} {label} "
+                f"but code has range({closest}) / N={closest}. "
+                f"Change to range({expected}) / N={expected}."
+            )
+
+    # --- Key dimension checks ---
+    def _has_value_near(val: float, tol: float = 0.15) -> bool:
+        lo, hi = val * (1 - tol), val * (1 + tol)
+        for m in re.finditer(r'\b(\d+(?:\.\d+)?)\b', code):
+            v = float(m.group(1))
+            if lo <= v <= hi:
+                return True
+        return False
+
+    for param, label in [("od_mm", "OD"), ("bore_mm", "bore"), ("height_mm", "height")]:
+        if not spec.get(param):
+            continue
+        expected = float(spec[param])
+        if expected < 5:
+            continue  # too small — too many false positives from line numbers etc.
+        if not _has_value_near(expected):
+            issues.append(
+                f"DIMENSION MISSING: {label}={expected:.0f}mm from spec not found in code "
+                f"(no literal within 15% of {expected:.0f}). "
+                f"Add {label.upper()} = {expected:.1f} as a named constant."
+            )
+
+    # --- Blade sweep direction check ---
+    if spec.get("blade_sweep"):
+        sweep = spec["blade_sweep"]
+        code_lower = code.lower()
+        if "backward" in sweep and "forward" in code_lower and "backward" not in code_lower:
+            issues.append(
+                "SWEEP DIRECTION: spec requires backward-swept blades but code appears to use "
+                "forward geometry. Reverse the sweep angle sign (make it negative)."
+            )
+        elif "forward" in sweep and "backward" in code_lower and "forward" not in code_lower:
+            issues.append(
+                "SWEEP DIRECTION: spec requires forward-swept blades but code uses backward "
+                "geometry. Reverse the sweep angle sign."
+            )
+
+    return issues
 
 
 def _extract_code(response: str) -> str:

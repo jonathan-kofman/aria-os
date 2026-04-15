@@ -1,6 +1,7 @@
 """Shared blackboard state for the multi-agent refinement loop."""
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ class DesignState:
     repo_root: Path = field(default_factory=lambda: Path("."))
     domain: str = ""              # "cad", "cam", "ecad", "civil", "drawing", "assembly"
     part_id: str = ""
+    session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])  # unique per run
 
     # ── SpecAgent output ─────────────────────────────────────────────────
     spec: dict[str, Any] = field(default_factory=dict)
@@ -45,7 +47,7 @@ class DesignState:
 
     # ── Loop tracking ────────────────────────────────────────────────────
     iteration: int = 0
-    max_iterations: int = 5
+    max_iterations: int = 3
     history: list[dict[str, Any]] = field(default_factory=list)
     best_iteration: int = -1
     best_failure_count: int = 999

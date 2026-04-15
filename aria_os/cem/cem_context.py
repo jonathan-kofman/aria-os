@@ -15,7 +15,7 @@ from typing import Optional
 HISTORY_FILE = "cem_design_history.json"
 
 
-def load_cem_geometry(repo_root: Optional[Path] = None) -> dict:
+def load_cem_geometry(repo_root: Optional[Path] = None, **kwargs) -> dict:
     """
     Return latest CEM geometry as flat dict.
     Keys are engineering parameter names, values are floats with units embedded in key names.

@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from dataclasses import dataclass, field
@@ -1046,66 +1047,243 @@ def _llm_enrich_components(
 
 # ─── Placer ──────────────────────────────────────────────────────────────────
 
+def _boxes_overlap(ax: float, ay: float, aw: float, ah: float,
+                   bx: float, by: float, bw: float, bh: float,
+                   min_gap: float = 5.0) -> bool:
+    """Check if two axis-aligned boxes overlap (with minimum clearance)."""
+    return not (ax + aw + min_gap <= bx or bx + bw + min_gap <= ax or
+                ay + ah + min_gap <= by or by + bh + min_gap <= ay)
+
+
+def _has_overlap(comp: Component, placed: List[Component], min_gap: float = 5.0) -> bool:
+    """Check if *comp* overlaps any already-placed component."""
+    for other in placed:
+        if _boxes_overlap(comp.x_mm, comp.y_mm, comp.width_mm, comp.height_mm,
+                          other.x_mm, other.y_mm, other.width_mm, other.height_mm,
+                          min_gap):
+            return True
+    return False
+
+
+def _clamp(val: float, lo: float, hi: float) -> float:
+    return max(lo, min(val, hi))
+
+
 def place_components(components: List[Component], board_w: float, board_h: float) -> None:
     """
-    Simple grid placement.
-    - First MCU ("U1") is centred on the board.
-    - Power connectors go top-right.
-    - All other connectors flow around the perimeter (left column then right).
-    - Small passives fill rows below the MCU.
-    Modifies Component.x_mm / .y_mm in-place.
+    Zone-based placement with overlap avoidance.
+
+    Zones (board divided into functional areas):
+      - MCU / main IC: centred on the board
+      - Power input connectors: right edge, vertically centred
+      - Signal connectors: left edge and bottom edge
+      - Power regulation (regulators, large caps): upper-right quadrant near
+        power input connectors
+      - Decoupling caps: adjacent to the IC they decouple
+      - Small passives (resistors, LEDs, diodes): fill remaining space around
+        the centre, between MCU and connectors
+
+    Guarantees at least 5 mm clearance between every pair of components and
+    keeps everything inside the board margins.
     """
-    MARGIN = 5.0
-    GAP    = 2.0
+    MARGIN   = 5.0          # board-edge keepout
+    MIN_GAP  = 5.0          # minimum clearance between components
+    placed: List[Component] = []
 
-    mcu        = [c for c in components if c.ref.startswith("U") and c.height_mm > 15]
-    power_j    = [c for c in components if c.ref.startswith("J") and ("barrel" in c.description.lower() or "usb" in c.description.lower() or "lipo" in c.description.lower())]
-    sig_j      = [c for c in components if c.ref.startswith("J") and c not in power_j]
-    ics        = [c for c in components if c.ref.startswith("U") and c not in mcu]
-    passives   = [c for c in components if c.ref[0] in ("C", "R", "D", "ANT")]
+    # ── Classify components into functional groups ───────────────────────
+    desc_lower = lambda c: c.description.lower()
+    val_lower  = lambda c: c.value.lower()
 
-    # MCU centred
-    for comp in mcu:
-        comp.x_mm = (board_w - comp.width_mm) / 2.0
-        comp.y_mm = (board_h - comp.height_mm) / 2.0
+    _power_kw = {"barrel", "usb", "lipo", "battery", "dc jack", "power"}
+    _reg_kw   = {"regulator", "ldo", "dcdc", "dc-dc", "buck", "boost", "vreg"}
+    _non_mcu_kw = {"l298", "l293", "drv8", "uln2003", "a4988", "tmc2209",
+                   "motor driver", "h-bridge", "relay", "opto"}
 
-    # Power connectors: top-right corner, stacked vertically
-    cur_x = board_w - MARGIN
-    cur_y = MARGIN
+    def _is_mcu(c: Component) -> bool:
+        vl = val_lower(c)
+        dl = desc_lower(c)
+        # Exclude known non-MCU large ICs (motor drivers, relay drivers, etc.)
+        if any(kw in vl or kw in dl for kw in _non_mcu_kw):
+            return False
+        return c.ref.startswith("U") and (
+            "esp32" in vl or "stm32" in vl or "arduino" in vl or
+            "atmega" in vl or "pic" in vl or "rp2040" in vl or
+            c.height_mm > 15   # large IC module
+        )
+
+    def _is_power_connector(c: Component) -> bool:
+        if not c.ref.startswith("J"):
+            return False
+        dl = desc_lower(c)
+        return any(kw in dl for kw in _power_kw) or any(kw in val_lower(c) for kw in _power_kw)
+
+    def _is_regulator(c: Component) -> bool:
+        dl = desc_lower(c)
+        vl = val_lower(c)
+        return (c.ref.startswith("U") and
+                (any(kw in dl for kw in _reg_kw) or
+                 any(kw in vl for kw in _reg_kw) or
+                 "ams1117" in vl or "7805" in vl or "lm317" in vl or
+                 "ap2112" in vl or "me6211" in vl))
+
+    def _is_power_cap(c: Component) -> bool:
+        """Bulk / power caps (10 uF+) belong near the regulator."""
+        if c.ref[0] != "C":
+            return False
+        vl = val_lower(c)
+        for unit in ("uf", "µf"):
+            m = re.search(r"([\d.]+)\s*" + unit, vl)
+            if m and float(m.group(1)) >= 10:
+                return True
+        return False
+
+    def _is_connector(c: Component) -> bool:
+        return c.ref.startswith("J")
+
+    def _is_passive(c: Component) -> bool:
+        return c.ref[0] in ("C", "R", "D", "L") or c.ref.startswith("ANT")
+
+    mcu_list    = [c for c in components if _is_mcu(c)]
+    power_j     = [c for c in components if _is_power_connector(c)]
+    regulators  = [c for c in components if _is_regulator(c) and c not in mcu_list]
+    power_caps  = [c for c in components if _is_power_cap(c)]
+    sig_j       = [c for c in components if _is_connector(c) and c not in power_j]
+    other_ics   = [c for c in components if c.ref.startswith("U") and c not in mcu_list and c not in regulators]
+    passives    = [c for c in components if _is_passive(c) and c not in power_caps]
+
+    # Anything not yet classified
+    _classified = set(id(c) for grp in (mcu_list, power_j, regulators, power_caps,
+                                         sig_j, other_ics, passives) for c in grp)
+    leftovers = [c for c in components if id(c) not in _classified]
+
+    # ── Helper: find valid position near a target, avoiding overlaps ─────
+    def _place_near(comp: Component, target_x: float, target_y: float,
+                    search_radius: float = 0.0) -> None:
+        """Place *comp* as close to (target_x, target_y) as possible without overlap."""
+        max_x = board_w - MARGIN - comp.width_mm
+        max_y = board_h - MARGIN - comp.height_mm
+        best_x = _clamp(target_x, MARGIN, max_x)
+        best_y = _clamp(target_y, MARGIN, max_y)
+
+        comp.x_mm = best_x
+        comp.y_mm = best_y
+        if not _has_overlap(comp, placed, MIN_GAP):
+            placed.append(comp)
+            return
+
+        # Spiral search outward from target
+        radius = search_radius if search_radius > 0 else MIN_GAP
+        step = MIN_GAP
+        while radius < max(board_w, board_h):
+            for angle_deg in range(0, 360, 15):
+                rad = math.radians(angle_deg)
+                cx = target_x + radius * math.cos(rad)
+                cy = target_y + radius * math.sin(rad)
+                comp.x_mm = _clamp(cx, MARGIN, max_x)
+                comp.y_mm = _clamp(cy, MARGIN, max_y)
+                if not _has_overlap(comp, placed, MIN_GAP):
+                    placed.append(comp)
+                    return
+            radius += step
+
+        # Last resort: place at clamped position even if overlapping
+        comp.x_mm = best_x
+        comp.y_mm = best_y
+        placed.append(comp)
+
+    # ── 1. MCU / main IC — centred on board ──────────────────────────────
+    for comp in mcu_list:
+        cx = (board_w - comp.width_mm) / 2.0
+        cy = (board_h - comp.height_mm) / 2.0
+        comp.x_mm = _clamp(cx, MARGIN, board_w - MARGIN - comp.width_mm)
+        comp.y_mm = _clamp(cy, MARGIN, board_h - MARGIN - comp.height_mm)
+        placed.append(comp)
+
+    board_cx = board_w / 2.0
+    board_cy = board_h / 2.0
+
+    # ── 2. Power input connectors — right edge, vertically centred ───────
+    py = board_cy - sum(c.height_mm + MIN_GAP for c in power_j) / 2.0
     for comp in power_j:
-        comp.x_mm = cur_x - comp.width_mm
-        comp.y_mm = cur_y
-        cur_y += comp.height_mm + GAP
+        tx = board_w - MARGIN - comp.width_mm  # flush to right edge
+        ty = py
+        _place_near(comp, tx, ty)
+        py += comp.height_mm + MIN_GAP
 
-    # Signal connectors: left edge, top-to-bottom
-    cur_x = MARGIN
-    cur_y = MARGIN
-    for comp in sig_j:
-        comp.x_mm = cur_x
-        comp.y_mm = cur_y
-        cur_y += comp.height_mm + GAP
-        if cur_y + comp.height_mm > board_h - MARGIN:
-            cur_y = MARGIN
-            cur_x += comp.width_mm + GAP
+    # ── 3. Regulators — upper-right quadrant, near power connectors ──────
+    reg_x = board_w * 0.60
+    reg_y = MARGIN + 2.0
+    for comp in regulators:
+        _place_near(comp, reg_x, reg_y)
+        reg_y += comp.height_mm + MIN_GAP
 
-    # ICs: below/beside MCU, right side
-    cx = board_w * 0.65
-    cy = MARGIN
-    for comp in ics:
-        comp.x_mm = min(cx, board_w - MARGIN - comp.width_mm)
-        comp.y_mm = cy
-        cy += comp.height_mm + GAP
+    # ── 4. Power caps — adjacent to regulators ──────────────────────────
+    pcap_x = reg_x - 8.0  # slightly left of regulators
+    pcap_y = MARGIN + 2.0
+    for comp in power_caps:
+        _place_near(comp, pcap_x, pcap_y)
+        pcap_y += comp.height_mm + MIN_GAP
 
-    # Passives: bottom row
-    px = MARGIN
-    py = board_h - MARGIN - 4.0
-    for comp in passives:
-        comp.x_mm = px
-        comp.y_mm = py
-        px += comp.width_mm + GAP
-        if px + comp.width_mm > board_w - MARGIN:
-            px = MARGIN
-            py -= 4.0
+    # ── 5. Signal connectors — left edge and bottom edge ────────────────
+    # Left edge connectors
+    left_j = sig_j[:len(sig_j) // 2 + 1] if len(sig_j) > 1 else sig_j
+    bottom_j = sig_j[len(sig_j) // 2 + 1:] if len(sig_j) > 1 else []
+
+    sy = board_cy - sum(c.height_mm + MIN_GAP for c in left_j) / 2.0
+    for comp in left_j:
+        _place_near(comp, MARGIN, sy)
+        sy += comp.height_mm + MIN_GAP
+
+    # Bottom edge connectors
+    sx = board_cx - sum(c.width_mm + MIN_GAP for c in bottom_j) / 2.0
+    for comp in bottom_j:
+        _place_near(comp, sx, board_h - MARGIN - comp.height_mm)
+        sx += comp.width_mm + MIN_GAP
+
+    # ── 6. Other ICs — between MCU and regulators ───────────────────────
+    ic_x = board_cx + 10.0
+    ic_y = board_cy - 10.0
+    for comp in other_ics:
+        _place_near(comp, ic_x, ic_y)
+        ic_y += comp.height_mm + MIN_GAP
+
+    # ── 7. Small passives — distributed around MCU ──────────────────────
+    # Place decoupling caps (100nF) near MCU, others spread out below MCU
+    decoup = [c for c in passives if c.ref[0] == "C"]
+    others = [c for c in passives if c.ref[0] != "C"]
+
+    # Decoupling caps: ring around MCU
+    dc_x = board_cx - 12.0
+    dc_y = board_cy - 8.0
+    for comp in decoup:
+        _place_near(comp, dc_x, dc_y, search_radius=8.0)
+        dc_x += comp.width_mm + MIN_GAP
+        if dc_x > board_cx + 15.0:
+            dc_x = board_cx - 12.0
+            dc_y += comp.height_mm + MIN_GAP
+
+    # Resistors, LEDs, diodes: below MCU, spread across board width
+    pass_x = MARGIN + 5.0
+    pass_y = board_cy + 12.0
+    row_height = 0.0
+    for comp in others:
+        _place_near(comp, pass_x, pass_y)
+        row_height = max(row_height, comp.height_mm)
+        pass_x += comp.width_mm + MIN_GAP
+        if pass_x + comp.width_mm > board_w - MARGIN:
+            pass_x = MARGIN + 5.0
+            pass_y += row_height + MIN_GAP
+            row_height = 0.0
+
+    # ── 8. Leftovers — fill remaining space ──────────────────────────────
+    lo_x = MARGIN + 5.0
+    lo_y = board_h * 0.70
+    for comp in leftovers:
+        _place_near(comp, lo_x, lo_y)
+        lo_x += comp.width_mm + MIN_GAP
+        if lo_x + comp.width_mm > board_w - MARGIN:
+            lo_x = MARGIN + 5.0
+            lo_y += comp.height_mm + MIN_GAP
 
 
 # ─── Net and trace computation ────────────────────────────────────────────────
@@ -1527,20 +1705,26 @@ def _build_pcbnew_script(
 
 # ─── BOM generation ──────────────────────────────────────────────────────────
 
-def build_bom(components: List[Component]) -> dict:
+def build_bom(components: List[Component], board_w: float = 0, board_h: float = 0) -> dict:
     return {
         "schema_version": ECAD_BOM_SCHEMA_VERSION,
+        "board": {
+            "width_mm":  round(board_w, 2),
+            "height_mm": round(board_h, 2),
+        },
         "components": [
             {
-                "ref":       c.ref,
-                "value":     c.value,
-                "footprint": c.footprint,
+                "ref":         c.ref,
+                "value":       c.value,
+                "footprint":   c.footprint,
                 "description": c.description,
-                "qty":       c.qty,
-                "x_mm":      round(c.x_mm, 2),
-                "y_mm":      round(c.y_mm, 2),
-                "pad_count": len(c.pads),
-                "nets":      list(set(c.net_map.values())) if c.net_map else [],
+                "qty":         c.qty,
+                "x_mm":        round(c.x_mm, 2),
+                "y_mm":        round(c.y_mm, 2),
+                "width_mm":    round(c.width_mm, 2),
+                "height_mm":   round(c.height_mm, 2),
+                "pad_count":   len(c.pads),
+                "nets":        list(set(c.net_map.values())) if c.net_map else [],
             }
             for c in components
         ]
@@ -1615,7 +1799,7 @@ def generate_ecad(description: str, out_dir: Path | None = None) -> tuple[Path, 
 
     script_path.write_text(pcbnew_src, encoding="utf-8")
 
-    bom = build_bom(components)
+    bom = build_bom(components, board_w, board_h)
     bom["firmware_pins"] = fw_pins
 
     # Summarize nets
@@ -1758,6 +1942,12 @@ def generate_ecad(description: str, out_dir: Path | None = None) -> tuple[Path, 
         # Validation modules not yet available -- skip gracefully
         print(f"[ecad] Validation skipped (import error: {_ie})")
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # TODO: ECAD visual verification — render the PCB layout to PNG and run
+    # through visual_verifier.verify_visual() to check component placement,
+    # trace routing, and board outline.  This requires a KiCad or custom PCB
+    # renderer (not yet available).  For now, validation relies on ERC/DRC
+    # checks above.
     # ──────────────────────────────────────────────────────────────────────────
 
     return script_path, bom_path

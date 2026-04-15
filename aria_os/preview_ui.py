@@ -26,25 +26,13 @@ ExportChoice = Literal["step", "stl", "both", "fusion", "skip"]
 
 
 def _open_simple_browser(url: str) -> None:
-    """
-    Open *url* in Cursor's Simple Browser panel. Never opens system browser.
-    Uses the cursor:// URI protocol handler via PowerShell Start-Process.
-    """
-    import subprocess
-
-    # cursor:// protocol triggers Cursor's built-in URI handler
-    cursor_uri = f"cursor://simpleBrowser.show?url={url}"
-
+    """Open *url* in the system default browser."""
+    import webbrowser
     try:
-        subprocess.run(
-            ["powershell", "-Command", f'Start-Process "{cursor_uri}"'],
-            capture_output=True, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        webbrowser.open(url)
+    except Exception:
         pass
-
-    print(f"[PREVIEW] If Simple Browser didn't open:")
-    print(f"[PREVIEW]   Ctrl+Shift+P -> 'Simple Browser: Show' -> paste: {url}")
+    print(f"[PREVIEW] URL: {url}")
 
 
 # ---------------------------------------------------------------------------

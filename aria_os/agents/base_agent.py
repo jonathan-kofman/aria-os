@@ -193,6 +193,7 @@ def is_ollama_available(model: str | None = None) -> bool:
     OLLAMA_WARMUP_TIMEOUT seconds the model is considered not ready and
     we fall through to template generation rather than hanging for 90s.
     """
+    import os
     import urllib.request
     import urllib.error
     import json as _json
@@ -218,6 +219,21 @@ def is_ollama_available(model: str | None = None) -> bool:
         return False  # model not pulled — skip agent mode
 
     # ── 3. Warmup probe — does the model actually respond? ───────────────────
+    # Skip warmup if Anthropic API is available (agents will use Claude as fallback)
+    try:
+        _anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not _anthropic_key:
+            from pathlib import Path as _P
+            _env = _P(__file__).resolve().parent.parent.parent / ".env"
+            if _env.exists():
+                for _line in _env.read_text().splitlines():
+                    if _line.startswith("ANTHROPIC_API_KEY="):
+                        _anthropic_key = _line.split("=", 1)[1].strip().strip('"')
+        if _anthropic_key:
+            return True  # Agents will fall back to Claude API — no Ollama warmup needed
+    except Exception:
+        pass
+
     try:
         probe = _json.dumps({
             "model": model,

@@ -293,8 +293,11 @@ def generate_rhino_python(
     return code
 
 
-def save_generated_code(code: str, part_name: str, repo_root: Optional[Path] = None) -> Path:
-    """Save generated code to outputs/cad/generated_code/YYYY-MM-DD_HH-MM_partname.py"""
+def save_generated_code(code: str, part_name: str, repo_root: Optional[Path] = None, goal: str = "") -> Path:
+    """Save generated code to outputs/cad/generated_code/YYYY-MM-DD_HH-MM_partname.py
+
+    Prepends ``# ARIA-GOAL: <goal>`` so ``--refine`` can read the original intent.
+    """
     if repo_root is None:
         repo_root = Path(__file__).resolve().parent.parent
     from datetime import datetime
@@ -304,5 +307,7 @@ def save_generated_code(code: str, part_name: str, repo_root: Optional[Path] = N
     dir_path = repo_root / "outputs" / "cad" / "generated_code"
     dir_path.mkdir(parents=True, exist_ok=True)
     path = dir_path / f"{stamp}_{safe_name}.py"
+    if goal:
+        code = f"# ARIA-GOAL: {goal[:300].strip()}\n" + code
     path.write_text(code, encoding="utf-8")
     return path

@@ -115,7 +115,7 @@ def generate(
             raise RuntimeError(f"LLM generation failed: {e}") from e
         part_name = (goal or part_id or "llm_part").strip()[:60]
         try:
-            llm_generator.save_generated_code(code, part_name, repo_root)
+            llm_generator.save_generated_code(code, part_name, repo_root, goal=goal or "")
         except Exception:
             pass
         return code
