@@ -131,6 +131,30 @@ def get_google_key(repo_root: Path | None = None) -> str | None:
     return None
 
 
+def get_groq_key(repo_root: Path | None = None) -> str | None:
+    """Return GROQ_API_KEY from env or .env file, or None if absent."""
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    if key:
+        return key
+    if repo_root is None:
+        repo_root = Path(__file__).resolve().parent.parent
+    env_file = repo_root / ".env"
+    if env_file.exists():
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    if k.strip() == "GROQ_API_KEY":
+                        val = v.strip().strip('"').strip("'")
+                        return val or None
+        except Exception:
+            pass
+    return None
+
+
 def _gemini_model(repo_root: Path | None = None) -> str:
     return _read_env_var("GEMINI_MODEL", _DEFAULT_GEMINI_MODEL, repo_root)
 
@@ -141,6 +165,19 @@ def _ollama_host() -> str:
 
 def _ollama_model() -> str:
     return _read_env_var("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
+
+
+def _cloud_only() -> bool:
+    """
+    True when Ollama-based providers should be skipped entirely.
+
+    Set ARIA_CLOUD_ONLY=1 in production environments that have no local
+    Ollama (e.g. Railway). Skipping the probe shaves 5-10s off every
+    LLM-bound agent step that would otherwise wait for Ollama's HTTP
+    connect to fail or for is_gemma_available()'s 2-second timeout.
+    """
+    val = os.environ.get("ARIA_CLOUD_ONLY", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
 
 
 def _gemma_model() -> str:
@@ -389,6 +426,8 @@ def _try_gemini(prompt: str, system: str, repo_root: Path | None = None) -> str 
 
 def _try_ollama(prompt: str, system: str) -> str | None:
     """Try Ollama local inference. Returns text response or None on any failure."""
+    if _cloud_only():
+        return None  # ARIA_CLOUD_ONLY=1 — skip local LLM probe
     host = _ollama_host()
     model = _ollama_model()
     # Inject local-model note into system prompt
@@ -439,6 +478,8 @@ def _try_gemma(prompt: str, system: str) -> str | None:
     specifically, separate from the default Ollama model configuration.
     Falls through gracefully if Gemma 4 is not pulled or Ollama is down.
     """
+    if _cloud_only():
+        return None  # ARIA_CLOUD_ONLY=1 — skip local LLM probe
     if not is_gemma_available():
         # Try auto-reconnecting the Lightning AI tunnel
         _ensure_lightning_tunnel()
@@ -660,6 +701,8 @@ def _try_ollama_vision(
     Auto-detects the best available vision model; falls back to the configured model.
     Returns goal string or None on any failure.
     """
+    if _cloud_only():
+        return None  # ARIA_CLOUD_ONLY=1 — skip local LLM probe
     host  = _ollama_host()
     b64   = base64.b64encode(image_bytes).decode("utf-8")
 
