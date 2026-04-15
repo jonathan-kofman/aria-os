@@ -22,7 +22,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -983,6 +983,66 @@ async def react_generate(req: _GenerateRequest):
     handler so all run registry / streaming machinery keeps working.
     """
     return await start_run(RunRequest(command="generate", goal=req.goal))
+
+
+@app.post("/api/generate-from-image")
+async def react_generate_from_image(
+    image: UploadFile = File(...),
+    goal: str = Form(""),
+):
+    """
+    Image-to-CAD entry point used by the React SPA's photo upload UI.
+    Saves the upload to outputs/uploads/<uuid>.ext, then spawns the
+    same image pipeline the CLI exposes via `--image`. Returns a
+    run_id the SPA can poll via /api/run/{run_id}.
+    """
+    if not image.filename:
+        raise HTTPException(status_code=400, detail="image filename missing")
+
+    suffix = Path(image.filename).suffix.lower() or ".jpg"
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        raise HTTPException(status_code=400, detail=f"unsupported image type: {suffix}")
+
+    upload_dir = REPO_ROOT / "outputs" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    image_id = uuid.uuid4().hex[:12]
+    image_path = upload_dir / f"{image_id}{suffix}"
+    try:
+        contents = await image.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="empty image upload")
+        image_path.write_bytes(contents)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to persist upload: {exc}")
+
+    # Spawn `python run_aria_os.py --image <photo> [hint]`
+    argv = [PYTHON, RUNNER, "--image", str(image_path)]
+    if goal.strip():
+        argv.append(goal.strip())
+
+    run_id = str(uuid.uuid4())[:8]
+    _runs[run_id] = {
+        "id": run_id,
+        "command": "image",
+        "goal": goal or f"image:{image.filename}",
+        "argv": argv,
+        "status": "queued",
+        "lines": [],
+        "returncode": None,
+        "start": time.time(),
+        "end": None,
+        "image_path": str(image_path),
+    }
+    asyncio.create_task(_stream_subprocess(run_id, argv))
+    return {
+        "status": "started",
+        "run_id": run_id,
+        "image_id": image_id,
+        "message": f"image pipeline started for {image.filename}",
+    }
 
 
 @app.get("/api/parts")
