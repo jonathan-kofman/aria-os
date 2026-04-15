@@ -267,11 +267,23 @@ async def pipeline_health():
 
     loop = asyncio.get_event_loop()
     # MillForge exposes GET /health (not /api/health). StructSight may vary by app.
-    structsight_health, millforge_health = await asyncio.gather(
-        loop.run_in_executor(None, _probe, f"{STRUCTSIGHT_URL}/api/health"),
-        loop.run_in_executor(None, _probe, f"{MILLFORGE_URL.rstrip('/')}/health"),
-        return_exceptions=True,
-    )
+    # Skip the StructSight probe entirely when STRUCTSIGHT_URL still points at
+    # localhost — that's the default when the env var is unset, and the
+    # probe just adds a 5s timeout on serverless deployments where there's
+    # no local StructSight to reach. Set STRUCTSIGHT_URL to a real URL to
+    # re-enable.
+    skip_structsight = "localhost" in STRUCTSIGHT_URL or "127.0.0.1" in STRUCTSIGHT_URL
+    if skip_structsight:
+        structsight_health = {"status": "not_configured", "url": STRUCTSIGHT_URL}
+        millforge_health = await loop.run_in_executor(
+            None, _probe, f"{MILLFORGE_URL.rstrip('/')}/health"
+        )
+    else:
+        structsight_health, millforge_health = await asyncio.gather(
+            loop.run_in_executor(None, _probe, f"{STRUCTSIGHT_URL}/api/health"),
+            loop.run_in_executor(None, _probe, f"{MILLFORGE_URL.rstrip('/')}/health"),
+            return_exceptions=True,
+        )
 
     # ARIA's own health
     try:
@@ -303,10 +315,13 @@ async def pipeline_health():
     # absent. CadQuery being available is what gates real geometry generation.
     cad_ok = aria_backends.get("cadquery", {}).get("available", False)
     mf_ok = mf.get("status") == "healthy"
+    # StructSight is "ok" when reachable OR explicitly not configured (skipped
+    # because STRUCTSIGHT_URL points at localhost on a serverless deploy).
+    ss_ok = ss.get("status") in ("healthy", "not_configured")
     if cloud_only:
         all_healthy = cad_ok and mf_ok
     else:
-        all_healthy = cad_ok and mf_ok and ss.get("status") == "healthy"
+        all_healthy = cad_ok and mf_ok and ss_ok
 
     return {
         "pipeline_status": "healthy" if all_healthy else "degraded",

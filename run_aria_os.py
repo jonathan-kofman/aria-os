@@ -956,16 +956,20 @@ def _run_check() -> None:
     except ImportError:
         _fail("ezdxf not installed", "pip install ezdxf")
 
-    # Ollama
-    import urllib.request
-    try:
-        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3) as r:
-            if r.status == 200:
-                _ok("Ollama running (localhost:11434)")
-            else:
-                _fail("Ollama returned non-200", "ollama serve")
-    except Exception:
-        _fail("Ollama not reachable", "start Ollama: ollama serve")
+    # Ollama — skipped entirely in cloud-only mode (Railway etc.)
+    cloud_only = os.environ.get("ARIA_CLOUD_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
+    if cloud_only:
+        _ok("Ollama probe skipped (ARIA_CLOUD_ONLY=1)")
+    else:
+        import urllib.request
+        try:
+            with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3) as r:
+                if r.status == 200:
+                    _ok("Ollama running (localhost:11434)")
+                else:
+                    _warn("Ollama returned non-200 (install: ollama serve)")
+        except Exception:
+            _warn("Ollama not reachable — set ARIA_CLOUD_ONLY=1 if intentional, else 'ollama serve'")
 
     # API keys — check env and .env
     from aria_os.llm_client import get_anthropic_key, get_google_key, get_groq_key
