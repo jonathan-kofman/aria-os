@@ -137,6 +137,84 @@ _mf_token: str = os.environ.get("MILLFORGE_JWT", "")
 
 
 # --------------------------------------------------------------------------- #
+# Diagnostic endpoints
+# Optimized for fast iteration without Railway round-trips:
+#   /api/diag/subprocess    spawns a trivial `python -c print` subprocess and
+#                           returns the captured stdout. Isolates whether the
+#                           dashboard's subprocess wrapper itself works.
+#   /api/diag/run-aria-os   spawns run_aria_os.py with --check (fast, no LLM)
+#                           and returns the full stdout. Isolates whether the
+#                           ARIA CLI's stdout reaches the wrapper.
+#   /api/diag/inproc        runs a tiny cadquery + trimesh ops in-process and
+#                           returns the result. No subprocess at all.
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/api/diag/subprocess")
+async def diag_subprocess():
+    """Spawn `python -c "print('hi')"` and return captured stdout."""
+    proc = await asyncio.create_subprocess_exec(
+        PYTHON, "-u", "-c",
+        "import sys; print('STDOUT:hello'); print('STDERR:bye', file=sys.stderr); sys.stdout.flush()",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    stdout, _ = await proc.communicate()
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "raw_bytes_len": len(stdout),
+        "captured": stdout.decode("utf-8", errors="replace"),
+    }
+
+
+@app.get("/api/diag/run-aria-os")
+async def diag_run_aria_os():
+    """Spawn `run_aria_os.py --check` (fast, no LLM) and return its stdout."""
+    proc = await asyncio.create_subprocess_exec(
+        PYTHON, "-u", RUNNER, "--check",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=str(REPO_ROOT),
+    )
+    stdout, _ = await proc.communicate()
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "raw_bytes_len": len(stdout),
+        "stdout": stdout.decode("utf-8", errors="replace"),
+    }
+
+
+@app.get("/api/diag/inproc")
+async def diag_inproc():
+    """Run cadquery + trimesh in-process. No subprocess. Verifies the kernel works."""
+    out: dict[str, Any] = {"checks": {}}
+    try:
+        import cadquery as cq  # type: ignore
+        result = cq.Workplane("XY").box(10, 10, 10)
+        bb = result.val().BoundingBox()
+        out["checks"]["cadquery"] = {
+            "ok": True,
+            "version": getattr(cq, "__version__", "?"),
+            "bbox": [round(bb.xlen, 3), round(bb.ylen, 3), round(bb.zlen, 3)],
+        }
+    except Exception as exc:
+        out["checks"]["cadquery"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    try:
+        import trimesh  # type: ignore
+        mesh = trimesh.creation.box(extents=[1, 1, 1])
+        out["checks"]["trimesh"] = {
+            "ok": True,
+            "triangles": int(len(mesh.faces)),
+            "watertight": bool(mesh.is_watertight),
+        }
+    except Exception as exc:
+        out["checks"]["trimesh"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Models
 # --------------------------------------------------------------------------- #
 
