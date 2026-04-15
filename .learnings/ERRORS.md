@@ -195,3 +195,22 @@ The false positive concern was: if the default is stale (e.g., `params.get("od_m
 - STL renders as 3265-byte empty PNG at ALL camera angles/distances/colors
 - Not fixed — use nozzle_template_test.stl instead
 - Scale=717 (bounding sphere), bounds ±250mm in X/Z, ±60mm in Y
+
+## [2026-04-15] weld_bead degenerate STL — wrong CadQuery workplane
+- **Symptom**: weld_bead template produced ~484-byte STL (empty/zero-volume geometry). No visible error at generation time.
+- **Root cause**: `cq.Workplane("YZ").polyline([...]).extrude(length)` extrudes along the X axis. For a bead running along X, the profile must be defined on the XY plane and extruded along Z (or vice versa). The YZ workplane causes the extrusion direction to be coincident with the polygon plane, producing empty OCCT geometry.
+- **Fix**: Changed workplane from `"YZ"` to `"XY"`. Bead cross-section defined in XY, extruded along Z.
+- **File**: `aria_os/generators/cadquery_generator.py` — `_cq_weld_bead()`
+- **Rule**: `"XY"` is the safe default workplane for extruding cross-section polygons along Z. Only use other planes when you explicitly need the extrusion direction to be X or Y.
+
+## [2026-04-15] return "fusion" vs return "fusion360" — silent orchestrator routing failure
+- **Symptom**: All Fusion 360 routing decisions silently fell through to wrong tool or no-op. No exception raised.
+- **Root cause**: `aria_os/tool_router.py` returned the string `"fusion"` from all Fusion 360 routing branches. The orchestrator `_VALID_TOOLS` set contains `"fusion360"` (with the `360` suffix). Membership check `if tool not in _VALID_TOOLS` evaluated True, triggering the silent fallback without logging why.
+- **Fix**: All `return "fusion"` → `return "fusion360"` in tool_router.py. Also fixed `_build_rationale` in multi_cad_router.py which had the same string check.
+- **Rule**: Verify return string values match ALL downstream checks. Search for the string in orchestrator, rationale builder, and output format selector before settling on a canonical name.
+
+## [2026-04-15] aria_os/__init__.py top-level imports crash package on Railway
+- **Symptom**: `import aria_os` raised ImportError chain on Railway cold start when optional deps (grasshopper_generator, blender_generator, rhino3dm) are absent.
+- **Root cause**: `__init__.py` imported directly from `aria_os.orchestrator` at module load time. orchestrator imported from generators which imported optional heavy deps unconditionally. One missing package brought down the whole package import.
+- **Fix**: Changed `__init__.py` to lazy imports — nothing is imported at module load. Sub-modules import their own deps; missing optional deps are caught locally with try/except.
+- **Rule**: Any Python package that mixes optional heavy deps (computer vision libs, Rhino, Blender bindings) must use lazy imports in `__init__.py`. Never import from orchestrator or generator modules at package level.

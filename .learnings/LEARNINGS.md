@@ -280,6 +280,53 @@ Failure modes:
 
 KiCad uses Y-down coordinate system. matplotlib defaults to Y-up. Fix: `ax.set_ylim(board_h + 5, -8)` (note: min,max are swapped to invert). With this, y=0 appears at top, y=board_h appears at bottom — matching KiCad convention.
 
+## 2026-04-15 — CadQuery polyline extrusion is workplane-sensitive; "XY" is the safe default
+
+`cq.Workplane("XY").polyline([...]).extrude(length)` extrudes the cross-section polygon along the Z axis — this is always the safe starting point for creating solid profiles.
+
+Using `"YZ"` extrudes along X, and `"XZ"` extrudes along Y. If the intended sweep direction is accidentally coincident with the polygon plane normal, OCCT produces empty (degenerate) geometry — no exception, no warning, just a ~484-byte STL with no triangles.
+
+**Rule**: Start with `"XY"` and only switch to `"YZ"` or `"XZ"` if you explicitly need a different extrusion axis and have verified which direction you get. Always check output STL size after any workplane change — less than 2KB almost certainly means degenerate geometry.
+
+**Affects**: weld_bead, any template using non-standard workplanes for sweep/extrude.
+
+## 2026-04-15 — Lazy imports in __init__.py are essential for packages with optional heavy deps
+
+Any Python package that imports optional heavy dependencies (Rhino compute bindings, Blender Python API, GH integration, cloud vision SDKs) must NOT import from those modules at package load time.
+
+Pattern that breaks:
+```python
+# aria_os/__init__.py  — WRONG
+from aria_os.orchestrator import run  # orchestrator imports cadquery, grasshopper_generator, etc.
+```
+
+Pattern that works:
+```python
+# aria_os/__init__.py  — CORRECT
+def run(*args, **kwargs):
+    from aria_os.orchestrator import run as _run
+    return _run(*args, **kwargs)
+```
+
+Or simply leave `__init__.py` nearly empty — callers import directly from sub-modules.
+
+**Why it matters on Railway**: Railway cold-start installs only `requirements.txt`. Optional deps (`rhino3dm`, `compute-rhino3d`, `bpy`) are not listed. If `__init__.py` imports from any module that imports these, the entire package fails to import — `run_aria_os.py` crashes at `import aria_os` before any fallback can fire.
+
+## 2026-04-15 — Verify return string values match ALL downstream checks
+
+When a routing/classification function returns a string (tool name, part type, backend name), that string must match every place downstream that checks it. There is no central registry — checks are scattered.
+
+For ARIA-OS tool names, the canonical set is `_VALID_TOOLS` in orchestrator.py. But `_build_rationale` in multi_cad_router.py, `get_output_formats()`, and the dashboard `_build_argv` all have their own string comparisons.
+
+**Checklist before committing a new canonical string**:
+1. `grep -r "your_string" aria_os/` — find all existing usages
+2. Check orchestrator `_VALID_TOOLS`
+3. Check `multi_cad_router._build_rationale`
+4. Check `dashboard/_build_argv` command→flag mapping
+5. Check any `if tool == "..."` or `tool in [...]` in agents/
+
+**Example failure**: `return "fusion"` vs `_VALID_TOOLS` containing `"fusion360"` — no exception raised, routing silently falls through to no-op fallback. The bug existed across 10+ runs without surfacing because the fallback chain produced geometry anyway (via CadQuery), just not via the intended Fusion path.
+
 ### 2026-04-10: render_kicad_board placeholder
 
 When cairosvg and Inkscape are both unavailable, the old code returned True from a dark placeholder PNG, blocking the matplotlib BOM layout renderer. Fix: return False so the caller's matplotlib fallback runs. The matplotlib BOM layout is far more useful than a blank placeholder.
