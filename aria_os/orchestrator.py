@@ -93,7 +93,7 @@ def _prompt_gdnt_drawing() -> bool:
         return False
 
 
-def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, preview: bool = False, auto_draw: bool = False, agent_mode: bool | None = None, max_agent_iterations: int = 5):
+def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, preview: bool = False, auto_draw: bool = False, agent_mode: bool | None = None, max_agent_iterations: int = 3):
     """Run the ARIA-OS pipeline: plan → route → generate artifacts → validate → log.
 
     agent_mode: None = auto (use agents if Ollama available), True = force, False = disable.
@@ -101,8 +101,24 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
     if repo_root is None:
         repo_root = Path(__file__).resolve().parent.parent
 
+    # Per-run telemetry: reset LLM call counts so this run's pipeline_stats
+    # reflects only THIS pipeline's calls, not state from a previous run.
+    import time as _time
+    _run_start_ts = _time.time()
+    try:
+        from .llm_client import reset_llm_call_counts as _reset_llm
+        _reset_llm()
+    except Exception:
+        pass
+
     context = load_context(repo_root)
-    session: dict = {"goal": goal, "attempts": 0, "step_path": "", "stl_path": ""}
+    session: dict = {
+        "goal": goal,
+        "attempts": 0,
+        "step_path": "",
+        "stl_path": "",
+        "_run_start_ts": _run_start_ts,
+    }
 
     event_bus.emit("step", "Pipeline started", {"goal": goal})
 
@@ -169,7 +185,14 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
             plan_text = f"Agent-generated: {goal}"
             _plan_params = _agent_state.spec
             _spec = _agent_state.spec
-            cad_tool = "cadquery"
+
+            # Route to best CAD backend (not hardcoded cadquery)
+            try:
+                from .tool_router import select_cad_tool
+                cad_tool = select_cad_tool(goal, plan if isinstance(plan, dict) else {"part_id": part_id})
+                print(f"[AGENT] CAD backend: {cad_tool}")
+            except Exception:
+                cad_tool = "cadquery"
 
             # ── CHECKPOINT: PLAN (agent mode) ────────────────────────────────
             _checkpoint("PLAN", [
@@ -231,6 +254,35 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                     ], session)
                 except Exception as _q_exc:
                     print(f"  [QUALITY] skipped: {_q_exc}")
+
+            # ── VISUAL VERIFICATION (agent mode) ────────────────────────────
+            if _stl_exists:
+                try:
+                    from .visual_verifier import verify_visual
+                    _vis_result = verify_visual(
+                        str(step_path) if _step_exists else "",
+                        str(stl_path),
+                        goal,
+                        _spec if isinstance(_spec, dict) else {},
+                        repo_root=repo_root,
+                    )
+                    session["visual_verification"] = _vis_result
+                    _vis_conf = _vis_result.get("confidence", 0.0)
+                    if _vis_result.get("verified") is True and _vis_conf >= 0.90:
+                        print(f"  [VISUAL] PASS — confidence {_vis_conf:.0%}")
+                    elif _vis_result.get("verified") is True and _vis_conf < 0.90:
+                        print(f"  [VISUAL] FAIL — confidence {_vis_conf:.0%} below 90% threshold")
+                        for _vi in _vis_result.get("issues", []):
+                            print(f"    [VISUAL] {_vi}")
+                    elif _vis_result.get("verified") is False:
+                        print(f"  [VISUAL] FAIL — confidence {_vis_conf:.0%}")
+                        for _vi in _vis_result.get("issues", []):
+                            print(f"    [VISUAL] {_vi}")
+                    elif _vis_result.get("verified") is None:
+                        _reason = _vis_result.get("reason", "unknown")
+                        print(f"  [VISUAL] SKIPPED — {_reason}")
+                except Exception as _vis_exc:
+                    print(f"  [VISUAL] skipped: {_vis_exc}")
 
             # ── CHECKPOINT: DFM (agent mode) ────────────────────────────────
             if _step_exists:
@@ -551,27 +603,49 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
     artifacts: dict[str, str] = {}
 
     if cad_tool == "grasshopper":
-        _gh_previous_failures: list[str] = []
-        _gh_succeeded = False
-        for _gh_attempt in range(max_attempts):
-            try:
-                artifacts = write_grasshopper_artifacts(
+        # Try Compute API generator first (direct API calls, no IronPython)
+        _compute_succeeded = False
+        try:
+            from .generators.compute_generator import write_compute_artifacts
+            from .compute_client import ComputeClient
+            if ComputeClient().is_available():
+                event_bus.emit("step", "Trying Compute API generator")
+                artifacts = write_compute_artifacts(
                     plan if isinstance(plan, dict) else {},
                     goal,
                     str(step_path),
                     str(stl_path),
                     repo_root=repo_root,
                 )
-                _gh_succeeded = True
-                break
-            except RuntimeError as _gh_err:
-                _gh_reason = str(_gh_err)
-                _gh_previous_failures.append(_gh_reason)
-                print(f"[GH RETRY {_gh_attempt + 1}/{max_attempts}] {_gh_reason}")
-                event_bus.emit("error", f"GH attempt {_gh_attempt + 1} failed: {_gh_reason}", {"part_id": part_id})
-                if _gh_attempt + 1 >= max_attempts:
-                    print(f"[GH FAIL] All {max_attempts} attempts exhausted.")
-                    artifacts = {"status": "failure", "error": _gh_reason, "previous_failures": _gh_previous_failures}
+                if artifacts.get("step_path") and Path(artifacts["step_path"]).exists():
+                    _compute_succeeded = True
+                    print(f"[COMPUTE] Generated via Compute API")
+        except Exception as _ce:
+            event_bus.emit("warning", f"Compute generator failed: {_ce}")
+            print(f"[COMPUTE] Falling back to GH scripts: {_ce}")
+
+        _gh_previous_failures: list[str] = []
+        _gh_succeeded = _compute_succeeded
+        if not _compute_succeeded:
+            for _gh_attempt in range(max_attempts):
+                try:
+                    artifacts = write_grasshopper_artifacts(
+                        plan if isinstance(plan, dict) else {},
+                        goal,
+                        str(step_path),
+                        str(stl_path),
+                        repo_root=repo_root,
+                    )
+                    _gh_succeeded = True
+                    break
+                except RuntimeError as _gh_err:
+                    _gh_reason = str(_gh_err)
+                    _gh_previous_failures.append(_gh_reason)
+                    print(f"[GH RETRY {_gh_attempt + 1}/{max_attempts}] {_gh_reason}")
+                    event_bus.emit("error", f"GH attempt {_gh_attempt + 1} failed: {_gh_reason}", {"part_id": part_id})
+                    if _gh_attempt + 1 >= max_attempts:
+                        print(f"[GH FAIL] All {max_attempts} attempts exhausted.")
+                        artifacts = {"status": "failure", "error": _gh_reason, "previous_failures": _gh_previous_failures}
 
         if not _gh_succeeded:
             # Fall back to CadQuery so the pipeline always produces geometry.
@@ -608,10 +682,11 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
 
     elif cad_tool == "sdf":
         try:
-            from .sdf_heat_exchanger import write_sdf_artifacts
+            from .generators.sdf_generator import write_sdf_artifacts
             artifacts = write_sdf_artifacts(
                 plan if isinstance(plan, dict) else {},
                 goal,
+                str(step_path),
                 str(stl_path),
                 repo_root=repo_root,
             )
@@ -669,6 +744,26 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                         print(f"[Zoo] Failed ({zoo_result.get('error', 'unknown')}), falling back to CadQuery.")
             except Exception as _zoo_exc:
                 print(f"[Zoo] Skipped: {_zoo_exc}")
+
+        # --- CADSmith loop: iterative LLM generation for parts without templates ---
+        if not _zoo_used and not _has_template:
+            try:
+                from .generators.cadsmith_generator import cadsmith_generate
+                print(f"[CADSMITH] Generating '{part_id}' via iterative loop...")
+                event_bus.emit("step", f"CADSmith iterative generation for {part_id}")
+                artifacts = cadsmith_generate(
+                    goal,
+                    plan if isinstance(plan, dict) else {},
+                    str(step_path),
+                    str(stl_path),
+                    repo_root=repo_root,
+                )
+                if artifacts.get("step_path") and Path(artifacts["step_path"]).exists():
+                    _zoo_used = True  # skip CQ fallback
+                    print(f"[CADSMITH] Generated: {Path(artifacts['step_path']).stat().st_size / 1024:.0f} KB STEP")
+            except Exception as _cs_exc:
+                print(f"[CADSMITH] Failed: {_cs_exc}, falling back to CadQuery")
+                event_bus.emit("warning", f"CADSmith failed: {_cs_exc}")
 
         if not _zoo_used:
             try:
@@ -989,6 +1084,35 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
             ("quality_passed", _q.get("passed", True),
              f"quality failures: {_q.get('failures', [])}"),
         ], session)
+
+    # ── VISUAL VERIFICATION (legacy path — after geometry + quality pass) ──
+    if _stl_exists:
+        try:
+            from .visual_verifier import verify_visual
+            _vis_result = verify_visual(
+                str(step_path) if _step_exists else "",
+                str(stl_path),
+                goal,
+                _spec if isinstance(_spec, dict) else {},
+                repo_root=repo_root,
+            )
+            session["visual_verification"] = _vis_result
+            _vis_conf = _vis_result.get("confidence", 0.0)
+            if _vis_result.get("verified") is True and _vis_conf >= 0.90:
+                print(f"  [VISUAL] PASS — confidence {_vis_conf:.0%}")
+            elif _vis_result.get("verified") is True and _vis_conf < 0.90:
+                print(f"  [VISUAL] FAIL — confidence {_vis_conf:.0%} below 90% threshold")
+                for _vi in _vis_result.get("issues", []):
+                    print(f"    [VISUAL] {_vi}")
+            elif _vis_result.get("verified") is False:
+                print(f"  [VISUAL] FAIL — confidence {_vis_conf:.0%}")
+                for _vi in _vis_result.get("issues", []):
+                    print(f"    [VISUAL] {_vi}")
+            elif _vis_result.get("verified") is None:
+                _reason = _vis_result.get("reason", "unknown")
+                print(f"  [VISUAL] SKIPPED — {_reason}")
+        except Exception as _vis_exc:
+            print(f"  [VISUAL] skipped: {_vis_exc}")
 
     session["automation_artifacts"] = artifacts
     session["attempts"] = 1
@@ -1353,6 +1477,266 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
         except Exception as _me:
             print(f"[META] Could not write meta JSON: {_me}")
 
+    # Stamp the session with per-run telemetry before returning, so the
+    # run_manifest writer can pick it up without needing the orchestrator
+    # to plumb extra parameters through.
+    try:
+        session["wall_time_seconds"] = round(_time.time() - _run_start_ts, 2)
+        from .llm_client import llm_call_counts as _llm_counts
+        session["llm_calls"] = _llm_counts()
+    except Exception:
+        pass
+
     event_bus.emit("complete", f"Pipeline complete for {part_id or goal}", {"session": session})
+    logger_log(session)
+    return session
+
+
+# ===========================================================================
+# Fast image-to-CAD pipeline — skips research, DFM, quote, CAM, drawing, CEM
+# ===========================================================================
+
+def run_image_fast(
+    goal: str,
+    repo_root: Path | None = None,
+    max_attempts: int = 3,
+    *,
+    preview: bool = False,
+) -> dict:
+    """Minimal pipeline for image-to-CAD: plan -> route -> generate -> export -> preview.
+
+    Skips: research, agent loop, DFM analysis, quote, CAM toolpath,
+    GD&T drawing, CEM physics check, FEA/CFD, visual verification.
+
+    This keeps image-to-CAD under ~60s instead of 300+.
+    """
+    if repo_root is None:
+        repo_root = Path(__file__).resolve().parent.parent
+
+    context = load_context(repo_root)
+    session: dict = {"goal": goal, "attempts": 0, "step_path": "", "stl_path": "", "image_fast_mode": True}
+
+    event_bus.emit("step", "Image-fast pipeline started", {"goal": goal})
+    print(f"\n[IMAGE-FAST] Generating CAD from image goal (skipping research/DFM/quote/CAM)...")
+
+    # --- 1. Plan (lightweight keyword planner — no agent loop) ---
+    plan = planner_plan(goal, context, repo_root=repo_root)
+    if not isinstance(plan, dict):
+        plan = {"part_id": "aria_part", "text": str(plan), "build_order": [], "features": []}
+
+    # --- 2. Spec extraction (regex, no LLM) ---
+    from .spec_extractor import extract_spec, merge_spec_into_plan as _merge_spec
+    _spec = extract_spec(goal)
+    if _spec:
+        _merge_spec(_spec, plan)
+        _base = plan.get("base_shape")
+        if not isinstance(_base, dict):
+            plan["base_shape"] = {}
+            _base = plan["base_shape"]
+        _DIM_KEYS = (
+            "od_mm", "bore_mm", "id_mm", "thickness_mm", "height_mm",
+            "width_mm", "depth_mm", "length_mm",
+        )
+        _SHORT_KEY = {
+            "width_mm": "width", "height_mm": "height", "depth_mm": "depth",
+            "length_mm": "length", "thickness_mm": "thickness",
+        }
+        for _k in _DIM_KEYS:
+            if _k in _spec:
+                _base[_k] = _spec[_k]
+                if _k in _SHORT_KEY:
+                    _base[_SHORT_KEY[_k]] = _spec[_k]
+        _user_dims = [f"{k}={v}" for k, v in _spec.items() if k not in ("part_type", "material")]
+        if _user_dims:
+            print(f"[IMAGE-FAST] Spec: {' '.join(_user_dims)}")
+
+    plan = attach_brief_to_plan(goal, plan, context, repo_root=repo_root)
+
+    part_id = plan.get("part_id", "")
+    _plan_params = plan.get("params") or {}
+
+    # --- 3. Route to CAD backend ---
+    try:
+        from .multi_cad_router import CADRouter
+        decision = CADRouter.route(goal, dry_run=False)
+        cad_tool = decision["backend"]
+    except Exception:
+        cad_tool = select_cad_tool(goal, plan)
+
+    print(f"[IMAGE-FAST] CAD backend: {cad_tool}")
+
+    # --- 4. Output paths ---
+    paths = get_output_paths(part_id or goal, repo_root)
+    step_path = Path(paths["step_path"])
+    stl_path = Path(paths["stl_path"])
+
+    # --- 5. Generate geometry (CadQuery template -> CADSmith -> CQ LLM fallback) ---
+    artifacts: dict = {}
+
+    if cad_tool in ("cadquery", "grasshopper", "fusion360", "sdf"):
+        # For image-fast, always use CadQuery-family generators (immediate geometry)
+        # Try CADSmith first for unknown parts, then CQ template
+        _zoo_used = False
+
+        try:
+            from .cadquery_generator import _find_template_fn as _cq_find_tpl
+            _has_template = _cq_find_tpl(part_id) is not None
+        except Exception:
+            _has_template = True
+
+        # Zoo shortcut
+        if not _has_template:
+            try:
+                from .zoo_bridge import is_zoo_available, generate_step_from_zoo
+                if is_zoo_available(repo_root):
+                    zoo_result = generate_step_from_zoo(goal, str(step_path.parent), repo_root=repo_root)
+                    if zoo_result.get("status") == "ok":
+                        _zoo_step = Path(zoo_result["step_path"])
+                        if _zoo_step.exists():
+                            session["step_path"] = str(_zoo_step)
+                            artifacts = {"step_path": str(_zoo_step), "status": "success"}
+                            _zoo_used = True
+                            print(f"[IMAGE-FAST] Zoo.dev STEP generated")
+            except Exception as _ze:
+                print(f"[IMAGE-FAST] Zoo skipped: {_ze}")
+
+        # CADSmith (iterative LLM generation for unknown parts)
+        if not _zoo_used and not _has_template:
+            try:
+                from .generators.cadsmith_generator import cadsmith_generate
+                print(f"[IMAGE-FAST] CADSmith generating '{part_id}'...")
+                artifacts = cadsmith_generate(
+                    goal,
+                    plan if isinstance(plan, dict) else {},
+                    str(step_path),
+                    str(stl_path),
+                    repo_root=repo_root,
+                )
+                if artifacts.get("step_path") and Path(artifacts["step_path"]).exists():
+                    _zoo_used = True
+                    print(f"[IMAGE-FAST] CADSmith: {Path(artifacts['step_path']).stat().st_size / 1024:.0f} KB STEP")
+            except Exception as _cs_exc:
+                print(f"[IMAGE-FAST] CADSmith failed: {_cs_exc}, trying CadQuery template")
+
+        # CadQuery template/LLM fallback
+        if not _zoo_used:
+            try:
+                from .cadquery_generator import write_cadquery_artifacts
+                print(f"[IMAGE-FAST] CadQuery generating '{part_id}'...")
+                artifacts = write_cadquery_artifacts(
+                    plan if isinstance(plan, dict) else {},
+                    goal,
+                    str(step_path),
+                    str(stl_path),
+                    repo_root=repo_root,
+                )
+            except Exception as exc:
+                print(f"[IMAGE-FAST] CadQuery error: {exc}")
+
+    elif cad_tool == "blender":
+        try:
+            artifacts = write_blender_artifacts(
+                plan if isinstance(plan, dict) else {},
+                goal,
+                str(stl_path),
+                repo_root=repo_root,
+            )
+        except Exception as exc:
+            print(f"[IMAGE-FAST] Blender error: {exc}")
+
+    # --- 6. Capture results ---
+    if artifacts.get("step_path"):
+        session["step_path"] = artifacts["step_path"]
+    if artifacts.get("stl_path"):
+        session["stl_path"] = artifacts["stl_path"]
+    if artifacts.get("script_path"):
+        session["script_path"] = artifacts["script_path"]
+    if artifacts.get("bbox"):
+        session["bbox"] = artifacts["bbox"]
+
+    _step_exists = step_path.exists()
+    _stl_exists = stl_path.exists()
+
+    # Read bbox from file if not in artifacts
+    if not session.get("bbox"):
+        if _step_exists:
+            try:
+                import cadquery as _cq_bb
+                _shape = _cq_bb.importers.importStep(str(step_path))
+                _bb = _shape.val().BoundingBox()
+                session["bbox"] = {"x": round(_bb.xlen, 3), "y": round(_bb.ylen, 3), "z": round(_bb.zlen, 3)}
+            except Exception:
+                pass
+        if not session.get("bbox") and _stl_exists:
+            try:
+                import trimesh
+                _mesh = trimesh.load_mesh(str(stl_path))
+                _ext = _mesh.bounding_box.extents
+                session["bbox"] = {"x": float(_ext[0]), "y": float(_ext[1]), "z": float(_ext[2])}
+            except Exception:
+                pass
+
+    # --- 7. Output quality (lightweight — just check file readability) ---
+    if _step_exists or _stl_exists:
+        try:
+            quality = check_output_quality(str(step_path), str(stl_path))
+            session["output_quality"] = quality
+            if quality.get("stl", {}).get("repaired"):
+                print(f"[IMAGE-FAST] STL repaired (was not watertight)")
+        except Exception as _qe:
+            print(f"[IMAGE-FAST] Quality check skipped: {_qe}")
+
+    # --- 8. Preview ---
+    if preview:
+        _stl_for_preview = session.get("stl_path") or (str(stl_path) if _stl_exists else None)
+        _script_for_preview = session.get("script_path")
+        if _stl_for_preview and Path(_stl_for_preview).exists():
+            from .preview_ui import show_preview
+            _export_choice = show_preview(
+                _stl_for_preview,
+                part_id=part_id or goal[:40],
+                script_path=_script_for_preview,
+            )
+            session["export_choice"] = _export_choice
+        else:
+            print("[IMAGE-FAST] No STL available for preview.")
+
+    # --- 9. Summary ---
+    _s_step = str(step_path) if _step_exists else session.get("step_path", "")
+    _s_stl = str(stl_path) if _stl_exists else session.get("stl_path", "")
+    _has_geometry = bool(
+        (_s_step and Path(_s_step).exists()) or (_s_stl and Path(_s_stl).exists())
+    )
+
+    print()
+    print("=" * 64)
+    print(f"  IMAGE-TO-CAD  --  {'PASS' if _has_geometry else 'FAIL'}")
+    print("=" * 64)
+    if _has_geometry:
+        if _s_step and Path(_s_step).exists():
+            print(f"  STEP:   {_s_step}  ({Path(_s_step).stat().st_size // 1024} KB)")
+        if _s_stl and Path(_s_stl).exists():
+            print(f"  STL:    {_s_stl}  ({Path(_s_stl).stat().st_size // 1024} KB)")
+        if session.get("bbox"):
+            _bb = session["bbox"]
+            print(f"  BBox:   {_bb.get('x', 0):.1f} x {_bb.get('y', 0):.1f} x {_bb.get('z', 0):.1f} mm")
+        print()
+        print("NEXT STEPS")
+        print("-" * 64)
+        _vt = _s_step or _s_stl
+        print(f"  View:     python run_aria_os.py --view \"{_vt}\"")
+        if _s_stl:
+            print(f"  Verify:   python run_aria_os.py --verify \"{_s_stl}\"")
+        if _s_step:
+            print(f"  Full run: python run_aria_os.py \"{goal[:60]}\"  # DFM + quote + CAM")
+        print("=" * 64)
+    else:
+        print()
+        print("[!] No geometry produced.")
+        print("    Try rephrasing with explicit dimensions, e.g.:")
+        print('      python run_aria_os.py --image photo.jpg "bracket 80x40x5mm"')
+        print("=" * 64)
+
+    event_bus.emit("complete", f"Image-fast pipeline done for {part_id or goal}", {"session": session})
     logger_log(session)
     return session

@@ -180,6 +180,33 @@ def _cloud_only() -> bool:
     return val in ("1", "true", "yes", "on")
 
 
+# ---------------------------------------------------------------------------
+# Per-process LLM call counter.
+# Used by run_manifest.py to surface llm_calls in pipeline_stats. Each
+# successful provider call increments its bucket. Resettable per run.
+# ---------------------------------------------------------------------------
+
+_LLM_CALL_COUNTS: dict[str, int] = {}
+
+
+def llm_call_counts() -> dict[str, int]:
+    """Return a snapshot of LLM call counts by provider."""
+    return dict(_LLM_CALL_COUNTS)
+
+
+def reset_llm_call_counts() -> None:
+    """Reset call counts (call at the start of each pipeline run)."""
+    _LLM_CALL_COUNTS.clear()
+
+
+def _record_llm_call(provider: str) -> None:
+    """Increment the call counter for a provider. Never raises."""
+    try:
+        _LLM_CALL_COUNTS[provider] = _LLM_CALL_COUNTS.get(provider, 0) + 1
+    except Exception:
+        pass
+
+
 def _gemma_model() -> str:
     return _read_env_var("GEMMA_MODEL", _DEFAULT_GEMMA_MODEL)
 
@@ -338,6 +365,7 @@ def _try_anthropic(prompt: str, system: str, repo_root: "Path | None" = None) ->
                     except Exception:
                         pass
                     print(f"[LLM] anthropic/{model}")
+                    _record_llm_call("anthropic")
                     return text
                 except Exception as exc:
                     exc_str = str(exc).lower()
@@ -385,6 +413,7 @@ def _try_gemini(prompt: str, system: str, repo_root: Path | None = None) -> str 
                 text = response.text or ""
                 if text:
                     print(f"[LLM] gemini/{try_model}")
+                    _record_llm_call("gemini")
                     return text
             except Exception as exc:
                 err_str = str(exc)
@@ -415,6 +444,7 @@ def _try_gemini(prompt: str, system: str, repo_root: Path | None = None) -> str 
         text = response.text or ""
         if text:
             print(f"[LLM] gemini/{model_name} (legacy sdk)")
+            _record_llm_call("gemini")
             return text
     except ImportError:
         pass
@@ -455,6 +485,8 @@ def _try_ollama(prompt: str, system: str) -> str | None:
                 data = json.loads(resp.read().decode("utf-8"))
             text = data.get("message", {}).get("content", "")
             print(f"[LLM] ollama/{model}")
+            if text:
+                _record_llm_call("ollama")
             return text if text else None
         except urllib.error.HTTPError as exc:
             if exc.code == 500 and attempt == 0:
@@ -517,6 +549,8 @@ def _try_gemma(prompt: str, system: str) -> str | None:
                 data = json.loads(resp.read().decode("utf-8"))
             text = data.get("message", {}).get("content", "")
             print(f"[LLM] gemma/{model}")
+            if text:
+                _record_llm_call("gemma")
             return text if text else None
         except urllib.error.HTTPError as exc:
             if exc.code == 500 and attempt == 0:

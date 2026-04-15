@@ -121,9 +121,18 @@ def _pipeline_stats(
     optional — if the orchestrator didn't record them, the field is None
     or absent rather than fabricated.
     """
+    # The orchestrator's existing schema uses "agent_iterations" for the
+    # iteration count actually used; the v2.1 manifest exposes it under
+    # "agent_iterations_used" for clarity. Accept either name.
+    iters_used = (
+        session.get("agent_iterations_used")
+        or session.get("agent_iterations")
+        or agent_iterations
+    )
     stats: dict[str, Any] = {
-        "agent_iterations_used": session.get("agent_iterations_used", agent_iterations),
+        "agent_iterations_used": iters_used,
         "stalled": bool(session.get("agent_stalled", False)),
+        "agent_converged": session.get("agent_converged"),
         "success_agent": session.get("success_agent"),  # template | cadsmith | llm | refiner
     }
 
