@@ -201,3 +201,58 @@ class TestMergeSpecIntoPlan:
         spec = {"part_type": "ratchet_ring", "od_mm": 213.0}
         merge_spec_into_plan(spec, plan)
         assert plan["params"].get("od_mm") == pytest.approx(213.0)
+
+
+# ---------------------------------------------------------------------------
+# NEMA motor, standoff bore, gear module — regression tests (2026-04-15)
+# ---------------------------------------------------------------------------
+
+class TestNEMAExtraction:
+    def test_nema17_bolt_circle(self):
+        s = extract_spec("NEMA 17 stepper motor mount")
+        assert s.get("bolt_circle_r_mm") == pytest.approx(15.5)
+
+    def test_nema17_od(self):
+        s = extract_spec("NEMA 17 motor mount")
+        assert s.get("od_mm") == pytest.approx(42.0)
+
+    def test_nema17_n_bolts(self):
+        s = extract_spec("NEMA 17 motor mount plate")
+        assert s.get("n_bolts") == 4
+
+    def test_nema23_frame(self):
+        s = extract_spec("NEMA 23 motor bracket")
+        assert s.get("od_mm") == pytest.approx(57.0)
+
+    def test_nema34_bolt_circle(self):
+        s = extract_spec("NEMA34 servo mount")
+        assert s.get("bolt_circle_r_mm") == pytest.approx(34.8)
+
+
+class TestStandoffBore:
+    def test_m4_hex_standoff_bore(self):
+        s = extract_spec("M4 hex standoff 20mm long")
+        assert s.get("bore_mm") == pytest.approx(4.0)
+
+    def test_m5_standoff_bore(self):
+        s = extract_spec("M5 hex standoff 30mm")
+        assert s.get("bore_mm") == pytest.approx(5.0)
+
+    def test_m3_standoff_length(self):
+        s = extract_spec("M3 standoff 15mm long")
+        assert s.get("length_mm") == pytest.approx(15.0)
+        assert s.get("bore_mm") == pytest.approx(3.0)
+
+
+class TestGearModule:
+    def test_module_plain_space(self):
+        s = extract_spec("involute spur gear 24 teeth module 1.5")
+        assert s.get("module_mm") == pytest.approx(1.5)
+
+    def test_module_equals(self):
+        s = extract_spec("gear module=2 48 teeth")
+        assert s.get("module_mm") == pytest.approx(2.0)
+
+    def test_module_with_mm_suffix(self):
+        s = extract_spec("gear 1.5mm module")
+        assert s.get("module_mm") == pytest.approx(1.5)

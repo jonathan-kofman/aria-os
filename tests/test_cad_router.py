@@ -53,7 +53,7 @@ class TestSelectCadTool:
 
     def test_fusion_part_id(self):
         result = select_cad_tool("any goal", self._plan(part_id="aria_energy_absorber"))
-        assert result == "fusion"
+        assert result == "fusion360"
 
     def test_feature_ramp_triggers_grasshopper(self):
         plan = self._plan(features=[{"type": "ramp", "description": "helical ramp"}])

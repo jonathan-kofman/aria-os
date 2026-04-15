@@ -59,6 +59,9 @@ _PROCESS_START_ISO = datetime.now(timezone.utc).isoformat()
 # In-memory run registry  {run_id: RunRecord}
 _runs: dict[str, dict] = {}
 
+# Max concurrent subprocess runs — prevents OOM on Railway free tier
+_MAX_CONCURRENT_RUNS: int = int(os.environ.get("ARIA_MAX_CONCURRENT_RUNS", "5"))
+
 
 def _load_run_log() -> None:
     """Load persisted run history from disk into _runs on startup."""
@@ -756,6 +759,15 @@ async def start_run(req: RunRequest):
         "start": time.time(),
         "end": None,
     }
+
+    # Rate limit — refuse if too many runs are already in-flight
+    active = sum(1 for r in _runs.values() if r.get("status") == "running")
+    if active >= _MAX_CONCURRENT_RUNS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many concurrent runs ({active}/{_MAX_CONCURRENT_RUNS}). "
+                   "Wait for an existing run to finish."
+        )
 
     # Fire and forget in event loop
     asyncio.create_task(_stream_subprocess(run_id, argv))

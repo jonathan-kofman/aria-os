@@ -53,7 +53,14 @@ _PART_TYPE_KEYWORDS: list[tuple[str, str]] = [
     ("servo mount",   "flange"),
     ("stepper mount", "flange"),
     ("nema mount",    "flange"),
+    ("nema 17",       "flange"),   # NEMA 17 motor mount — auto-fills bolt circle
+    ("nema 23",       "flange"),
+    ("nema 34",       "flange"),
+    ("nema17",        "flange"),
+    ("nema23",        "flange"),
+    ("nema34",        "flange"),
     ("adapter plate", "flange"),
+    ("hex standoff",  "hex_standoff"),
     ("standoff",      "spacer"),
     ("cable clamp",   "clamp"),
     ("pipe clamp",    "clamp"),
@@ -442,10 +449,11 @@ def extract_spec(description: str) -> dict[str, Any]:
 
     # --- Gear module (metric) ---
     module = _find([
-        r"(\d+(?:\.\d+)?)\s*mm\s+module",      # "1.5mm module"
-        r"module\s*[=:\s]\s*(\d+(?:\.\d+)?)\s*mm",  # "module 1.5mm", "module=1.5mm"
-        r"module\s*[=:]\s*(\d+(?:\.\d+)?)",    # "module=1.5" (no unit)
-        r"\bm\s*=\s*(\d+(?:\.\d+)?)\s*mm",    # "m=1.5mm"
+        r"(\d+(?:\.\d+)?)\s*mm\s+module",          # "1.5mm module"
+        r"module\s*[=:\s]\s*(\d+(?:\.\d+)?)\s*mm", # "module 1.5mm", "module=1.5mm"
+        r"module\s*[=:]\s*(\d+(?:\.\d+)?)",         # "module=1.5" (no unit)
+        r"\bmodule\s+(\d+(?:\.\d+)?)\b",            # "module 1.5" (plain space, no unit)
+        r"\bm\s*=\s*(\d+(?:\.\d+)?)\s*mm",         # "m=1.5mm"
     ])
     if module:
         spec["module_mm"] = module
@@ -549,7 +557,11 @@ def extract_spec(description: str) -> dict[str, Any]:
         spec["bolt_square_mm"]   = side   # keep raw side length for LLM context
 
     bolt_dia = _find([
-        r"[mM](\d+)\s+bolt",        # M8 bolt → 8.0
+        r"[mM](\d+)\s+bolt",             # M8 bolt → 8.0
+        r"[mM](\d+)\s+standoff",         # M4 standoff → 4.0
+        r"[mM](\d+)\s+screw",            # M3 screw → 3.0
+        r"[mM](\d+)\s+thread",           # M5 thread → 5.0
+        r"[mM](\d+)\s+fastener",         # M6 fastener → 6.0
         r"(\d+(?:\.\d+)?)\s*mm\s+bolt\s+diameter",
     ])
     if bolt_dia:
@@ -653,6 +665,42 @@ def extract_spec(description: str) -> dict[str, Any]:
     ])
     if angle:
         spec["angle_deg"] = angle
+
+    # --- NEMA motor frame sizes (auto-populate bolt circle + count) ---
+    # NEMA 17 = 42mm frame, 4 bolts, 31mm PCD
+    # NEMA 23 = 57mm frame, 4 bolts, 47mm PCD
+    # NEMA 34 = 86mm frame, 4 bolts, 69.6mm PCD
+    _NEMA_SIZES = {
+        "nema 17": (42.0, 31.0, 4),
+        "nema17":  (42.0, 31.0, 4),
+        "nema 23": (57.0, 47.0, 4),
+        "nema23":  (57.0, 47.0, 4),
+        "nema 34": (86.0, 69.6, 4),
+        "nema34":  (86.0, 69.6, 4),
+        "nema 8":  (20.3, 16.0, 4),
+        "nema8":   (20.3, 16.0, 4),
+    }
+    for _nema_kw, (_nema_frame, _nema_pcd, _nema_bolts) in _NEMA_SIZES.items():
+        if _nema_kw in lower:
+            spec.setdefault("od_mm",           _nema_frame)
+            spec.setdefault("bolt_circle_r_mm", _nema_pcd / 2.0)
+            spec.setdefault("n_bolts",          _nema_bolts)
+            spec.setdefault("bolt_dia_mm",      3.0)   # M3 standard on NEMA 17/23
+            break
+
+    # --- Standoff / spacer — extract M-size thread even when "hex" precedes "standoff" ---
+    # "M4 hex standoff" → the [mM](\d+)\s+standoff pattern misses it because "hex" is
+    # in the middle. Fall back to bare [mM]N if part_type is a standoff/spacer.
+    if spec.get("part_type") in ("spacer", "hex_standoff") and "bolt_dia_mm" not in spec:
+        _msize = re.search(r"\b[mM](\d+)\b", text)
+        if _msize:
+            spec["bolt_dia_mm"] = float(_msize.group(1))
+
+    # If part_type is spacer/standoff and bolt_dia_mm is extracted but bore_mm isn't,
+    # use bolt_dia_mm as the thread bore.
+    if spec.get("part_type") in ("spacer", "standoff", "hex_standoff") and \
+            "bore_mm" not in spec and "bolt_dia_mm" in spec:
+        spec["bore_mm"] = spec["bolt_dia_mm"]
 
     # --- Gusset / corner brace legs ---
     # "80mm legs", "80mm leg" → equal legs
