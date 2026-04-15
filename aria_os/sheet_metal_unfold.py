@@ -300,3 +300,25 @@ def unfold_from_session(session: dict[str, Any], out_dir: Path) -> Optional[Path
         import logging
         logging.getLogger(__name__).warning("sheet metal unfold failed: %s", exc)
         return None
+
+
+def render_unfold(dxf_path: Path, png_out: Path) -> dict:
+    """Convenience wrapper that imports aria_os.visual_qa.dxf_renderer and renders.
+
+    Bridges the unfold module to the reusable visual_qa renderer without
+    creating a hard coupling — the import is deferred until call time so
+    ``sheet_metal_unfold`` stays import-cheap for pipelines that don't
+    need PNG previews.
+
+    Returns the dict produced by ``render_dxf`` (``ok``, ``png_path``,
+    ``bbox``, ``layer_counts``, ``entity_total``). Never raises.
+    """
+    try:
+        from aria_os.visual_qa.dxf_renderer import render_dxf
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"visual_qa import failed: {exc}",
+            "png_path": None,
+        }
+    return render_dxf(Path(dxf_path), Path(png_out))
