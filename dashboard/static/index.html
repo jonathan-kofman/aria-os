@@ -450,6 +450,30 @@ window.THREE = THREE; window.STLLoader = STLLoader; window.OrbitControls = Orbit
       </div>
     </div>
 
+    <!-- Visual Verification Results -->
+    <div x-show="visualResult" style="padding:12px 16px;border-top:1px solid #21262d;flex-shrink:0;background:#0d1117">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <span style="font-size:11px;font-weight:600;color:#484f58;text-transform:uppercase;letter-spacing:.05em">Visual Verification</span>
+        <span x-show="visualResult?.passed" style="background:#1a3028;color:#56d364;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600">PASS</span>
+        <span x-show="visualResult && !visualResult.passed" style="background:#3d1c1c;color:#f85149;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600">FAIL</span>
+        <span x-show="visualResult?.confidence" style="font-size:11px;color:#8b949e" x-text="visualResult?.confidence + '% confidence'"></span>
+      </div>
+      <div x-show="renderImages.length > 0" style="display:flex;gap:8px;flex-wrap:wrap">
+        <template x-for="img in renderImages" :key="img.path">
+          <div style="cursor:pointer" @click="previewOpen=true; previewFile={name:img.name,path:img.path,kind:'png'}; loadPreview(img.path)">
+            <img :src="apiBase + '/api/file?path=' + encodeURIComponent(img.path)"
+                 :alt="img.name"
+                 style="height:80px;width:120px;object-fit:cover;border-radius:4px;border:1px solid #30363d"
+                 onerror="this.style.display='none'"/>
+            <div style="font-size:10px;color:#484f58;margin-top:2px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" x-text="img.name"></div>
+          </div>
+        </template>
+      </div>
+      <div x-show="visualResult && renderImages.length === 0" style="font-size:11px;color:#484f58">
+        No render images available. Run in agent mode to get visual verification renders.
+      </div>
+    </div>
+
   </div>
 
   <!-- RIGHT: Output files -->
@@ -620,6 +644,15 @@ const COMMANDS = [
       { id:'assemble', label:'Assemble', hint:'Multi-part assembly', hasFlags:false,
         placeholder:'e.g. motor mount: base plate, 2 side brackets, M6 bolts',
         examples:['motor mount assembly: base plate 100x80mm, two side brackets, 4 M6 bolts'] },
+      { id:'image-full', label:'Image\u2192CAD', hint:'Analyze a photo/screenshot and generate matching CAD geometry (vision AI \u2192 full pipeline)', hasFlags:false,
+        placeholder:'Path to image file (jpg/png) or URL',
+        examples:['outputs/site_photo.jpg','part_sketch.png'] },
+      { id:'assembly', label:'Assemble NL', hint:'Natural language multi-part assembly description (no config file needed)', hasFlags:false,
+        placeholder:'e.g. motor mount assembly: 80x60mm base, two side brackets, 4 M6 bolts, 30mm spacing',
+        examples:['motor mount: 80x60mm aluminum base plate, two 40x40mm side brackets, 4 M6 bolts, 30mm spacing'] },
+      { id:'terrain', label:'Terrain', hint:'Generate terrain mesh from natural language description', hasFlags:false,
+        placeholder:'e.g. 500x500m rolling hills with central valley, 10m resolution',
+        examples:['500x500m rolling hills with river valley 10m resolution','mountainous terrain 1km x 1km with ridgeline'] },
     ]
   },
   {
@@ -637,6 +670,12 @@ const COMMANDS = [
       { id:'material-study', label:'Materials', hint:'Material comparison — provide STEP path', hasFlags:false,
         placeholder:'outputs/cad/step/llm_bracket_m6_holes.step',
         examples:['outputs/cad/step/llm_bracket_m6_holes.step'] },
+      { id:'cem-advise', label:'CEM Advise', hint:'Physics advisory \u2014 get engineering recommendations without full simulation', hasFlags:false,
+        placeholder:'e.g. steel shaft 20mm diameter 500mm long under 50Nm torque',
+        examples:['ratchet ring 213mm OD 6061 aluminium under 2kN radial load','cam collar 80mm OD titanium 5kN axial'] },
+      { id:'material-study-all', label:'All Materials', hint:'Run material comparison across all known materials for the part', hasFlags:false,
+        placeholder:'(no input needed \u2014 uses last generated part)',
+        examples:[] },
     ]
   },
   {
@@ -651,6 +690,30 @@ const COMMANDS = [
       { id:'verify', label:'Verify', hint:'Check STL/STEP geometry', hasFlags:false,
         placeholder:'e.g. outputs/cad/stl/llm_bracket_m6_holes.stl',
         examples:['outputs/cad/stl/llm_bracket_m6_holes.stl','outputs/test_box_with_holes.stl'] },
+      { id:'review', label:'Review', hint:'Post-processing review \u2014 check drawings, outputs, and analysis for completeness', hasFlags:false,
+        placeholder:'e.g. outputs/cad/step/part.step',
+        examples:['outputs/cad/step/llm_bracket.step'] },
+      { id:'refine', label:'Refine', hint:'Refine an existing CadQuery script with natural language changes', hasFlags:false,
+        placeholder:'e.g. outputs/cad/cadquery/part.py add two M6 holes on the right side',
+        examples:['outputs/cad/cadquery/part.py  add two M6 holes on the right side','outputs/cad/cadquery/part.py  increase od from 100 to 120mm and add 6 fins'] },
+      { id:'print-scale', label:'Print Scale', hint:'Scale part for 3D printing (accounts for shrinkage and bed size)', hasFlags:false,
+        placeholder:'e.g. aria_bracket 1.02 (1.02 = 2% shrinkage correction)',
+        examples:['aria_bracket 1.02','aria_housing 1.015'] },
+    ]
+  },
+  {
+    group: 'Catalog',
+    cmds: [
+      { id:'catalog', label:'Browse', hint:'Browse the part catalog', hasFlags:false,
+        placeholder:'(no input needed)', examples:[] },
+      { id:'catalog-search', label:'Search', hint:'Search the part catalog by description', hasFlags:false,
+        placeholder:'e.g. bracket with bolt holes',
+        examples:['bracket with 4 bolt holes','housing with bore'] },
+      { id:'reconstruct', label:'Reconstruct', hint:'Reconstruct a CAD model from catalog entry', hasFlags:false,
+        placeholder:'Catalog ID', examples:[] },
+      { id:'scan', label:'Scan-to-CAD', hint:'Convert a mesh/point cloud scan to parametric CAD', hasFlags:false,
+        placeholder:'e.g. outputs/scan/part_mesh.stl',
+        examples:['outputs/scan/part_mesh.stl'] },
     ]
   },
   {
@@ -668,6 +731,18 @@ const COMMANDS = [
       { id:'modify', label:'Modify', hint:'Modify existing part script', hasFlags:false,
         placeholder:'e.g. outputs/cad/cadquery/part.py  add two M6 holes on the right side',
         examples:[] },
+      { id:'system', label:'System', hint:'Full system pipeline \u2014 design an interconnected system of parts from NL description', hasFlags:false,
+        placeholder:'e.g. winch system: motor, gearbox, drum, brake',
+        examples:['winch system: electric motor, 10:1 gearbox, 200mm drum, ratchet brake','conveyor: drive roller 150mm OD, idler rollers, tensioner, frame'] },
+      { id:'constrain', label:'Constrain', hint:'Constraint-based parametric design from a JSON config', hasFlags:false,
+        placeholder:'Path to constraint config JSON',
+        examples:[] },
+      { id:'ecad-to-enclosure', label:'ECAD\u2192Box', hint:'Auto-generate a mechanical enclosure from a KiCad PCB layout', hasFlags:false,
+        placeholder:'Path to KiCad project (.kicad_pcb)',
+        examples:[] },
+      { id:'optimize-and-regenerate', label:'Opt+Regen', hint:'Full optimization loop: optimize parameters then regenerate geometry', hasFlags:false,
+        placeholder:'e.g. minimize weight of bracket while keeping safety factor > 3',
+        examples:['minimize weight keep safety factor above 3','maximize stiffness within 100g mass budget'] },
     ]
   },
   {
@@ -771,6 +846,22 @@ function ariaApp() {
         fs = fs.filter(f => f.path.toLowerCase().includes(q) || f.name.toLowerCase().includes(q))
       }
       return fs.slice(0, 300)
+    },
+
+    get visualResult() {
+      const passLine = this.termLines.find(l => l.text && l.text.includes('[VISUAL] PASS'))
+      const failLine = this.termLines.find(l => l.text && l.text.includes('[VISUAL] FAIL'))
+      if (!passLine && !failLine) return null
+      const line = passLine || failLine
+      const confMatch = (line.text || '').match(/(\d+)%/)
+      const conf = confMatch ? parseInt(confMatch[1]) : null
+      return { passed: !!passLine, confidence: conf }
+    },
+
+    get renderImages() {
+      return this.outputFiles.filter(f =>
+        f.kind === 'png' && (f.path.includes('render') || f.path.includes('view'))
+      ).slice(0, 4)
     },
 
     async init() {

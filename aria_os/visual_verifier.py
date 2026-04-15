@@ -448,6 +448,54 @@ _FEATURE_KEYWORDS: list[tuple[str, str, str]] = [
     ("impeller",     "curved vane/blade features visible radiating from hub", "top projection"),
     ("blade",        "blade/airfoil cross-section profile visible",           "front projection"),
     ("vane",         "vane features visible radiating from center",           "top projection"),
+    # ARIA-specific parts
+    ("spool",        "flanged drum body visible with hub bore and two end flanges (front projection)", "front or side projection"),
+    ("drum",         "cylindrical drum body visible",                          "front projection"),
+    ("pulley",       "grooved sheave rim visible with central bore (top and front projection)", "top projection"),
+    ("cam collar",   "collar body visible with cross-hole or flat (top projection)", "top projection"),
+    ("brake drum",   "cylindrical drum with inner cavity visible (cross-section)", "cross-section"),
+    ("cam",          "cam profile / eccentric shape visible",                  "top projection"),
+    ("pawl",         "asymmetric lever/tooth profile visible",                 "front or side projection"),
+    ("catch",        "catch / latch body visible",                             "front projection"),
+    ("rope guide",   "guide channel / groove visible for rope path",           "front or side projection"),
+    ("spacer",       "cylindrical spacer with center bore visible",            "top projection"),
+    ("standoff",     "cylindrical standoff body with threaded bore visible",   "front or side projection"),
+    ("hex standoff", "hexagonal cross-section visible",                        "top projection"),
+    ("hex",          "hexagonal cross-section visible",                        "top projection"),
+    # Structural shapes
+    ("u-channel",    "U-shaped channel profile visible (two flanges and a web)", "front projection"),
+    ("u channel",    "U-shaped channel profile visible",                       "front projection"),
+    ("gusset",       "triangular gusset / corner brace profile visible",       "front projection"),
+    ("weld",         "weld bead / fillet weld profile visible",                "front or side projection"),
+    ("coupling",     "shaft coupling body with two bores visible",             "front or side projection"),
+    ("clamp",        "clamp body with split and fastener holes visible",       "top projection"),
+    # Gear types
+    ("involute",     "involute tooth profile visible around circumference",    "top projection"),
+    ("sprocket",     "sprocket teeth visible around circumference",            "top projection"),
+    ("pinion",       "small gear/pinion teeth visible",                        "top projection"),
+    # Electronics / enclosures
+    ("enclosure",    "hollow box / enclosure visible with walls and opening",  "front or side projection"),
+    ("phone case",   "rectangular body with screen opening and side cutouts",  "top projection"),
+    ("phone",        "rectangular slab with cutouts visible",                  "top projection"),
+    ("lid",          "flat lid panel visible, possibly with tabs or screws",   "top projection"),
+    # Aerospace / propulsion
+    ("lre",          "rocket nozzle convergent-divergent profile visible",     "front projection"),
+    ("rocket",       "nozzle bell / throat profile visible",                   "front projection"),
+    ("turbine",      "turbine blade cascade or disc visible",                  "front or side projection"),
+    ("propeller",    "twisted blade profile visible",                          "front or side projection"),
+    ("fan",          "fan blades visible radiating from hub",                  "top projection"),
+    # Lattice / infill
+    ("lattice",      "internal lattice / open-cell structure visible",         "cross-section"),
+    ("gyroid",       "gyroid / TPMS surface pattern visible",                  "cross-section"),
+    # Connectors / fasteners
+    ("snap",         "snap / click-fit hook feature visible",                  "front or side projection"),
+    ("snap hook",    "cantilever hook / barb feature visible",                 "front or side projection"),
+    ("spring clip",  "thin spring-clip leaf visible",                          "front or side projection"),
+    ("hinge",        "hinge knuckle / barrel visible",                         "front or side projection"),
+    # Civil / structural
+    ("bracket",      "bracket body visible with mounting surfaces",            "front projection"),
+    ("angle",        "angled/corner geometry visible",                         "front projection"),
+    ("plate",        "flat plate visible",                                     "top projection"),
 ]
 
 

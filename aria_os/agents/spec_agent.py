@@ -148,7 +148,7 @@ class SpecAgent(BaseAgent):
 
 
 def _extract_json(text: str) -> str | None:
-    """Extract first JSON object from text."""
+    """Extract first JSON object from text (handles one level of nesting)."""
     import re
-    match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+    match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
     return match.group(0) if match else None

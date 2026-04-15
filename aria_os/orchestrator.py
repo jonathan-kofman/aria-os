@@ -1506,9 +1506,10 @@ def run_image_fast(
     """Minimal pipeline for image-to-CAD: plan -> route -> generate -> export -> preview.
 
     Skips: research, agent loop, DFM analysis, quote, CAM toolpath,
-    GD&T drawing, CEM physics check, FEA/CFD, visual verification.
+    GD&T drawing, CEM physics check, FEA/CFD.
 
-    This keeps image-to-CAD under ~60s instead of 300+.
+    Visual verification runs after geometry is produced (adds ~10-30s).
+    This keeps image-to-CAD under ~90s instead of 300+.
     """
     if repo_root is None:
         repo_root = Path(__file__).resolve().parent.parent
@@ -1685,6 +1686,24 @@ def run_image_fast(
                 print(f"[IMAGE-FAST] STL repaired (was not watertight)")
         except Exception as _qe:
             print(f"[IMAGE-FAST] Quality check skipped: {_qe}")
+
+    # --- 7b. Visual verification (runs for all image-to-CAD outputs) ---
+    if _stl_exists:
+        try:
+            from .visual_verifier import verify_visual
+            _vis_result = verify_visual(
+                str(step_path) if _step_exists else "",
+                str(stl_path),
+                goal,
+                _spec if _spec else {},
+                repo_root=repo_root,
+            )
+            session["visual_verification"] = _vis_result
+            _vis_conf = _vis_result.get("confidence", 0.0)
+            _vis_status = "PASS" if _vis_result.get("verified") is True else "FAIL"
+            print(f"[IMAGE-FAST] Visual verification: {_vis_status} ({_vis_conf:.0%})")
+        except Exception as _ve:
+            print(f"[IMAGE-FAST] Visual verification skipped: {_ve}")
 
     # --- 8. Preview ---
     if preview:
