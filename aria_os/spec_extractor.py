@@ -654,6 +654,23 @@ def extract_spec(description: str) -> dict[str, Any]:
     if angle:
         spec["angle_deg"] = angle
 
+    # --- Gusset / corner brace legs ---
+    # "80mm legs", "80mm leg" → equal legs
+    # "80x60mm" already captured by box2 notation, but gusset template uses leg_a/b keys
+    if spec.get("part_type") in ("gusset",):
+        _leg_equal = _find([
+            r"(\d+(?:\.\d+)?)\s*mm\s+legs?",
+            r"legs?\s*[=:]\s*(\d+(?:\.\d+)?)\s*mm",
+        ])
+        if _leg_equal:
+            spec.setdefault("leg_a_mm", _leg_equal)
+            spec.setdefault("leg_b_mm", _leg_equal)
+        # If box2 notation gave width/depth, map those to leg_a/b as well
+        if "width_mm" in spec and "leg_a_mm" not in spec:
+            spec["leg_a_mm"] = spec["width_mm"]
+        if "depth_mm" in spec and "leg_b_mm" not in spec:
+            spec["leg_b_mm"] = spec["depth_mm"]
+
     return spec
 
 

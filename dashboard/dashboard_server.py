@@ -477,10 +477,17 @@ def _build_argv(req: RunRequest) -> list[str]:
             raise ValueError("goal is required for autocad")
         return [*_python_cmd(), RUNNER, "--autocad", goal]
 
-    if cmd in ("assemble", "assembly"):
+    if cmd == "assemble":
+        # --assemble <config.json>  (config file path required)
         if not goal:
-            raise ValueError("goal is required for assemble")
+            raise ValueError("goal (config.json path) is required for assemble")
         return [*_python_cmd(), RUNNER, "--assemble", goal]
+
+    if cmd == "assembly":
+        # --assembly "<natural-language description>"
+        if not goal:
+            raise ValueError("goal (NL description) is required for assembly")
+        return [*_python_cmd(), RUNNER, "--assembly", goal]
 
     if cmd in ("optimize",):
         if not goal:
@@ -532,6 +539,116 @@ def _build_argv(req: RunRequest) -> list[str]:
         if not goal:
             raise ValueError("goal is required for system")
         return [*_python_cmd(), RUNNER, "--system", goal]
+
+    # Specialized flows that the verification agent found unmapped.
+    # Each was being silently passed as a bare goal to run_aria_os.py,
+    # which routed it through the default CAD pipeline instead of the
+    # specialized handler. Adding explicit mappings here is the
+    # highest-impact fix from the 2026-04-15 verification round.
+
+    if cmd == "terrain":
+        if not goal:
+            raise ValueError("goal (NL description) is required for terrain")
+        return [*_python_cmd(), RUNNER, "--terrain", goal]
+
+    if cmd == "scan":
+        if not goal:
+            raise ValueError("goal (mesh file path) is required for scan")
+        return [*_python_cmd(), RUNNER, "--scan", goal] + flags
+
+    if cmd in ("catalog-search", "catalog_search"):
+        if not goal:
+            raise ValueError("goal (query) is required for catalog-search")
+        return [*_python_cmd(), RUNNER, "--catalog-search", goal]
+
+    if cmd == "catalog":
+        # --catalog [--topology X] [--search Y] [--tags Z]
+        return [*_python_cmd(), RUNNER, "--catalog"] + flags
+
+    if cmd == "scan-dir":
+        if not goal:
+            raise ValueError("goal (directory path) is required for scan-dir")
+        return [*_python_cmd(), RUNNER, "--scan-dir", goal] + flags
+
+    if cmd == "reconstruct":
+        if not goal:
+            raise ValueError("goal (catalog id) is required for reconstruct")
+        return [*_python_cmd(), RUNNER, "--reconstruct", goal]
+
+    if cmd == "image-full":
+        if not goal:
+            raise ValueError("goal (image path) is required for image-full")
+        return [*_python_cmd(), RUNNER, "--image-full", goal] + flags
+
+    if cmd == "refine":
+        if not goal:
+            raise ValueError("goal (script path + refinement) is required for refine")
+        parts = goal.split(None, 1)
+        if len(parts) < 2:
+            raise ValueError("refine needs: <script.py> <refinement description>")
+        return [*_python_cmd(), RUNNER, "--refine", parts[0], parts[1]]
+
+    if cmd == "review":
+        if not goal:
+            raise ValueError("goal (file path) is required for review")
+        return [*_python_cmd(), RUNNER, "--review", goal] + flags
+
+    if cmd == "review-view":
+        return [*_python_cmd(), RUNNER, "--review-view"] + flags
+
+    if cmd == "scenario":
+        if not goal:
+            raise ValueError("goal (NL situation) is required for scenario")
+        return [*_python_cmd(), RUNNER, "--scenario", goal] + flags
+
+    if cmd == "scenario-dry-run":
+        if not goal:
+            raise ValueError("goal is required for scenario-dry-run")
+        return [*_python_cmd(), RUNNER, "--scenario-dry-run", goal]
+
+    if cmd == "system-dry-run":
+        if not goal:
+            raise ValueError("goal is required for system-dry-run")
+        return [*_python_cmd(), RUNNER, "--system-dry-run", goal]
+
+    if cmd == "material-study-all":
+        return [*_python_cmd(), RUNNER, "--material-study-all"] + flags
+
+    if cmd == "ecad-to-enclosure":
+        if not goal:
+            raise ValueError("goal (kicad project path) is required for ecad-to-enclosure")
+        return [*_python_cmd(), RUNNER, "--ecad-to-enclosure", goal] + flags
+
+    if cmd == "ecad-variants":
+        if not goal:
+            raise ValueError("goal (kicad project path) is required for ecad-variants")
+        return [*_python_cmd(), RUNNER, "--ecad-variants", goal]
+
+    if cmd == "constrain":
+        if not goal:
+            raise ValueError("goal (config.json) is required for constrain")
+        return [*_python_cmd(), RUNNER, "--constrain", goal] + flags
+
+    if cmd == "print-scale":
+        if not goal:
+            raise ValueError("goal (part stub) is required for print-scale")
+        return [*_python_cmd(), RUNNER, "--print-scale", goal] + flags
+
+    if cmd == "optimize-and-regenerate":
+        if not goal:
+            raise ValueError("goal is required for optimize-and-regenerate")
+        return [*_python_cmd(), RUNNER, "--optimize-and-regenerate", goal] + flags
+
+    if cmd == "lattice-test":
+        return [*_python_cmd(), RUNNER, "--lattice-test"] + flags
+
+    if cmd == "generate-and-assemble":
+        if not goal:
+            raise ValueError("goal is required for generate-and-assemble")
+        return [*_python_cmd(), RUNNER, "--generate-and-assemble", goal] + flags
+
+    if cmd == "check":
+        return [*_python_cmd(), RUNNER, "--check"]
 
     # Fallback: treat as raw goal
     if goal:

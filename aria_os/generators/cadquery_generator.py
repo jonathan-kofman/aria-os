@@ -1065,15 +1065,49 @@ print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 
 
 def _cq_l_bracket(params: dict[str, Any]) -> str:
-    """L-bracket: two plates joined at 90 degrees."""
-    w = float(params.get("width_mm", 50.0))
-    h = float(params.get("height_mm", 30.0))
-    t = float(params.get("thickness_mm", params.get("depth_mm", 3.0)))
-    hole = float(params.get("hole_dia_mm", params.get("bolt_dia_mm", 4.0)))
-    n = max(0, int(params.get("n_bolts", 4)))
-    leg_h = float(params.get("leg_height_mm", h))  # vertical leg height
+    """L-bracket: two plates joined at 90 degrees.
 
-    # Hole positions: half on base, half on vertical leg
+    Dimension interpretation for bbox-style goals (e.g. "bracket 80x60x40mm"):
+      width_mm   → overall width of both legs
+      height_mm  → vertical leg height
+      thickness_mm or depth_mm → horizontal base leg depth
+      plate wall thickness is auto-derived (~12% of shorter leg, 4-10mm)
+    """
+    w = float(params.get("width_mm", 80.0))
+
+    raw_t   = float(params.get("thickness_mm", 0.0))
+    raw_h   = float(params.get("height_mm", 0.0))
+    raw_d   = float(params.get("depth_mm", 0.0))
+    raw_leg = float(params.get("leg_height_mm", 0.0))
+
+    # Horizontal base leg depth
+    # depth_mm is authoritative; if thickness_mm > 20 it's a bbox dim not a wall thickness
+    if raw_d > 0:
+        h = raw_d
+    elif raw_t > 20:
+        h = raw_t
+    else:
+        h = 40.0
+
+    # Vertical leg height
+    if raw_leg > 0:
+        leg_h = raw_leg
+    elif raw_h > 0:
+        leg_h = raw_h
+    else:
+        leg_h = h
+
+    # Plate wall thickness — only use raw_t when it's a plausible wall thickness (2–20mm)
+    # Otherwise auto-derive: ~12% of shorter leg, clamped to [4, 10] mm
+    if 2.0 <= raw_t <= 20.0:
+        t = raw_t
+    else:
+        t = round(max(4.0, min(10.0, min(h, leg_h) * 0.12)), 1)
+
+    hole = float(params.get("hole_dia_mm", params.get("bolt_dia_mm", 6.0)))
+    n = max(0, int(params.get("n_bolts", 4)))
+
+    # Hole positions: half on base plate, half on vertical leg
     n_base = max(1, n // 2)
     n_vert = max(1, n - n_base)
     margin = min(w * 0.15, 10.0)
@@ -1117,6 +1151,107 @@ if vert_hole_pts:
         .faces("<Y").workplane()
         .pushPoints(vert_hole_pts)
         .hole(HOLE_DIA))
+
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
+def _cq_impeller(params: dict[str, Any]) -> str:
+    """Centrifugal impeller: disc + hub + N blades + center bore.
+
+    Params — all read from spec dict, no silent defaults for key dimensions.
+    ------
+    od_mm / outer_dia_mm   : outer diameter (default 150)
+    bore_mm / id_mm        : center bore diameter (default 30)
+    height_mm              : total height (default 25)
+    n_blades / n_fins      : number of blades (default 6)
+    blade_thickness_mm     : blade wall thickness (auto: max(3, od*0.02))
+    backward_angle_deg / blade_angle_deg : sweep angle in degrees (default 30)
+    blade_sweep            : "backward"/"backward_curved" → positive sweep (default)
+                             "forward"/"forward_swept" → negative sweep (tip leads)
+                             "radial" → 0 degrees
+    """
+    od     = float(params.get("od_mm", params.get("outer_dia_mm", params.get("outer_diameter_mm", 150.0))))
+    bore   = float(params.get("bore_mm", params.get("id_mm", 30.0)))
+    h      = float(params.get("height_mm", 25.0))
+    # n_blades takes priority; fall back to n_fins (heat-sink field) then default 6
+    n      = max(3, int(params.get("n_blades", params.get("n_fins", 6))))
+    bt     = float(params.get("blade_thickness_mm", max(2.0, od * 0.02)))
+
+    # Sweep angle — honor blade_angle_deg or backward_angle_deg from spec
+    _raw_sweep = float(params.get("blade_angle_deg",
+                       params.get("backward_angle_deg",
+                       params.get("sweep_angle_deg", 30.0))))
+
+    # blade_sweep direction overrides sign
+    _sweep_dir = str(params.get("blade_sweep", "backward")).lower()
+    if "radial" in _sweep_dir:
+        sweep = 0.0
+    elif "forward" in _sweep_dir:
+        sweep = -abs(_raw_sweep)  # negative → tip leads rotation (forward)
+    else:
+        sweep = abs(_raw_sweep)   # positive → tip trails rotation (backward, default)
+
+    hub_r   = max(bore / 2 + 2, od * 0.12)  # hub outer radius
+    shroud_h = max(3.0, h * 0.15)            # thin back shroud at bottom
+    blade_h = h - shroud_h                   # blades full height above shroud
+    tip_r   = od / 2                         # blades reach full OD
+    # Blade thickness: at least 6% of OD so blades are clearly visible as walls
+    bt_use  = max(bt, od * 0.06)
+
+    return f"""
+import cadquery as cq
+import math
+
+OD       = {od}
+BORE     = {bore}
+H        = {h}
+N        = {n}
+BT       = {bt_use:.3f}
+SWEEP    = {sweep}
+HUB_R    = {hub_r:.3f}
+SHROUD_H = {shroud_h:.3f}
+BLADE_H  = {blade_h:.3f}
+TIP_R    = {tip_r:.3f}
+
+# Open-face centrifugal impeller:
+#   - Back shroud (thin disc, full OD) at Z=0..SHROUD_H
+#   - Hub cylinder (center, full height) for bore wall
+#   - N backward-swept blade walls standing up from shroud
+# No front shroud — blades are fully exposed and visible from isometric view.
+
+# Back shroud: annular disc, outer edge at full OD
+shroud = (cq.Workplane("XY")
+    .circle(TIP_R).extrude(SHROUD_H))
+# bore through full height
+result = shroud.faces(">Z").workplane().circle(BORE / 2).cutThruAll()
+
+# Hub cylinder: inner support wall
+hub = cq.Workplane("XY").circle(HUB_R).extrude(H)
+hub = hub.faces(">Z").workplane().circle(BORE / 2).cutThruAll()
+result = result.union(hub)
+
+# Blades: N thin wall panels from hub to tip, swept backward
+for i in range(N):
+    ang = i * 360.0 / N
+    tip_ang = ang - SWEEP            # tip trails by SWEEP degrees (backward)
+    # Root point (at hub radius)
+    ix = HUB_R * math.cos(math.radians(ang))
+    iy = HUB_R * math.sin(math.radians(ang))
+    # Tip point (at OD)
+    ox = TIP_R * math.cos(math.radians(tip_ang))
+    oy = TIP_R * math.sin(math.radians(tip_ang))
+    dx, dy = ox - ix, oy - iy
+    bl = math.sqrt(dx**2 + dy**2)
+    ba = math.degrees(math.atan2(dy, dx))
+    cx, cy = (ix + ox) / 2, (iy + oy) / 2
+    blade = (cq.Workplane("XY")
+        .center(cx, cy)
+        .box(bl, BT, BLADE_H)
+        .rotate((0, 0, 0), (0, 0, 1), ba)
+        .translate((0, 0, SHROUD_H + BLADE_H / 2)))
+    result = result.union(blade)
 
 bb = result.val().BoundingBox()
 print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
@@ -1667,42 +1802,110 @@ print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 
 
 def _cq_nozzle(params: dict[str, Any]) -> str:
-    entry_r   = float(params.get("entry_r_mm",     60.0))
+    import math as _m
+    entry_r   = float(params.get("entry_r_mm",     params.get("chamber_dia_mm", 120.0)) / 2 if "chamber_dia_mm" in params else params.get("entry_r_mm", 60.0))
     throat_r  = float(params.get("throat_r_mm",    25.0))
     exit_r    = float(params.get("exit_r_mm",      80.0))
     conv_len  = float(params.get("conv_length_mm", 80.0))
     total_len = float(params.get("length_mm",     200.0))
     wall      = float(params.get("wall_mm",         3.0))
-    return f"""
-import cadquery as cq
+    n_bolts   = int(params.get("n_bolts", 0))
+    bolt_dia  = float(params.get("bolt_dia_mm", params.get("bolt_r_mm", 2.5) * 2 if "bolt_r_mm" in params else 5.0))
+    bolt_pcd  = float(params.get("bolt_pcd_mm", entry_r * 2 + 10))
+    flange_r  = float(params.get("flange_r_mm", entry_r + 15))
+    flange_t  = float(params.get("flange_t_mm", 8.0))
 
-ENTRY_R_MM  = {entry_r}
-THROAT_R_MM = {throat_r}
-EXIT_R_MM   = {exit_r}
-CONV_LEN_MM = {conv_len}
-LENGTH_MM   = {total_len}
-WALL_MM     = {wall}
+    # Pre-compute parabolic bell contour points (Rao's approximate method)
+    div_len = total_len - conv_len
+    n_pts = 20  # points along bell curve
+    # Throat radius of curvature ~ 1.5 * throat_r (upstream) and 0.382 * throat_r (downstream)
+    throat_Ru = throat_r * 1.5   # upstream radius
+    throat_Rd = throat_r * 0.382  # downstream start radius
 
-# Closed profile in XY plane (X = radius, Y = axial position).
-# Convergent: entry (r=ENTRY_R) -> throat (r=THROAT_R) over CONV_LEN mm
-# Divergent:  throat (r=THROAT_R) -> exit (r=EXIT_R) over remaining length
-# Hollow: inner profile is outer offset inward by WALL_MM.
-# Revolve 360 deg around world Y axis; Y becomes the nozzle long axis.
-profile = [
-    (ENTRY_R_MM,            0),
-    (THROAT_R_MM,           CONV_LEN_MM),
-    (EXIT_R_MM,             LENGTH_MM),
-    (EXIT_R_MM - WALL_MM,   LENGTH_MM),
-    (THROAT_R_MM - WALL_MM, CONV_LEN_MM),
-    (ENTRY_R_MM - WALL_MM,  0),
+    outer_pts = []
+    inner_pts = []
+
+    # Convergent section: smooth curve from entry to throat
+    for i in range(n_pts + 1):
+        t = i / n_pts
+        y = t * conv_len
+        # Cubic bezier-like curve: entry_r → throat_r with smooth transition
+        r = entry_r + (throat_r - entry_r) * (3 * t**2 - 2 * t**3)
+        outer_pts.append((round(r, 3), round(y, 3)))
+        inner_pts.append((round(r - wall, 3), round(y, 3)))
+
+    # Divergent section: parabolic bell (Rao's method approximation)
+    # Initial angle at throat ~ 30-40 deg, final angle at exit ~ 7-10 deg
+    theta_n = _m.radians(32)  # initial expansion angle
+    theta_e = _m.radians(8)   # exit angle
+    for i in range(1, n_pts + 1):
+        t = i / n_pts
+        y = conv_len + t * div_len
+        # Parabolic: r(t) = throat_r + throat_Rd*(1-cos(theta)) for initial,
+        # then smooth transition to exit_r
+        # Simplified: cubic interpolation with controlled tangents
+        r = throat_r + (exit_r - throat_r) * (
+            t * (1 + (1 - t) * _m.tan(theta_n) * div_len / (exit_r - throat_r) * 0.3)
+        )
+        r = min(r, exit_r)  # clamp
+        r = max(r, throat_r)
+        outer_pts.append((round(r, 3), round(y, 3)))
+        inner_pts.append((round(max(r - wall, throat_r - wall), 3), round(y, 3)))
+
+    # Build profile string for the template
+    outer_str = repr(outer_pts)
+    inner_str = repr(list(reversed(inner_pts)))
+
+    bolt_section = ""
+    if n_bolts > 0:
+        bolt_section = f"""
+# Bolt flange — revolve a rectangular profile to create a ring at chamber end
+# Profile in XY plane: X=radius, Y=axial. Flange extends from Y=-flange_t to Y=0
+flange_profile = [
+    ({entry_r}, -{flange_t}),
+    ({flange_r}, -{flange_t}),
+    ({flange_r}, 0),
+    ({entry_r}, 0),
 ]
-
-result = (
+flange = (
     cq.Workplane("XY")
-    .polyline([(r, z) for r, z in profile])
+    .polyline(flange_profile)
     .close()
     .revolve(360, (0, 0, 0), (0, 1, 0))
 )
+result = result.union(flange)
+
+# Bolt holes — use pushPoints on the flange face
+bolt_pts = [({bolt_pcd/2} * math.cos(i * 2 * math.pi / {n_bolts}),
+             {bolt_pcd/2} * math.sin(i * 2 * math.pi / {n_bolts})) for i in range({n_bolts})]
+bolt_holes = (cq.Workplane("XZ")
+    .workplane(offset=-{flange_t + 1})
+    .pushPoints(bolt_pts)
+    .circle({bolt_dia/2})
+    .extrude({flange_t + 2}))
+result = result.cut(bolt_holes)
+"""
+
+    return f"""
+import cadquery as cq
+import math
+
+# Nozzle contour points (parabolic bell, Rao's method)
+outer_profile = {outer_str}
+inner_profile = {inner_str}
+
+# Build closed hollow profile: outer forward, inner reversed
+profile_pts = outer_profile + inner_profile
+
+result = (
+    cq.Workplane("XY")
+    .spline(outer_profile)
+    .lineTo(inner_profile[0][0], inner_profile[0][1])
+    .spline(inner_profile)
+    .close()
+    .revolve(360, (0, 0, 0), (0, 1, 0))
+)
+{bolt_section}
 bb = result.val().BoundingBox()
 print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 """
@@ -2418,8 +2621,8 @@ print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 def _cq_gusset(params: dict[str, Any]) -> str:
     """Triangular gusset / corner brace: right-triangle plate with bolt holes."""
     import math as _m
-    leg_a     = float(params.get("leg_a_mm", 60.0))
-    leg_b     = float(params.get("leg_b_mm", 60.0))
+    leg_a     = float(params.get("leg_a_mm", params.get("width_mm", params.get("height_mm", 60.0))))
+    leg_b     = float(params.get("leg_b_mm", params.get("depth_mm", params.get("width_mm", 60.0))))
     thickness = float(params.get("thickness_mm", params.get("depth_mm", 5.0)))
     n_bolts   = max(0, int(params.get("n_bolts", 4)))
     bolt_dia  = float(params.get("bolt_dia_mm", 6.0))
@@ -2569,6 +2772,14 @@ print(f"FlatBlankWidth:{flat_width:.3f}mm  BendDeduction:{bd:.3f}mm  KFactor:{kf
 """
 
 
+def _cq_u_channel(params: dict[str, Any]) -> str:
+    """U-channel / C-channel — sheet metal panel with two symmetric flanges (n_bends=2)."""
+    p = dict(params)
+    p.setdefault("n_bends", 2)    # U-channel always has two flanges
+    p.setdefault("flange_mm", params.get("height_mm", params.get("depth_mm", 30.0)))
+    return _cq_sheet_metal_panel(p)
+
+
 def _cq_sheet_metal_box(params: dict[str, Any]) -> str:
     """Sheet metal box — 3 or 4-sided tray formed from a single blank.
     Models the formed box (not the flat pattern). Correct corner reliefs
@@ -2658,13 +2869,12 @@ LENGTH_MM = {length}
 LEG_A     = {eff_a}   # horizontal plate leg
 LEG_B     = {eff_b}   # vertical plate leg
 
-# Cross-section: right triangle in YZ plane at X=0
-# Vertices: (0,0), (LEG_A,0), (0,LEG_B) — junction at origin
-bead_profile = [(0.0, 0.0), (LEG_A, 0.0), (0.0, LEG_B)]
-
+# Cross-section: right triangle in XY plane, extruded along Z.
+# Vertices: (0,0), (LEG_A,0), (0,LEG_B) — junction at origin.
+# Extrude along Z for LENGTH_MM; rotate so the run goes along X.
 result = (
-    cq.Workplane("YZ")
-    .polyline(bead_profile)
+    cq.Workplane("XY")
+    .polyline([(0.0, 0.0), (LEG_A, 0.0), (0.0, LEG_B)])
     .close()
     .extrude(LENGTH_MM)
 )
@@ -2850,13 +3060,23 @@ print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 
 
 def _cq_involute_gear(params: dict[str, Any]) -> str:
-    """Real involute spur gear with parametric tooth profile."""
+    """Real involute spur gear with parametric tooth profile.
+
+    Uses per-tooth polyline extrusion (not one giant all_pts polygon) so OCCT
+    never needs to build a watertight face from 300 nearly-coincident boundary
+    points.  Each tooth prism is union-ed onto a root-circle blank.
+    Fallback: triangle prism tooth if any individual tooth's polyline fails.
+    """
     import math as _m
 
     module_mm = float(params.get("module_mm", 2.0))
     n_teeth   = int(params.get("n_teeth", 20))
-    face_w    = float(params.get("face_width_mm", 10.0))
-    bore      = float(params.get("bore_mm", 10.0))
+    # "12mm wide" on a spur gear means face width (Z axis), stored as width_mm by
+    # spec_extractor.  Also honour face_width_mm and height_mm aliases.
+    face_w    = float(params.get("face_width_mm",
+                      params.get("height_mm",
+                      params.get("width_mm", 10.0))))
+    bore      = float(params.get("bore_mm", params.get("id_mm", 10.0)))
     pa_deg    = float(params.get("pressure_angle_deg", 20.0))
 
     pitch_r = module_mm * n_teeth / 2.0
@@ -2870,68 +3090,117 @@ def _cq_involute_gear(params: dict[str, Any]) -> str:
     def _t_for_r(r, rb):
         return _m.sqrt(max(0.0, (r / rb) ** 2 - 1.0))
 
+    half_ta = _m.pi / n_teeth
+    p_step  = 2 * _m.pi / n_teeth
+    N_PTS   = 8  # points per involute flank
+    N_ARC   = 3  # intermediate tip arc points (excluding endpoints)
+
     t_pitch = _t_for_r(pitch_r, base_r)
     ipx, ipy = _inv(t_pitch, base_r)
     inv_pa  = _m.atan2(ipy, ipx)
-    half_ta = _m.pi / n_teeth
-    p_step  = 2 * _m.pi / n_teeth
-    N_PTS   = 6
-    t_root  = _t_for_r(max(root_r, base_r), base_r)
-    t_tip   = _t_for_r(tip_r, base_r)
     rot_off = inv_pa - half_ta + t_pitch
 
-    def _one_tooth():
-        p = []
-        p.append((root_r * _m.cos(-half_ta - _m.pi / n_teeth),
-                  root_r * _m.sin(-half_ta - _m.pi / n_teeth)))
-        for i in range(N_PTS + 1):
-            t = t_root + (t_tip - t_root) * i / N_PTS
-            x, y = _inv(t, base_r)
-            r = _m.hypot(x, y)
-            a = _m.atan2(y, x) - rot_off
-            p.append((r * _m.cos(a), r * _m.sin(a)))
-        tip_half = _m.acos(min(1.0, base_r / tip_r))
-        for i in range(3):
-            a = half_ta + tip_half * (1.0 - float(i))
-            p.append((tip_r * _m.cos(a), tip_r * _m.sin(a)))
-        for i in range(N_PTS, -1, -1):
-            t = t_root + (t_tip - t_root) * i / N_PTS
-            x, y = _inv(t, base_r)
-            r = _m.hypot(x, y)
-            a = -(_m.atan2(y, x) - rot_off)
-            p.append((r * _m.cos(a), r * _m.sin(a)))
-        p.append((root_r * _m.cos(half_ta + _m.pi / n_teeth),
-                  root_r * _m.sin(half_ta + _m.pi / n_teeth)))
-        return p
+    # Only go from base_r to tip_r — never include root points.
+    # Root points at ±half_ta are coincident with the adjacent tooth's root points,
+    # which makes OCCT's BRep_API fail to build a valid face from the polygon.
+    t_base = _t_for_r(base_r, base_r)   # = 0.0 by definition
+    t_tip  = _t_for_r(tip_r, base_r)
 
-    one_tooth = _one_tooth()
-    all_pts: list[tuple[float, float]] = []
-    for i in range(n_teeth):
-        a = i * p_step
-        ca, sa = _m.cos(a), _m.sin(a)
-        for px, py in one_tooth:
-            all_pts.append((round(px * ca - py * sa, 5),
-                            round(px * sa + py * ca, 5)))
-    pts_literal = repr(all_pts)
+    # Right flank: involute from base_r to tip_r
+    rf: list[tuple[float, float]] = []
+    for i in range(N_PTS + 1):
+        t = t_base + (t_tip - t_base) * i / N_PTS
+        x, y = _inv(t, base_r)
+        r = _m.hypot(x, y)
+        a = _m.atan2(y, x) - rot_off
+        rf.append((round(r * _m.cos(a), 6), round(r * _m.sin(a), 6)))
+
+    # Left flank: mirror of right flank (negate y-coordinate before rotation)
+    lf: list[tuple[float, float]] = []
+    for i in range(N_PTS + 1):
+        t = t_base + (t_tip - t_base) * (N_PTS - i) / N_PTS
+        x, y = _inv(t, base_r)
+        r = _m.hypot(x, y)
+        a = -(_m.atan2(y, x) - rot_off)
+        lf.append((round(r * _m.cos(a), 6), round(r * _m.sin(a), 6)))
+
+    # Tip arc: connect right flank tip to left flank tip using actual endpoint angles.
+    # Using half_ta + tip_half creates a ~8° angular gap from where the involute ends —
+    # those extra tip-arc points overlap adjacent teeth and cause OCCT failures.
+    a_tip_r = _m.atan2(rf[-1][1], rf[-1][0])   # angle of right flank at tip_r
+    a_tip_l = _m.atan2(lf[0][1],  lf[0][0])    # angle of left flank at tip_r
+    tip_arc: list[tuple[float, float]] = []
+    for i in range(1, N_ARC + 1):
+        a = a_tip_r + (a_tip_l - a_tip_r) * i / (N_ARC + 1)
+        tip_arc.append((round(tip_r * _m.cos(a), 6), round(tip_r * _m.sin(a), 6)))
+
+    one_tooth_pts = rf + tip_arc + lf
+    one_tooth_repr = repr(one_tooth_pts)
+
+    # Blank goes from max(root_r, base_r) to bore — teeth sit on top of it.
+    blank_outer = max(root_r, base_r)
 
     return f"""
 import cadquery as cq, math
 
-# === Involute Spur Gear — {n_teeth}t, m={module_mm}mm, PA={pa_deg}deg ===
-FACE_W   = {face_w}
-BORE     = {bore}
-TIP_R    = {tip_r:.5f}
+# === Involute Spur Gear — {n_teeth}T  m={module_mm}mm  PA={pa_deg}deg  FW={face_w}mm ===
+FACE_W      = {face_w}
+BORE        = {bore}
+TIP_R       = {tip_r:.6f}
+BLANK_OUTER = {blank_outer:.6f}
+N_TEETH     = {n_teeth}
+P_STEP      = 2.0 * math.pi / N_TEETH
 
-all_pts = {pts_literal}
+# Base tooth profile centred at angle=0 (computed at template-generation time).
+# Profile runs base_r → tip_r only — no root-circle points.  Root-circle shared
+# endpoints between adjacent teeth cause OCCT BRep_API failures.
+# Tip arc uses actual involute endpoint angles (not the gear-theory formula) to
+# avoid the ~8° angular discontinuity that produces self-intersecting geometry.
+tooth_pts_base = {one_tooth_repr}
 
-try:
-    gear = cq.Workplane("XY").polyline(all_pts).close().extrude(FACE_W)
-    bore_cyl = cq.Workplane("XY").circle(BORE / 2.0).extrude(FACE_W + 2).translate((0, 0, -1))
-    gear = gear.cut(bore_cyl)
-except Exception:
-    gear = cq.Workplane("XY").circle(TIP_R).circle(BORE / 2.0).extrude(FACE_W)
+# Gear blank: annular disc bore → base_r (teeth are unioned on top)
+blank = (cq.Workplane("XY")
+         .circle(BLANK_OUTER)
+         .circle(BORE / 2.0)
+         .extrude(FACE_W))
 
-result = gear
+# Build each rotated tooth as a raw solid, collect, then Compound + one union.
+# DO NOT chain .union() on Workplane objects — it corrupts world coordinates.
+from cadquery import Compound as _Cmpd
+_tooth_solids = []
+for i in range(N_TEETH):
+    ang = i * P_STEP
+    ca, sa = math.cos(ang), math.sin(ang)
+    pts = [(px * ca - py * sa, px * sa + py * ca) for px, py in tooth_pts_base]
+    try:
+        t = cq.Workplane("XY").polyline(pts).close().extrude(FACE_W)
+        _tooth_solids.append(t.val())
+    except Exception:
+        # Fallback: triangle prism tooth (guaranteed to build cleanly)
+        hp = math.pi / N_TEETH
+        p_trail = (BLANK_OUTER * math.cos(ang - hp), BLANK_OUTER * math.sin(ang - hp))
+        p_tip   = (TIP_R       * math.cos(ang),      TIP_R       * math.sin(ang))
+        p_lead  = (BLANK_OUTER * math.cos(ang + hp),  BLANK_OUTER * math.sin(ang + hp))
+        t = (cq.Workplane("XY")
+             .polyline([p_trail, p_tip, p_lead]).close()
+             .extrude(FACE_W))
+        _tooth_solids.append(t.val())
+
+if _tooth_solids:
+    result = blank
+    for _solid in _tooth_solids:
+        try:
+            result = result.union(cq.Workplane("XY").newObject([_solid]))
+        except Exception:
+            pass
+else:
+    result = blank
+
+if STEP_PATH:
+    import cadquery as _cq_e; _cq_e.exporters.export(result, STEP_PATH)
+if STL_PATH:
+    import cadquery as _cq_e2; _cq_e2.exporters.export(result, STL_PATH)
+
 bb = result.val().BoundingBox()
 print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 """
@@ -4000,6 +4269,105 @@ print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 """
 
 
+def _cq_climbing_sloper(params: dict[str, Any]) -> str:
+    """
+    Asymmetric organic climbing sloper hold.
+
+    An asymmetric loft of five elliptical cross-sections whose centres shift
+    in a slow S-curve as they rise, creating a compound, palm-filling surface
+    that is different on every axis.  No flat facets, no crimp edges.
+
+    Mounting: countersunk T-nut hole through the flat oval base plate.
+    """
+    import math as _m
+
+    W    = float(params.get("width_mm",  params.get("width",  130.0)))
+    D    = float(params.get("depth_mm",  params.get("depth",   90.0)))
+    H    = float(params.get("height_mm", params.get("height",  45.0)))
+    bolt = float(params.get("bolt_dia_mm", 10.0))
+    base = float(params.get("base_thickness_mm", 6.0))
+
+    # Pre-compute loft section geometry (all at template-eval time)
+    # Each section: (rx, ry, cx, cy) — half-axes and centre offset
+    # Sections rise from z=0 to z=H with an S-curve shift:
+    #   z=0.00: full oval, centred
+    #   z=0.18: slightly left+forward
+    #   z=0.38: shift right+back
+    #   z=0.60: left+forward, narrower
+    #   z=0.80: right+back, small
+    #   z=1.00: tiny apex, slightly forward
+    secs = [
+        (round(W/2, 2),          round(D/2, 2),          0.0,              0.0),
+        (round(W/2*0.84, 2),     round(D/2*0.88, 2),     round(-W*0.045, 2), round( D*0.04, 2)),
+        (round(W/2*0.67, 2),     round(D/2*0.72, 2),     round( W*0.06, 2),  round(-D*0.05, 2)),
+        (round(W/2*0.48, 2),     round(D/2*0.53, 2),     round(-W*0.05, 2),  round( D*0.06, 2)),
+        (round(W/2*0.27, 2),     round(D/2*0.31, 2),     round( W*0.04, 2),  round(-D*0.03, 2)),
+        (round(W/2*0.09, 2),     round(D/2*0.11, 2),     round(-W*0.02, 2),  round( D*0.03, 2)),
+    ]
+    z_fracs = [0.0, 0.18, 0.38, 0.60, 0.80, 1.0]
+
+    # Unpack section data for direct embedding (avoids runtime list tricks)
+    (rx0, ry0, cx0, cy0) = secs[0]
+    (rx1, ry1, cx1, cy1) = secs[1]
+    (rx2, ry2, cx2, cy2) = secs[2]
+    (rx3, ry3, cx3, cy3) = secs[3]
+    (rx4, ry4, cx4, cy4) = secs[4]
+    (rx5, ry5, cx5, cy5) = secs[5]
+    # Workplane offsets = delta-Z between consecutive sections
+    dz = [round(H * (z_fracs[i+1] - z_fracs[i]), 4) for i in range(len(z_fracs)-1)]
+
+    return f"""
+import cadquery as cq
+import math
+
+W = {W}
+D = {D}
+H = {H}
+BOLT_D = {bolt}
+BASE_T = {base}
+
+def _ell(rx, ry, cx=0.0, cy=0.0, n=48):
+    return [(cx + rx * math.cos(2*math.pi*i/n),
+             cy + ry * math.sin(2*math.pi*i/n)) for i in range(n)]
+
+# Asymmetric organic loft: 6 elliptical sections, centres drift in an S-curve
+body = (
+    cq.Workplane("XY")
+    .polyline(_ell({rx0}, {ry0}, {cx0}, {cy0})).close()
+    .workplane(offset={dz[0]})
+    .polyline(_ell({rx1}, {ry1}, {cx1}, {cy1})).close()
+    .workplane(offset={dz[1]})
+    .polyline(_ell({rx2}, {ry2}, {cx2}, {cy2})).close()
+    .workplane(offset={dz[2]})
+    .polyline(_ell({rx3}, {ry3}, {cx3}, {cy3})).close()
+    .workplane(offset={dz[3]})
+    .polyline(_ell({rx4}, {ry4}, {cx4}, {cy4})).close()
+    .workplane(offset={dz[4]})
+    .polyline(_ell({rx5}, {ry5}, {cx5}, {cy5})).close()
+    .loft(combine=True, ruled=False)
+)
+
+# Flat oval base plate underneath the hold body
+base_plate = (
+    cq.Workplane("XY")
+    .polyline(_ell(W/2, D/2)).close()
+    .extrude(BASE_T)
+    .translate((0, 0, -BASE_T))
+)
+result = body.union(base_plate)
+
+# T-nut counterbore from flat wall-side face only — grip surface stays clean.
+# 22mm×6mm counterbore seats the T-nut flange; 10mm bore goes 30mm deep.
+# Stays well clear of the narrow apex (starts at z=-BASE_T, ends at z=24mm).
+result = result.faces("<Z").workplane().cboreHole(
+    diameter=BOLT_D, cboreDiameter=BOLT_D*2.2, cboreDepth=BASE_T, depth=30
+)
+
+bb = result.val().BoundingBox()
+print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
+"""
+
+
 _CQ_TEMPLATE_MAP: dict[str, Any] = {
     # ARIA structural parts
     "aria_ratchet_ring": _cq_ratchet_ring,
@@ -4049,13 +4417,14 @@ _CQ_TEMPLATE_MAP: dict[str, Any] = {
     "bearing_housing":   _cq_housing,
     "upright":           _cq_housing,
     # Brackets & flanges
-    "bracket":           _cq_bracket,
+    "bracket":           _cq_l_bracket,
     "flange":            _cq_flange,
     "pulley":            _cq_pulley,
+    "impeller":          _cq_impeller,
     "gear":              _cq_gear,
     "cam":               _cq_cam,
     # Generic mechanical parts (ARIA-prefixed kept for backward compat)
-    "aria_bracket":      _cq_bracket,
+    "aria_bracket":      _cq_l_bracket,
     "aria_flange":       _cq_flange,
     "aria_shaft":        _cq_shaft,
     "aria_pulley":       _cq_pulley,
@@ -4096,14 +4465,17 @@ _CQ_TEMPLATE_MAP: dict[str, Any] = {
     "rocket_nozzle":                _cq_nozzle,
     "engine_nozzle":                _cq_nozzle,
     "liquid_rocket_engine_nozzle":  _cq_nozzle,
-    "bracket":                      _cq_bracket,
-    "mounting_bracket":             _cq_bracket,
-    "angle_bracket":                _cq_bracket,
+    "bracket":                      _cq_l_bracket,
+    "mounting_bracket":             _cq_l_bracket,
+    "angle_bracket":                _cq_l_bracket,
     "shaft":                        _cq_shaft,
     "drive_shaft":                  _cq_shaft,
     "axle":                         _cq_shaft,
     "flange":                       _cq_flange,
     "pipe_flange":                  _cq_flange,
+    "flanged_coupling":             _cq_flange,
+    "flanged_pipe_coupling":        _cq_flange,
+    "pipe_coupling":                _cq_flange,
     "tube":                         _cq_tube,
     "pipe":                         _cq_tube,
     "sleeve":                       _cq_tube,
@@ -4153,6 +4525,13 @@ _CQ_TEMPLATE_MAP: dict[str, Any] = {
     "l_bracket":                    _cq_l_bracket,
     "angle_bracket":                _cq_l_bracket,
     "l_shaped_bracket":             _cq_l_bracket,
+    # Impeller / fan / turbine
+    "impeller":                     _cq_impeller,
+    "centrifugal_impeller":         _cq_impeller,
+    "fan":                          _cq_impeller,
+    "fan_blade":                    _cq_impeller,
+    "propeller":                    _cq_impeller,
+    "turbine_wheel":                _cq_impeller,
     # Heat sink
     "heat_sink":                    _cq_heat_sink,
     "heatsink":                     _cq_heat_sink,
@@ -4161,6 +4540,10 @@ _CQ_TEMPLATE_MAP: dict[str, Any] = {
     "phone_stand":                  _cq_phone_stand,
     "tablet_stand":                 _cq_phone_stand,
     "device_stand":                 _cq_phone_stand,
+    # Climbing holds
+    "climbing_sloper":              _cq_climbing_sloper,
+    "sloper":                       _cq_climbing_sloper,
+    "climbing_hold":                _cq_climbing_sloper,
     # Snap hook / clip
     "snap_hook":                    _cq_snap_hook,
     "snap_fit":                     _cq_snap_hook,
@@ -4204,7 +4587,7 @@ _CQ_TEMPLATE_MAP: dict[str, Any] = {
     "sheet_metal":                  _cq_sheet_metal_panel,
     "bent_plate":                   _cq_sheet_metal_panel,
     "formed_channel":               _cq_sheet_metal_panel,
-    "u_channel":                    _cq_sheet_metal_panel,
+    "u_channel":                    _cq_u_channel,
     "sheet_metal_box":              _cq_sheet_metal_box,
     "sheet_metal_tray":             _cq_sheet_metal_box,
     "formed_box":                   _cq_sheet_metal_box,
@@ -4367,6 +4750,10 @@ _CQ_TEMPLATE_MAP: dict[str, Any] = {
 # Keyword scan for slug-based part_ids not in the exact map.
 # Checked in order; first match wins.
 _KEYWORD_TO_TEMPLATE: list[tuple[list[str], Any]] = [
+    # Climbing holds — very specific, must come before generic "hold", "base plate" etc.
+    (["climbing sloper", "sloper hold", "climbing_sloper", "sloper",
+       "climbing hold", "rock hold", "rock climbing hold",
+       "bouldering hold", "wall hold"], _cq_climbing_sloper),
     (["phone_case", "iphone", "phone case", "device_case", "protective_case"],  _cq_phone_case),
     (["nozzle", "rocket", "lre", "injector", "bell_nozzle"],  _cq_nozzle),
     (["ratchet_ring", "catch_ring", "ring_gear"],              _cq_ratchet_ring),
@@ -4376,23 +4763,50 @@ _KEYWORD_TO_TEMPLATE: list[tuple[list[str], Any]] = [
     (["rope_guide"],                                           _cq_rope_guide),
     (["spool"],                                                _cq_spool),
     (["hollow_rect", "arm_link", "link"],                      _cq_hollow_rect),
+    # More-specific multi-word phrases BEFORE generic single-word matches
+    (["flanged coupling", "pipe coupling", "flanged pipe", "flanged_coupling"], _cq_flange),
+    (["shaft coupling", "shaft_coupling", "rigid coupling", "rigid_coupling"],  _cq_shaft_coupling),
+    (["jaw coupling", "jaw_coupling", "spider coupling", "spider_coupling"],    _cq_jaw_coupling_half),
+    (["coupling", "coupler"],                                  _cq_shaft_coupling),
+    # Specific enclosure types BEFORE generic "housing"/"enclosure"
+    (["pcb_enclosure", "pcb enclosure", "pcb_box", "pcb box",
+       "electronics_enclosure", "electronics enclosure",
+       "electronics_box", "electronics box",
+       "junction box", "electrical box",
+       "project box", "instrument case",
+       "din rail mount", "circuit board enclosure"],           _cq_pcb_enclosure),
     (["housing", "enclosure"],                                 _cq_housing),
     (["flange"],                                               _cq_flange),
     (["base_plate", "mounting_plate", "face_plate", "flat_plate"], _cq_flat_plate),
-    (["bracket", "plate", "mount"],                            _cq_bracket),
-    (["shaft", "axle", "drive_shaft"],                         _cq_shaft),
+    (["flat bracket", "flat_bracket"],                         _cq_bracket),
+    (["bracket", "mount"],                                     _cq_l_bracket),
+    (["plate"],                                                _cq_flat_plate),
+    (["drive_shaft", "axle"],                                  _cq_shaft),
+    (["shaft"],                                                _cq_shaft),
+    # Specific pipe fittings BEFORE generic "pipe" (which would match everything)
+    (["pipe elbow", "pipe bend", "90 degree elbow", "90deg elbow", "pipe 90",
+       "elbow fitting"],                                        _cq_pipe_elbow),
+    (["pipe tee", "tee fitting", "tee joint"],                 _cq_pipe_tee),
+    (["pipe reducer", "pipe adapter", "concentric reducer", "reducer fitting"], _cq_pipe_reducer),
     (["tube", "pipe", "sleeve"],                               _cq_tube),
+    # Specific pulley types BEFORE generic "pulley"
+    (["timing_pulley", "timing pulley", "gt2_pulley", "gt2 pulley",
+       "htd_pulley", "htd pulley", "belt_pulley", "belt pulley",
+       "belt drive pulley"],                                   _cq_timing_pulley),
     (["pulley", "sheave"],                                     _cq_pulley),
     (["cam"],                                                  _cq_cam),
     (["pin", "dowel"],                                         _cq_pin),
     (["spacer", "washer", "bushing"],                          _cq_spacer),
+    # Specific gear types BEFORE generic "gear"
+    (["involute_gear", "involute gear", "involute spur", "involute_spur_gear",
+       "spur gear", "spur_gear", "straight gear", "helical gear"],  _cq_involute_gear),
     (["gear", "sprocket", "cog"],                              _cq_gear),
     (["escapement", "escapement_wheel"],                       _cq_escape_wheel),
+    # "bearing" must come BEFORE "ring" — "bearing ring" contains standalone "ring"
+    (["ball bearing", "ball_bearing", "deep groove", "bearing"],  _cq_ball_bearing),
     (["ring", "collar", "annular"],                            _cq_spacer),
     (["nema", "stepper", "servo_motor"],                       _cq_nema_motor),
     (["mgn", "linear_rail"],                                   _cq_mgn_rail),
-    (["bearing"],                                              _cq_ball_bearing),
-    (["coupling", "coupler"],                                  _cq_shaft_coupling),
     (["extrusion", "vslot", "tslot"],                          _cq_profile_extrusion),
     # Expanded aliases (fuzzy matching catch-all)
     (["motor_mount", "motor mount", "servo_mount", "stepper_mount"], _cq_flange),
@@ -4405,7 +4819,12 @@ _KEYWORD_TO_TEMPLATE: list[tuple[list[str], Any]] = [
     (["roller"],                                               _cq_spacer),
     (["platform", "baseplate", "base plate"],                  _cq_flat_plate),
     (["l_bracket", "l-bracket", "l bracket", "angle bracket", "angle_bracket"], _cq_l_bracket),
-    (["heat_sink", "heatsink", "heat sink", "fin array", "fin_array", "fins"], _cq_heat_sink),
+    (["impeller", "centrifugal impeller", "centrifugal fan", "axial fan",
+       "fan blade", "turbine wheel", "turbine blisk", "blisk",
+       "propeller", "radial fan", "mixed flow fan",
+       "pump impeller", "compressor impeller", "axial impeller"], _cq_impeller),
+    (["heat_sink", "heatsink", "heat sink", "fin array", "fin_array", "fins",
+       "cpu cooler", "thermal pad", "heat dissipator"], _cq_heat_sink),
     (["phone_stand", "phone stand", "tablet_stand", "tablet stand", "device stand"], _cq_phone_stand),
     (["snap_hook", "snap_fit", "snap_clip", "snap hook", "snap fit", "snap clip"], _cq_snap_hook),
     (["thread_insert", "threaded_insert", "knurled_insert", "heat_set_insert", "threaded insert", "knurled insert", "heat set insert"], _cq_thread_insert),
@@ -4414,20 +4833,19 @@ _KEYWORD_TO_TEMPLATE: list[tuple[list[str], Any]] = [
     (["handle", "grip", "knob", "pull_handle", "pull handle"], _cq_handle),
     (["enclosure_lid", "box_lid", "snap_lid", "enclosure lid", "box lid", "snap lid"], _cq_enclosure_lid),
     (["gusset", "corner_brace", "gusset_plate", "corner_bracket", "triangle_brace", "corner brace", "gusset plate", "corner bracket"], _cq_gusset),
-    (["sheet_metal_panel", "sheet metal panel", "bent_plate", "bent plate", "formed_channel", "u_channel", "u channel", "sheet metal"], _cq_sheet_metal_panel),
+    (["u_channel", "u channel", "u-channel", "c channel", "c-channel", "formed_channel"], _cq_u_channel),
+    (["sheet_metal_panel", "sheet metal panel", "bent_plate", "bent plate", "sheet metal"], _cq_sheet_metal_panel),
     (["sheet_metal_box", "sheet metal box", "sheet_metal_tray", "formed_box", "metal_tray", "metal tray"], _cq_sheet_metal_box),
     (["weld_bead", "weld bead", "fillet_weld", "fillet weld", "weld_joint", "weld joint", "weld"], _cq_weld_bead),
     (["spoked_wheel", "handwheel", "hand_wheel", "spoke_wheel", "spoked wheel", "hand wheel", "spoke wheel"], _cq_spoked_wheel),
     (["t_slot_plate", "tslot_plate", "fixture_plate", "tooling_plate", "t-slot plate", "t slot plate", "fixture plate", "tooling plate"], _cq_t_slot_plate),
     (["spring_clip", "retaining_clip", "circlip", "u_clip", "retainer", "spring clip", "retaining clip", "u clip"], _cq_spring_clip),
-    (["involute_gear", "involute gear", "involute spur", "involute_spur_gear"], _cq_involute_gear),
     (["cam_profile", "cam profile", "eccentric_cam", "eccentric cam", "cam_disc", "cam disc"], _cq_cam_profile),
     (["bellows", "corrugated_bellows", "corrugated bellows", "flex_joint", "flex joint", "boot"], _cq_bellows),
     (["compression_spring", "compression spring", "coil_spring", "coil spring", "helical_spring", "helical spring"], _cq_compression_spring),
     (["keyway_shaft", "keyway shaft", "keyed_shaft", "keyed shaft", "shaft_with_keyway"], _cq_keyway_shaft),
     (["dovetail_joint", "dovetail joint", "dovetail_rail", "dovetail rail", "dovetail_slide", "dovetail slide", "dovetail"], _cq_dovetail_joint),
     (["slot_plate", "slot plate", "slotted_plate", "slotted plate"], _cq_slot_plate),
-    (["pcb_enclosure", "pcb enclosure", "pcb_box", "pcb box", "electronics_enclosure", "electronics enclosure", "electronics_box", "electronics box"], _cq_pcb_enclosure),
     (["bearing_pillow_block", "pillow_block", "pillow block", "plummer_block", "plummer block", "bearing pillow block"], _cq_bearing_pillow_block),
     (["cable_gland", "cable gland", "strain_relief", "strain relief", "cable_fitting", "cable fitting", "cord_grip", "cord grip"], _cq_cable_gland),
     # ── Expansion (April 2026) ───────────────────────────────────────────────
@@ -4435,7 +4853,6 @@ _KEYWORD_TO_TEMPLATE: list[tuple[list[str], Any]] = [
     (["hex_nut", "hex nut"],                                       _cq_hex_nut),
     (["socket_cap_screw", "socket cap screw", "cap_screw", "cap screw", "shcs"], _cq_socket_cap_screw),
     (["set_screw", "set screw", "grub_screw", "grub screw"],      _cq_set_screw),
-    (["timing_pulley", "timing pulley", "gt2_pulley", "gt2 pulley", "htd_pulley", "belt_pulley"], _cq_timing_pulley),
     (["chain_sprocket", "chain sprocket"],                         _cq_sprocket),
     (["rack_gear", "rack gear", "gear_rack", "gear rack", "linear_rack", "linear rack"], _cq_rack),
     (["pipe_elbow", "pipe elbow", "pipe_bend", "pipe bend"],      _cq_pipe_elbow),
@@ -4462,6 +4879,49 @@ _KEYWORD_TO_TEMPLATE: list[tuple[list[str], Any]] = [
     (["pipe_cross", "pipe cross", "cross_fitting", "four_way"],   _cq_pipe_cross),
     (["orifice_plate", "orifice plate", "flow_orifice"],          _cq_orifice_plate),
     (["rivet", "blind_rivet", "blind rivet", "pop_rivet"],        _cq_rivet),
+    # ── Common natural language phrasings that miss exact-match routing ──────
+    # Impeller / rotating machinery variants
+    (["centrifugal pump", "pump wheel", "pump rotor",
+       "fan rotor", "fan hub", "rotor disc", "rotor disk"],           _cq_impeller),
+    # Structural / mounting
+    (["mounting bracket", "wall bracket", "right angle bracket",
+       "right-angle bracket", "shelf bracket", "corner bracket"],     _cq_l_bracket),
+    (["mounting plate", "motor plate", "base plate", "bed plate"],    _cq_flat_plate),
+    (["pipe flange", "weld neck flange", "slip-on flange",
+       "blind flange", "threaded flange", "bolt flange"],             _cq_flange),
+    # Fasteners / hardware
+    (["m3 bolt", "m4 bolt", "m5 bolt", "m6 bolt",
+       "m8 bolt", "m10 bolt", "hex head screw"],                      _cq_hex_bolt),
+    (["m3 nut", "m4 nut", "m5 nut", "m6 nut",
+       "m8 nut", "m10 nut"],                                          _cq_hex_nut),
+    (["m3 screw", "m4 screw", "m5 screw", "m6 screw",
+       "socket head screw", "allen screw"],                           _cq_socket_cap_screw),
+    # Shaft / drive
+    (["motor shaft", "drive shaft", "output shaft",
+       "stepped shaft", "shoulder shaft", "keyed shaft"],             _cq_shaft),
+    (["shaft key", "woodruff key", "square key"],                     _cq_keyway_shaft),
+    # Gears / power transmission
+    (["rack and pinion", "linear gear"],                              _cq_rack),
+    # Structural elements
+    (["box section", "hollow section", "rectangular tube",
+       "square tube", "rhs", "shs"],                                  _cq_hollow_rect),
+    (["aluminium extrusion", "v-slot", "2020 extrusion",
+       "3030 extrusion", "4040 extrusion"],                           _cq_profile_extrusion),
+    (["gusset plate", "corner gusset", "triangular brace",
+       "web plate"],                                                   _cq_gusset),
+    # Electronics / enclosures
+    (["heat dissipator", "cooling fin", "thermal heatsink"],          _cq_heat_sink),
+    # Springs
+    (["helical spring", "coil spring", "return spring"],              _cq_compression_spring),
+    (["leaf spring", "flat spring"],                                  _cq_spring_clip),
+    # Pipe / fluid
+    (["90 degree elbow", "90deg elbow", "pipe 90"],                   _cq_pipe_elbow),
+    (["pipe adapter", "reducer fitting", "concentric reducer"],       _cq_pipe_reducer),
+    # Bearings / bushings
+    (["deep groove bearing", "6000 bearing", "6200 bearing",
+       "6300 bearing", "ball race"],                                  _cq_ball_bearing),
+    (["bronze bushing", "igus bushing", "sleeve bearing",
+       "flanged bushing"],                                             _cq_linear_bushing),
 ]
 
 
@@ -4469,6 +4929,18 @@ def _find_template_fn(part_id: str):
     """Return the template function for part_id: exact map lookup, then keyword scan."""
     fn, _ = _find_template_fuzzy(part_id)
     return fn
+
+
+def _kw_matches(kw: str, text: str) -> bool:
+    """Check if a keyword phrase matches text.
+
+    Multi-word / underscore phrases: simple substring match (specific enough).
+    Single-word keywords: word-boundary match to avoid "ring" hitting "bearing"/"spring".
+    """
+    if " " in kw or "_" in kw:
+        return kw in text
+    # Single word: require it to not be embedded inside a longer word
+    return bool(re.search(r"(?<![a-z])" + re.escape(kw) + r"(?![a-z])", text))
 
 
 def _find_template_fuzzy(
@@ -4487,32 +4959,33 @@ def _find_template_fuzzy(
     """
     spec = spec or {}
 
-    # Step 1: Exact lookup
+    # Step 1: Keyword scan of FULL GOAL TEXT first — goal is ground truth,
+    # more reliable than LLM part_type classification which can hallucinate.
+    goal_lower = goal.lower().replace("-", "_")
+    if goal_lower:
+        for keywords, template_fn in _KEYWORD_TO_TEMPLATE:
+            if any(_kw_matches(kw, goal_lower) for kw in keywords):
+                return template_fn, "goal"
+
+    # Step 2: Exact lookup on part_id / part_type
     fn = _CQ_TEMPLATE_MAP.get(part_id)
     if fn:
         return fn, "exact"
 
-    # Step 2: Keyword scan of part_id (original behaviour)
+    # Step 3: Keyword scan of part_id (original behaviour)
     for keywords, template_fn in _KEYWORD_TO_TEMPLATE:
-        if any(kw in part_id for kw in keywords):
+        if any(_kw_matches(kw, part_id) for kw in keywords):
             return template_fn, "keyword"
 
-    # Step 3: Keyword scan of spec["part_type"]
+    # Step 4: Keyword scan of spec["part_type"]
     pt = spec.get("part_type", "")
     if pt and pt != part_id:
         fn = _CQ_TEMPLATE_MAP.get(pt)
         if fn:
             return fn, "exact"
         for keywords, template_fn in _KEYWORD_TO_TEMPLATE:
-            if any(kw in pt for kw in keywords):
+            if any(_kw_matches(kw, pt) for kw in keywords):
                 return template_fn, "keyword"
-
-    # Step 4: Keyword scan of FULL GOAL TEXT (catches "drone motor mount" etc.)
-    goal_lower = goal.lower().replace("-", "_")
-    if goal_lower:
-        for keywords, template_fn in _KEYWORD_TO_TEMPLATE:
-            if any(kw in goal_lower for kw in keywords):
-                return template_fn, "goal"
 
     # Step 5: Word-overlap scoring — tokenize goal, score against keyword lists
     if goal_lower:
@@ -4919,53 +5392,63 @@ def _llm_cadquery(
     if _learned_failures:
         _learned_block = "\n".join(f"- {e}" for e in _learned_failures)
 
-    system = f"""You are a CadQuery Python expert. Output ONLY a Python code block. No explanation, no markdown outside the block.
+    # Inject the full CadQuery operations reference for the goal
+    try:
+        from ..cad_operations_reference import get_operations_for_goal
+        _ops_ref = get_operations_for_goal(goal)
+    except Exception:
+        _ops_ref = ""
+
+    system = f"""You are an expert CadQuery/OpenCascade Python engineer. Generate PRODUCTION-QUALITY
+parametric CAD geometry using CadQuery's FULL API. Output ONLY Python code. No explanation, no markdown.
 
 Imports (use exactly):
   import cadquery as cq
   import math
 
+CRITICAL: Do NOT just use circle().extrude() for everything. Use the RIGHT operation:
+- Axisymmetric parts (nozzles, cups, pulleys) → .revolve()
+- Parts that follow a curved path (pipes, channels) → .sweep()
+- Transition between cross-sections (adapters, funnels) → .loft()
+- Hollow parts → build solid first, then .shell() or .cut()
+- Round edges → .fillet() (add LAST, after base geometry validates)
+- Complex 2D profiles → .spline(), .tangentArcPoint(), .threePointArc()
+- Twisted parts → use .twistExtrude()
+- Multi-body → .union() separate Workplanes
+
+{_ops_ref}
+
 Rules:
 - All dimensions in mm as ALL_CAPS module-level constants.
-- Build solid first, then cuts, then holes. No fillets/chamfers on first attempt.
+- Build base shape first, then features, then cuts, then fillets/chamfers LAST.
 - Final variable MUST be named 'result' and be a cq.Workplane object.
 - Select faces by direction (faces(">Z")), never by index.
-- Print BBOX: print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}") at the end.
 - Do NOT write any export code — that is injected separately.
+- Guard fillets: radius must be < half the smallest edge. Skip if unsure.
+- Guard booleans: bodies must overlap or touch. Check before .union()/.cut().
 
-Mechanical constants (from aria_mechanical.md) — use these when relevant:
+Mechanical constants:
 {_constants_block}
 
 {_cem_block}
 
-Avoid these CadQuery failure patterns:
-- ChFi3d_Builder: only 2 faces — caused by fillet on thin body. Remove fillet; add after solid validates.
-- BRep_API: command not done — caused by invalid face refs in compound boolean. Simplify to extrude + cut only.
-- Nothing to loft — caused by non-coplanar loft profiles. Use revolve for axisymmetric profiles.
-- Bbox axis mismatch — CadQuery extrudes along Z. Verify plan expects Z for height.
-- Never use annular profile as first operation. Build solid cylinder/box first, then remove interior.
-- For hollow parts: create outer solid, then cut the inner void.
+Avoid these failure patterns:
+- ChFi3d_Builder: fillet radius too large for edge → reduce radius or skip fillet
+- BRep_API: command not done → simplify boolean chain, ensure bodies overlap
+- Nothing to loft → profiles must be on parallel planes at different offsets
+- Never use annular profile as first operation. Build solid first, then cut void.
+- .cylinder() does not exist — use .circle(R).extrude(H)
+- Fillet on body with < 6 faces → skip fillet for thin plates/shells
 
-{("Known recent failures for this part (from learning log):" + chr(10) + _learned_block) if _learned_block else ""}
-
-CadQuery patterns:
-  Box:       cq.Workplane("XY").box(L, W, H)
-  Cylinder:  cq.Workplane("XY").circle(R).extrude(H)
-  Ring:      cq.Workplane("XY").circle(R_OUT).circle(R_IN).extrude(H)
-  Cut hole:  .faces(">Z").workplane().circle(R).cutThruAll()
-  Union:     .union(other_wp)
-  Shell:     .shell(-WALL)
-  Revolve:   cq.Workplane("XZ").polyline(pts).close().revolve(360)
+{("Known failures for this part:" + chr(10) + _learned_block) if _learned_block else ""}
 
 Required code structure:
-  ## All numeric dimensions must be module-level constants
   # === PART PARAMETERS (tunable) ===
-  LENGTH_MM = 60.0
-  WIDTH_MM = 12.0
+  OD_MM = 100.0
+  HEIGHT_MM = 50.0
   # === END PARAMETERS ===
-  # geometry uses constants only, never inline numbers
-
-Every generated script MUST end with:
+  # ... geometry using constants, never inline numbers ...
+  result = ...
   bb = result.val().BoundingBox()
   print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 """

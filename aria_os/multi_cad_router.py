@@ -59,7 +59,7 @@ class CADRouter:
         Returns
         -------
         dict with keys:
-            backend     : "cadquery" | "grasshopper" | "blender" | "fusion"
+            backend     : "cadquery" | "grasshopper" | "blender" | "fusion360" | "sdf" | "autocad" | "zoo"
             part_id     : Canonical part identifier string
             spec        : Extracted spec dict (dimensions etc.)
             rationale   : Human-readable routing explanation
@@ -176,12 +176,12 @@ def _build_rationale(goal: str, part_id: str, backend: str, spec: dict) -> str:
         )
     elif backend == "grasshopper":
         reasons.append(
-            f"Part '{part_id}' is a Grasshopper part (complex surface geometry). "
+            f"Routing to Rhino Compute (complex geometry / NURBS operations). "
             "Will fall back to CadQuery automatically if Rhino Compute is unavailable."
         )
-    elif backend == "fusion":
+    elif backend == "fusion360":
         reasons.append(
-            f"Goal requires Fusion 360 (lattice/generative/sheet-metal/CAM/sim). "
+            "Goal requires Fusion 360 (lattice/generative/CAM/sim). "
             "A Fusion script will be written; a CadQuery approximation is also generated immediately."
         )
     elif backend == "blender":

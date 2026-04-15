@@ -55,6 +55,409 @@ Matplotlib is the reliable fallback for SVG/PNG rendering on Windows without GTK
 - Pattern: check if geometry was produced after agent loop; if not, reset _use_agents=False to fall through to legacy path
 - session.pop("checkpoints") before fallback so legacy path starts fresh
 
+## 2026-04-08 — Grasshopper kernel is artifact-mode only (no Rhino Compute needed)
+The GH kernel in coordinator._phase_3_grasshopper() does NOT call Rhino Compute.
+It writes a .py GH component file to disk (artifact) and runs CadQuery headless as the real geometry fallback.
+For known ARIA parts: CQ fallback produces valid STEP/STL.
+For novel parts: placeholder component is written, CQ fallback fails gracefully, falls through to _phase_3_cadquery_loop.
+This is the correct sustainable headless mode — no server, no Rhino license required at runtime.
+
+## 2026-04-08 — rhino3dm / compute-rhino3d packages not installed; activation steps
+`rhino3dm` and `compute_rhino3d` are NOT installed in the current environment.
+Any code path that imports these will ImportError silently (caught by try/except in gh_integration).
+To enable full Rhino Compute: `pip install rhino3dm compute-rhino3d`, install Rhino 8 PackageManager →
+"compute" package → `rhinocompute`, then run `RhinoCompute.exe` on :6500.
+Do not add this dependency unless live Rhino Compute evaluation is explicitly needed.
+
+## Visual verifier provider hierarchy (2026-04-09)
+- Gemini 2.5-flash: best quality, free quota, daily limit (~15 calls exhaust it)
+- Ollama gemma4:e4b: free/local, no quota, good for failure detection, unreliable for pass confirmation (cap at 0.85)
+- Anthropic Claude: paid, most reliable for pass confirmation, last resort
+- Session-level quota flag: _gemini_quota_exhausted tracks when all Gemini flash quota is gone for the session
+- Multi-validator defense-in-depth: visual verify + geometric face count + bbox check all run independently. Ollama hallucinating a PASS is caught by face count check.
+
+## Template routing priority (2026-04-09)
+- Goal text is more reliable than LLM part_type classification
+- _find_template_fuzzy now checks goal keywords FIRST, then part_type exact lookup
+- Multi-word keyword phrases must come before single-word entries in _KEYWORD_TO_TEMPLATE list to prevent premature matches
+- Example: "flanged coupling" must precede "coupling" and "shaft" in the keyword list
+
+## matplotlib wireframe rendering for thin features (2026-04-09)
+- Use `mesh.edges_unique` (shape: E×2) -> `mesh.vertices[edges_unique]` (shape: E×2×3)
+- Project each edge's two endpoints to 2D, stack as (E×2×2) segments
+- `LineCollection(segs, linewidths=0.4, colors='steelblue', alpha=0.5)` + `ax.autoscale()`
+- Much better than scatter for thin geometry: blades, fins, slots, thin walls
+- Subsample to 20,000 edges max for dense meshes; add convex hull border line for orientation
+
+## CadQuery impeller template design (2026-04-09)
+- Open-face (no shroud) is much easier to render and validate than closed impeller
+- Base disc = 20% of height; blades = 80% exposed above disc
+- BT must be >= 10% of OD or blades are invisible in renders (use `max(user_bt, OD * 0.10)`)
+- Backward blade angle: rotate each blade's tip by -30 deg from its root angle for realistic geometry
+
+## SpecAgent thickness_mm extraction ambiguity for L-brackets (2026-04-09)
+- For L-brackets, "80x60x40mm" causes SpecAgent to pick `thickness_mm=40` (the largest dim it finds)
+- Template must distinguish raw_t as bbox dim vs wall thickness: if raw_t > 20, it's a bbox dimension
+- Auto-derive wall at `max(4, min(10, min(h, leg_h) * 0.12))` mm to get realistic wall thickness
+
+## Groq as second-tier vision provider (2026-04-09)
+- Groq llama-4-scout-17b-16e-instruct is free tier, ~1-3s latency, completely separate quota from Gemini
+- Insert between Gemini (best quality, daily quota) and Ollama (local, unreliable for pass confirmation)
+- Full vision fallback chain: Gemini 2.5-flash -> Groq llama-4-scout -> Ollama gemma4:e4b -> Anthropic
+- Groq extends reliable free-tier verification capacity without touching paid Anthropic quota
+
+## 2026-04-09 — Debugging visual verify failures
+
+When a visual verify pass/fail result is wrong or unexpected, work through these checks in order:
+
+1. **Check screenshots dir**: `outputs/screenshots/<part_id>/` — open the PNG files. If they are blank or mis-oriented, the geometry itself is bad (wrong plane, inside-out). Confirm STL loads correctly in trimesh before assuming a vision API issue.
+2. **Check provider used**: printed in the verify log as `[visual_verifier] calling <provider>`. If Groq was used but Gemini was expected, check `_gemini_quota_exhausted` flag — it persists for the session.
+3. **Check spec params extracted**: dump `state.spec` before calling verify. If `od_mm` is None, the geometry precheck skips that dimension; if it is set to the wrong value, precheck will veto correct geometry. Trace back to `extract_spec()`.
+4. **Check view labels in prompt**: the vision prompt must list exactly the views that were rendered. Mismatches (e.g., "isometric" in prompt but only wireframe rendered) cause hallucinated assessments. The labels are in `view_labels` returned by `_render_views()`.
+5. **Check the checklist**: dump `_build_checklist(goal, spec)` directly. If the wrong feature checks are generated (e.g., "circular bolt pattern" for a bracket), trace to `_FEATURE_KEYWORDS` and the conditional logic in `_build_checklist`.
+
+## 2026-04-09 — Debugging template routing
+
+When the wrong template is selected, add a temporary print inside `_find_template_fuzzy` to trace each decision:
+
+1. **Check `state.spec["part_type"]`** immediately after SpecAgent runs — if it's wrong (e.g., "hex_bolt" for a pipe coupling), the LLM classified incorrectly. The goal keyword scan (Step 1) should override this, but only if goal keywords match.
+2. **Check Step 1 output**: goal keyword scan iterates `_KEYWORD_TO_TEMPLATE` in order. The FIRST match wins. If a later entry should have matched, a single-word entry earlier in the list preempted it. Fix: move multi-word phrase entries above single-word entries in `_KEYWORD_TO_TEMPLATE`.
+3. **Check `_CQ_TEMPLATE_MAP` keys**: exact match on `part_id`. If part_id is `"aria_my_part"` but map has `"my_part"`, Step 2 misses. Either normalize the part_id or add both keys.
+4. **Manual word-overlap test**: call `_keyword_overlap_score(goal_tokens, keyword_list)` for the expected template's keyword list — if score is 0, the goal has no overlapping words with any keyword. Add a synonym.
+5. **Quick diagnostic print** to add temporarily:
+   ```python
+   print(f"[routing] goal='{goal[:60]}', part_id='{part_id}', spec_part_type='{spec.get('part_type')}'")
+   ```
+
+## 2026-04-09 — CadQuery patterns that work reliably
+
+- **Cylinder**: `.circle(r).extrude(h)` — the `.cylinder()` method does NOT exist in CadQuery
+- **Box**: `.box(w, h, d)` — centered at origin by default
+- **Rotate**: `.rotate((0,0,0), (0,0,1), angle_deg)` for Z-axis rotation, or `.rotateAboutCenter((0,0,1), angle_deg)`
+- **Union before cut**: assemble the full solid first, then cut features — floating geometry (cutting a body that hasn't been unioned to the main solid) silently creates disconnected components
+- **`result =` assignment**: always required; generated code runner extracts this variable
+- **`bb = result.val().BoundingBox()`**: always required after result; used for precheck
+- **Shell for hollow box**: `.box(L,W,H).faces(">Z").shell(-T)` — negative thickness shells inward, removing selected face
+- **Radial hole pattern**: `.circle(r).cutThruAll()` after `.workplane(offset=H).pushPoints([...])` — not `.holes()`
+- **Cutting a center bore**: `.circle(bore_r).cutThruAll()` not `.cut(cq.Workplane("XY").circle(bore_r).extrude(h))`
+- **`polarArray`**: use `.polarArray(radius, startAngle, angle, count)` for bolt circles — much cleaner than manual pushPoints
+
+## 2026-04-09 — CadQuery patterns that fail
+
+- **`.cylinder(r, h)`**: does NOT exist. ALWAYS use `.circle(r).extrude(h)`. LLMs frequently hallucinate this.
+- **`.sweep()` without a proper wire**: sweep needs an explicit edge or wire as the path — not a workplane point. Spline-revolved nozzles work; arbitrary sweeps are fragile.
+- **`.revolve()` on open face**: profile must be a closed wire on the workplane. Open profiles revolve to shells, not solids.
+- **Missing `result =` at end**: the code runner `exec()`s the generated code and then reads `result` from the local namespace. If code ends with `solid = ...` without `result = solid`, it raises NameError.
+- **Floating geometry from missing union**: `.union(blade)` must be called before `.cut(bore)` or the blade is not part of the main body and the cut has no effect on it.
+- **`.edges("|Z")` on a box with no Z-edges**: edge selectors silently return empty selection — cuts or fillets downstream silently no-op.
+- **f-string braces in generated code**: the template is itself an f-string. `{` inside generated code must be `{{`. Any `{variable}` in the code string that's not an outer f-string interpolation causes SyntaxError at template eval.
+
+## 2026-04-09 — How cross-validation works mechanically
+
+`_call_vision(images, prompt, spec)` implements this logic:
+
+1. Try each provider in priority order (Gemini → Groq → Ollama → Anthropic) until one responds
+2. Cap the confidence: `conf = min(raw_conf, _CONFIDENCE_CAPS[provider_name])`
+3. If `overall_pass == True` and `conf >= 0.90` and provider is NOT Anthropic:
+   - Call the next provider in the chain as a second opinion
+   - If second provider also returns PASS: `final_conf = min(conf1, cross_conf)` — use more conservative value
+   - If second provider returns FAIL: result becomes FAIL regardless of first provider's confidence
+4. Anthropic is authoritative: its result is used directly without cross-validation
+
+This prevents Groq or Gemini from confidently passing bad geometry. Ollama is capped at 0.85 so it can never trigger cross-validation (0.85 < 0.90 threshold).
+
+## 2026-04-09 — Spec extraction examples for common part types
+
+**Flange**: `"213mm OD 120mm bore 21mm thick steel flange with 4 bolts on 170mm PCD"`
+→ `od_mm=213, bore_mm=120, thickness_mm=21, material="steel", part_type="flange", n_bolts=4, bolt_circle_r_mm=85`
+
+**Impeller**: `"centrifugal impeller 200mm OD 30mm bore 80mm height 6 backward-curved blades"`
+→ `od_mm=200, bore_mm=30, height_mm=80, n_blades=6, blade_sweep="backward_curved", part_type="centrifugal_impeller"`
+
+**Gear**: `"M2 module 24-tooth spur gear 48mm OD 20mm tall with 8mm bore"`
+→ `od_mm=48, n_teeth=24, height_mm=20, bore_mm=8, module_mm=2, part_type="gear"`
+
+**Heat sink**: `"80x80x40mm aluminium heat sink with 12 fins"`
+→ `width_mm=80, height_mm=80, depth_mm=40, material="aluminium", n_fins=12, part_type="heat_sink"`
+
+**L-bracket**: `"80x60mm L-bracket 5mm thick with 4 M5 holes"`
+→ `width_mm=80, height_mm=60, thickness_mm=5, n_bolts=4, bolt_dia_mm=5, part_type="bracket"`
+
+Note: "bracket" and "L-bracket" both map to `part_type="bracket"` — the template selection happens in `_find_template_fuzzy` via goal keywords ("L-bracket" → `_cq_l_bracket`).
+
+## 2026-04-09 — When to use _cq_l_bracket vs _cq_bracket vs _cq_flat_plate
+
+**`_cq_l_bracket`**: use when goal contains "L-bracket", "angle bracket", "right angle bracket", "corner bracket", "elbow bracket". Produces an L-shaped profile extruded along the width. Has vertical leg and horizontal base plate at 90°. Holes split between the two legs.
+
+**`_cq_bracket`**: use when goal says "bracket", "mounting bracket", "wall bracket", or "plate with holes" without an L/angle shape. Produces a flat plate with a pattern of holes. No L-shape.
+
+**`_cq_flat_plate`**: use for covers, panels, lids, spacers without holes or with very few features. No holes by default. Simplest output — box + optional chamfer.
+
+Routing rule: `_KEYWORD_TO_TEMPLATE` has "l-bracket", "l bracket", "angle bracket" → `_cq_l_bracket` ABOVE "bracket" → `_cq_bracket`. If goal says "L-bracket" and routing gives `_cq_bracket`, a more specific keyword entry is missing.
+
+## 2026-04-09 — Impeller blade rendering: why BT must be ≥10% OD
+
+Blade thickness (`bt`) drives the polygon width of each blade body in the mesh. In matplotlib wireframe rendering, a blade that is only 2-3mm thick on a 200mm impeller generates edges that project to sub-pixel width in the 2D view — completely invisible in the `LineCollection` output.
+
+The fix `bt_use = max(user_bt, od * 0.10)` ensures blades are at minimum 10% of OD thick in the geometry. This is not physically accurate but is necessary for the mesh to have visible edges in both wireframe and GL renders. The correct way to handle thin blades in production: use GL rendering (trimesh scene) which does depth-sorted shading rather than wireframe edges.
+
+If the user specifies a realistic blade thickness (e.g., 5mm on 200mm OD = 2.5%), the template silently inflates to 20mm (10%) to ensure render visibility. This is a visualization trade-off, not a manufacturing geometry.
+
+## Keyword routing: invariants for `_KEYWORD_TO_TEMPLATE` ordering
+**Date**: 2026-04-09
+- **Rule**: Specific before generic, always. Any entry whose keywords are a subset of a more specific part type must come AFTER the specific entry.
+- **Examples of ordering requirements**:
+  - `timing_pulley` before `pulley`
+  - `pcb_enclosure` / `electronics_enclosure` before `housing` / `enclosure`
+  - `ball_bearing` before `ring` (because "bearing ring" has standalone "ring")
+  - `involute_gear` / `spur gear` before `gear`
+  - `pipe_elbow` / `pipe_tee` / `pipe_reducer` before `tube` / `pipe`
+  - `flanged_coupling` before `coupling`
+- **Word-boundary fix (`_kw_matches`)** handles substring-in-word cases (e.g., "ring" inside "bearing", "spring") but does NOT protect against standalone ambiguous words (e.g., "ring" in "bearing ring"). Ordering is still required.
+- **Test strategy**: After any routing change, run `_find_template_fuzzy('', goal)` for a coverage set of 20+ goals including edge cases like "bearing ring", "spur gear", "timing pulley gt2", "pcb enclosure", "electronics enclosure".
+
+## Scan-to-CAD: feature extraction quality for real parts
+**Date**: 2026-04-09
+- Non-watertight meshes always show Volume: 0.0 mm³ — this is correct, not a bug (trimesh can't compute volume for open meshes)
+- Coverage of 25-40% is normal for complex non-watertight mechanical parts — don't classify as freeform below 40%
+- Sphere detection: set _MIN_INLIER_RATIO_SPHERE = 0.08 to avoid false positives. Spheres on real parts (ball knobs, cam followers) have >=8% inlier coverage; planar surfaces accidentally satisfying sphere fit have <4%
+- Topology heuristic: >=5 planes detected → prismatic is reliable. No need for high coverage threshold when many planes are found
+- Plane dims in primitives_summary correspond to extent_u_mm of each detected face — useful for estimating part dimensions even without reconstruction
+
+## 2026-04-09 — Involute gear tooth polygon: only use base_r→tip_r range
+
+For CadQuery involute gear tooth profiles built as 2D polylines:
+- Root points at ±half_ta are shared between adjacent teeth when rotated — OCCT rejects coincident vertices
+- Tip arc must use actual involute endpoint angles (`atan2` of the last flank point), not the gear-theory formula `half_ta + tip_half` which overshoots by ~8°
+- Per-tooth `Compound.makeCompound()` + single `.union()` avoids chained Workplane `.union()` coordinate corruption
+- This approach produces watertight=True geometry reliably across all tooth counts and module sizes
+
+## 2026-04-09 — Diamond-Square terrain generation
+
+- Grid must be 2^n+1 (e.g., 257, 513). Any other size breaks the recursive step subdivision.
+- Roughness H=0.6 gives natural-looking mountains. Lower H = smoother, higher H = more jagged.
+- Peak shaping uses radial distance weighting: blend flat noise toward a central apex using `(1 - dist/max_dist)^2` weighting.
+- 257x257 grid → 131,072 triangular faces → ~6400 KB STL via struct.pack (binary format).
+
+## 2026-04-09 — Marching squares on terrain grids
+
+- Marching squares on 257x257 produces ~6000 polylines for mountain terrain.
+- Use numpy boolean masks for the 16-case bitmask — avoid Python loops; vectorize the 4-corner comparison per cell.
+- Contour lines at uniform elevation intervals; collect as polyline segments, then chain into continuous lines.
+- DXF at real-world scale (metres): use `ezdxf units=6` (metres). Layer names: GRADE-EXIST-CONTOUR (minor) and GRADE-EXIST-INDEX (major/labelled).
+
+## 2026-04-09 — Return dict flat alias pattern
+
+- When a function returns nested data (e.g., `params` sub-dict inside the result), add flat convenience keys at the top level so callers don't need to drill in.
+- Example: `result["terrain_type"] = result["params"]["terrain_type"]` alongside `result["params"]`.
+- Flat aliases: terrain_type, width_m, height_m, peak_elevation_m, n_contours, grid_resolution.
+- Rule: any key a CLI flag or downstream consumer is likely to print/log should have a flat alias. Nested structure is fine for completeness, but not for readability at the call site.
+
+## 2026-04-09: Cross-product integration pattern
+
+When bridging ARIA-OS → MillForge:
+- Use `stage="pending_cam"` for pre-CAM bundles, `stage="queued"` for full CAM submissions
+- Idempotency key must be stored in cam_metadata and queried via `func.json_extract()`
+- `_infer_machine_type([], {"process_recommendation": dfm_process})` works for DFM-only routing (no operation list needed)
+- `structsight_context` passthrough pattern: accept as Optional[dict] on Pydantic model, store in cam_metadata blob if present — zero schema migration needed
+
+### 2026-04-10: matplotlib solid rendering for STL
+
+Painter's algorithm (back-to-front depth sort) + PolyCollection works for solid projection rendering without any extra packages:
+```python
+depths = face_verts[:, :, depth_ax].mean(axis=1)
+order  = np.argsort(-depths)  # back-to-front
+polys_2d = fv[:, :, [a0, a1]]
+pc = PolyCollection(polys_2d, facecolors=face_colors, edgecolors='none', linewidths=0)
+```
+Two-light shading: ambient=0.22, key_light*0.65, fill_light*0.18. Steel-blue palette: (0.55, 0.65, 0.82)*intensity.
+
+Failure modes:
+- Dense flat meshes (gear top): all faces at same depth, Z-ordering ambiguous → cluttered
+- Edge-on revolves (nozzle side): single-pixel line — not a rendering bug, it's geometry
+
+### 2026-04-10: ECAD matplotlib Y-flip
+
+KiCad uses Y-down coordinate system. matplotlib defaults to Y-up. Fix: `ax.set_ylim(board_h + 5, -8)` (note: min,max are swapped to invert). With this, y=0 appears at top, y=board_h appears at bottom — matching KiCad convention.
+
+### 2026-04-10: render_kicad_board placeholder
+
+When cairosvg and Inkscape are both unavailable, the old code returned True from a dark placeholder PNG, blocking the matplotlib BOM layout renderer. Fix: return False so the caller's matplotlib fallback runs. The matplotlib BOM layout is far more useful than a blank placeholder.
+
+## GL Render Material Color (2026-04-10)
+- trimesh default STL material is dark gray [100,100,100] — looks like charcoal in renders
+- Set aluminum BEFORE scene creation: `mesh.visual = trimesh.visual.ColorVisuals(mesh=mesh, face_colors=np.array([175, 183, 198, 255], dtype=np.uint8))`
+- This gives light steel-blue aluminum matching SolidWorks/Fusion default appearance
+- Do NOT use `face_colors` as a scalar (1D array) — must be either (1,4) or (N,4) shaped, or set via `mesh.visual.face_colors = [r,g,b,a]`
+
+## Large-Scale Mesh Rendering (2026-04-10)
+- For terrain/large meshes (scale >> 1000), `mesh.scale * 2.5` as camera distance renders blank (GL far-plane clip)
+- Working distance for 3km terrain mesh: <=1500 units (meters in this case)
+- For gallery renders of non-mechanical STLs, use fixed distance ~= max_extent * 0.5
+
+## Broken STL: llm_nozzle_bell_small_rocket_engine.stl (2026-04-10)
+- This STL renders blank at ALL angles regardless of color or distance (3265 bytes = empty PNG)
+- Use nozzle_template_test.stl or nozzle_bell_v2.stl for nozzle gallery renders
+- The llm nozzle has scale=717 (vs ~324 for working nozzles) — suspect geometry issue
+
+## 2026-04-10 — trimesh GL far-plane clipping for large-scale meshes
+
+GL renderer renders blank (3265 bytes = empty PNG) when camera distance exceeds the GL far-plane threshold. This happens at `distance > mesh_extent * ~1.5` for large meshes.
+
+- 3km terrain STL (3000×3000×150m): any distance >= 1500 renders blank; distance=1000 shows only ground-level edge
+- Rule: if `max(mesh.extents) > 2000`, do NOT use trimesh GL — use matplotlib instead
+- Flat terrain meshes have no correct camera angle in trimesh GL — always shows ground-level view regardless of elevation/azimuth
+- Detection: empty PNG = 3265 bytes exactly — add a file size check after `scene.save_image()` to detect this failure mode
+
+## 2026-04-10 — Topographic matplotlib visualization for terrain STLs
+
+When trimesh GL fails for large terrain meshes, use matplotlib topographic rendering:
+
+1. Load vertices: `verts = mesh.vertices` (shape: N×3)
+2. Reconstruct grid: `idx = np.lexsort((verts[:,1], verts[:,0]))`, `z_grid = verts[idx,2].reshape(rows, cols)`
+3. Colormap: `LinearSegmentedColormap.from_list("topo", ["#2d5a1b", "#6b8f3a", "#c8a96e", "#e8d5b0", "white"])`
+4. Render: `ax.imshow(z_grid, cmap=cmap, origin="lower")` + `ax.contour(z_grid, levels=N, colors='black', alpha=0.3)`
+5. Contour interval: `levels = np.arange(z_min, z_max, interval)` where `interval = (z_max-z_min) / 20`
+
+This produces a clean topographic map with elevation shading and contour lines. Superior to any 3D projection for terrain.
+
+## 2026-04-10 — Removing disconnected mesh components
+
+When an STL has multiple disconnected bodies (e.g., assembly with floating stub), split and keep only the largest:
+
+```python
+parts = mesh.split(only_watertight=False)
+main = max(parts, key=lambda m: len(m.faces))
+```
+
+`mesh.split(only_watertight=False)` is required — `only_watertight=True` (default) may return empty list for non-watertight assemblies. After keeping `main`, assign colors and render normally.
+
+## 2026-04-10 — Camera distance formula: use extents.max() not mesh.scale
+
+`mesh.scale` is the mean edge length normalized to a bounding sphere radius — it is unreliable for flat or non-uniform meshes:
+- A 100×100×12mm flange: `mesh.scale` ≈ 45 → camera at `45 * 2.5 = 112.5` (too far, object appears tiny)
+- Same flange: `extents.max()` = 100 → camera at `100 * 1.1 = 110` (fills the frame correctly)
+
+Correct formula by object class:
+- Flat objects (flanges, brackets, plates): `extents.max() * 1.0` to `1.2`
+- Tall objects (housings, nozzles, shafts): `extents.max() * 1.5` to `1.8`
+- Assemblies: `extents.max() * 1.3`
+- Never use `mesh.scale * N` for gallery/preview renders
+
+## 2026-04-10 — KiCad SVG in gallery: use img not object
+
+`<object type="image/svg+xml" data="file.svg">` renders inconsistently in browsers:
+- Chrome: may render dark or apply unexpected color transforms
+- Safari: may display at wrong size
+- The KiCad SVG uses explicit fill colors — browsers apply their own contrast filters
+
+Fix: render the KiCad layout as a matplotlib PNG (BOM layout renderer) and use `<img src="file.png">`. The matplotlib BOM layout is more reliable and visually cleaner for gallery purposes. Only use `<object>` SVG if the SVG has explicit white background fill.
+
+## 2026-04-10 — viewer.html: dynamic fog/camera.far for large STL models
+
+Three.js default camera.far=1000 clips large models (terrain, civil geometry) to a black screen.
+Fix: after STL load, compute model bounding sphere radius and set camera.far = radius * 10, and
+fog end = radius * 8. Call camera.updateProjectionMatrix() after. Also update OrbitControls
+maxDistance to radius * 5 so the user can zoom out far enough to see the full model.
+
+## 2026-04-10 — viewer.html: terrain Z-up detection and auto-rotate
+
+Terrain STLs are generated in Z-up orientation. viewer.html detected this and auto-rotated:
+condition: mesh.geometry.boundingBox where y > 15*z AND y > 1000 AND x > 200 (metres-scale mesh).
+When triggered: rotate scene -90° around X axis so Z becomes up and the terrain lies flat.
+This avoids manual camera adjustment for all terrain/civil STL outputs.
+
+## 2026-04-10 — visual_verifier.py: 4th isometric view using Rx@Ry rotation
+
+Added a 4th rendered view: isometric using explicit rotation matrix composition.
+Formula: Rx = rotation about X-axis by -35.264°, Ry = rotation about Z-axis by 45°.
+Combined: R = Ry @ Rx applied to vertex coordinates before projection.
+View label: "Isometric view (standard engineering isometric — X right, Y into page, Z up)".
+This gives a familiar 3D perspective for the vision model to check overall shape.
+
+## 2026-04-10 — visual_verifier.py: actual mm dimensions in view titles
+
+View titles now include actual bounding box dimensions pulled from mesh.bounding_box.extents.
+Format: "Top view — {W:.0f} x {D:.0f} mm". Vision model uses these to cross-check proportions
+against spec dims without having to infer scale from the image alone.
+
+## 2026-04-10 — visual_verifier.py: volume plausibility + Euler characteristic hole count
+
+Volume plausibility check: if mesh.is_watertight, compute expected volume from bounding box
+(bbox_vol). Actual volume should be 5–90% of bbox_vol. Below 5% = likely shell/empty. Above 90%
+= likely solid cube (feature generation failed). Added as a precheck veto.
+
+Euler characteristic hole count: holes = 1 - (V - E + F) / 2 for a closed orientable surface.
+This gives topological hole count (handles). For a flange: expect holes = n_bolts + 1 (bore).
+Check added as a soft warning (does not veto), shown in verify log.
+
+## 2026-04-10 — visual_verifier.py: winding consistency check
+
+Added check: sample 200 random face pairs sharing an edge. If the shared edge has opposing
+half-edge orientations (consistent winding), score += 1. If same orientation, score -= 1.
+Result < 160/200 = winding inconsistency warning. Non-manifold meshes always fail this.
+Added as soft warning alongside watertight check.
+
+## 2026-04-10 — visual_verifier.py: cross-validation threshold lowered to 0.80
+
+Changed cross-validation trigger threshold from 0.90 to 0.80. Previously a primary provider
+at confidence 0.85 would not trigger cross-validation; now it does. Reduces false passes from
+Groq/Gemini when model is only moderately confident. Anthropic still not cross-validated.
+
+## 2026-04-10 — visual_verifier.py: spec-driven proportion expectations in vision prompt
+
+The vision prompt now includes a "proportion expectations" section derived from spec:
+- od_mm / height_mm ratio → "should appear roughly N× wider than tall in front/side views"
+- n_blades, n_fins → "count visible features — expect exactly N"
+- bore_mm / od_mm ratio → "center hole should be ~N% of total diameter"
+These anchors reduce hallucinated pass rates when geometry is obviously wrong proportions.
+
+## 2026-04-10 — visual_verifier.py: FAIL bias instruction in prompt
+
+Added explicit instruction: "When in doubt, report FAIL. A false FAIL is recoverable (pipeline
+retries); a false PASS wastes CAM time and material. Bias toward rejection."
+Measurably reduced confident-PASS on borderline/wrong geometry when tested on known bad STLs.
+
+## 2026-04-10 — Gallery render scripts: matplotlib painter's algorithm for 3D STL
+
+PolyCollection with painter's algorithm (face depth sort back-to-front) produces convincing
+solid 3D renders without OpenGL or PyVista:
+- depths = face_verts[:, :, depth_ax].mean(axis=1); order = np.argsort(-depths)
+- Two-light shading: ambient=0.22, key+fill. Steel-blue palette: (0.55, 0.65, 0.82).
+- Render faces as 2D polygons with facecolors, edgecolors='none'.
+Failure modes: flat meshes (same depth for all faces) → Z-fight; edge-on revolves → 1px line.
+Use this for scan_cad.png, eng_drawing auxiliary views, etc.
+
+## 2026-04-10 — Windows font: no circled-letter Unicode in DejaVu Sans Mono
+
+Unicode circled letters (U+24B6 "A", U+24B7 "B", etc.) are absent from DejaVu Sans Mono on
+Windows. They render as empty boxes in matplotlib. Fix: use ASCII [A] [B] style for detail view
+labels and drawing annotation callouts. Also affects: ➀ ➁ (circled digits U+2780+).
+Safe characters on all platforms: plain ASCII + basic Latin extended only.
+
+## 2026-04-10 — Civil site plans: required professional elements
+
+A professional civil site plan requires all of the following to pass visual QA:
+- Survey coordinate grid (northing/easting labels on grid lines, N-arrow)
+- Contour lines at regular intervals with elevation labels (major every 5th interval)
+- Spot elevations at key corners (format: ▼ 312.4)
+- Property lines with bearing/distance annotations (N45°30'E 125.00')
+- APWA utility notation: water (W), sewer (S), gas (G), electric (E) with invert elevations
+- Area tabulation table (total site, impervious, open space, etc.)
+- Professional title block (project name, date, scale, sheet, engineer stamp block)
+Missing any of these causes vision model to report FAIL on civil drawing checks.
+
+## 2026-04-10 — Engineering drawings: required ASME elements
+
+A professional engineering drawing (turbopump, mechanical part) requires:
+- ASME title block (part name, drawing number, material, scale, tolerance block, revision)
+- 3rd-angle projection with symbol (circle with cone frustum symbol, labeled "THIRD ANGLE")
+- At least 3 views: top, front, right side with centerlines and hidden lines (dashed)
+- GD&T feature control frames (flatness, perpendicularity, true position, etc.)
+- Detail view with magnification label (DETAIL A, SCALE 2:1)
+- Isometric reference view labeled "ISOMETRIC VIEW — NOT FOR MANUFACTURING"
+- All dimensions in mm with tolerance (e.g., 125.0 ± 0.05)
+
 ## 2026-04-07 — Dashboard live stream fix
 - `selectRun()` was closing the SSE stream after 3 seconds (designed for replay). When a user clicks a RUNNING run in the left panel, the stream closed before the run finished. Fix: extracted `_attachStream(id, isLive)` helper — `isLive=true` keeps the stream open until done; `isLive=false` closes after 8s for replay.
 - `init()` with `?from_vis=<run_id>` now calls `_attachStream` instead of inline EventSource logic — all stream management goes through one place.
@@ -62,3 +465,43 @@ Matplotlib is the reliable fallback for SVG/PNG rendering on Windows without GTK
 - Run history persistence: `_save_run_log()` writes completed runs (last 200 lines each) to `outputs/dashboard_run_log.json` after every run. `_load_run_log()` reloads on startup — solves the problem where server restarts lose run history and `?from_vis` links break.
 - Three.js STL preview: use importmap + `<script type="module">` to expose `window.THREE`, `window.STLLoader`, `window.OrbitControls`. Fetch STL via `/api/file?path=` (security-checked), parse with `STLLoader.parse(arrayBuffer)`, center geometry on origin before rendering.
 - StructSight site image passthrough: stored as `site_image_b64` + `site_image_type` in run record; shown as thumbnail in the pipeline banner when `?from_vis` param is present.
+
+## Visual Verifier Rendering Improvements (2026-04-10 Part 6)
+
+### GL renderer works on this machine via visible=True pyglet
+- `scene.save_image(visible=True)` opens a pyglet window briefly and captures it
+- GL renders top/front/iso (not side) — returns early, matplotlib fallback never runs
+- CONSEQUENCE: any improvements made only to the matplotlib fallback path were dead code on this machine
+- FIX: shared helper `_append_section_view()` called from BOTH GL and matplotlib paths
+
+### `trimesh.intersections.slice_mesh_plane()` requires shapely
+- shapely not installed on this system → function raises ImportError
+- Use `mesh.section()` instead (no shapely, always available)
+- `mesh.section()` returns Path3D, convert with `to_2D()` (or deprecated `to_planar()`)
+
+### Cross-section rendering approach
+- Sort closed polygon loops by enclosed area: largest = outer boundary, smaller = holes
+- Fill outer boundary with solid color (#4a6080), inner loops with background (#111111)
+- Draw all contour lines with edge color (#88aacc)
+- Result: correct fill for solid-with-bore parts; edge lines reveal all internal features
+
+### Back-face culling for matplotlib PolyCollection
+- Add cam_dir vector to view_defs tuples
+- `facing = face_normals @ cam_dir_unit` — positive = front-facing
+- `fv_vis = face_verts[facing > -0.05]` — threshold keeps near-90° grazing faces
+- Prevents back-faces from incorrectly overwriting front-faces on concave geometry
+
+### Painter's algorithm sign correction
+- Original code used `argsort(-depths)` = largest-depth-first = closest faces first (wrong)
+- Correct painter's algorithm: ascending sort = far faces painted first, close faces on top
+- Changed to `argsort(depths)` for orthographic views
+- ISO view uses rotated Z as depth; separate block handles that correctly
+
+### `short_goal = goal[:50]` variable scope
+- Was defined only inside the matplotlib fallback block
+- The GL success path called `_append_section_view(... short_goal ...)` before it was defined
+- FIX: moved `short_goal = goal[:50]` to right after `slug = _slugify(goal)`, at the top of _render_views
+
+### Geometry precheck additions
+- Disconnected component count: `mesh.split(only_watertight=False)` → should be 1
+- Minimum face count: `len(mesh.faces) >= 20` → catches degenerate/empty meshes
