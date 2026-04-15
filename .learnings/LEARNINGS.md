@@ -368,6 +368,21 @@ When trimesh GL fails for large terrain meshes, use matplotlib topographic rende
 
 This produces a clean topographic map with elevation shading and contour lines. Superior to any 3D projection for terrain.
 
+## 2026-04-15 — Vercel root directory config for frontend-in-subdirectory repos
+
+When the frontend lives in a subdirectory (e.g., `frontend/`), add a root-level `vercel.json` that explicitly points to it. Without this, Vercel searches for `package.json` at the repo root, finds nothing, and fails silently with no actionable error.
+
+Minimal root-level `vercel.json`:
+```json
+{
+  "buildCommand": "cd frontend && npm run build",
+  "outputDirectory": "frontend/.next",
+  "installCommand": "cd frontend && npm install"
+}
+```
+
+Keep this config in code (committed `vercel.json`), not in the Vercel dashboard — it travels with the repo and is visible during review.
+
 ## 2026-04-10 — Removing disconnected mesh components
 
 When an STL has multiple disconnected bodies (e.g., assembly with floating stub), split and keep only the largest:

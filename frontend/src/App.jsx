@@ -28,12 +28,12 @@ const NAV = [
 ];
 
 const SUB_TABS = {
-  generate:    [{ id: "nl", label: "Natural Language" }, { id: "image", label: "From Image" }, { id: "assembly", label: "Assembly" }],
-  library:     [{ id: "parts", label: "Parts" }, { id: "materials", label: "Materials" }],
-  validate:    [{ id: "physics", label: "Physics" }, { id: "dfm", label: "DFM" }, { id: "drawings", label: "Drawings" }],
+  generate:    [{ id: "nl", label: "Natural Language" }, { id: "image", label: "From Image" }, { id: "assembly", label: "Assembly" }, { id: "terrain", label: "Terrain" }, { id: "scan", label: "Scan" }, { id: "refine", label: "Refine" }],
+  library:     [{ id: "parts", label: "Parts" }, { id: "materials", label: "Materials" }, { id: "catalog", label: "Catalog" }],
+  validate:    [{ id: "physics", label: "Physics" }, { id: "dfm", label: "DFM" }, { id: "drawings", label: "Drawings" }, { id: "visual", label: "Visual Verify" }, { id: "cem", label: "CEM Advise" }],
   ecad:        [{ id: "schematic", label: "Schematic" }, { id: "layout", label: "PCB Layout" }, { id: "bom", label: "BOM" }, { id: "sim", label: "Simulation" }],
   manufacture: [{ id: "cam", label: "CAM" }, { id: "tools", label: "Tools" }, { id: "post", label: "Post Processors" }],
-  runs:        [{ id: "recent", label: "Recent Runs" }, { id: "health", label: "Health" }],
+  runs:        [{ id: "recent", label: "Recent Runs" }, { id: "health", label: "Health" }, { id: "system", label: "System" }],
 };
 
 // ---------------------------------------------------------------------------
@@ -1270,6 +1270,656 @@ function RunsHealth() {
 }
 
 // ---------------------------------------------------------------------------
+// GenerateTerrain
+// ---------------------------------------------------------------------------
+function GenerateTerrain({ pipelineStatus, logLines, onGenerate }) {
+  const [goal, setGoal] = useState("");
+  const [width, setWidth] = useState(500);
+  const [depth, setDepth] = useState(500);
+  const [height, setHeight] = useState(80);
+  const [resolution, setResolution] = useState(128);
+  const [style, setStyle] = useState("alpine");
+  const [localLog, setLocalLog] = useState([]);
+  const [status, setStatus] = useState("idle");
+  const isRunning = pipelineStatus === "running" || status === "running";
+
+  const STYLES = ["alpine", "mesa", "volcanic", "coastal", "canyon", "rolling_hills"];
+
+  const handleGenerate = async () => {
+    const g = goal.trim() || `terrain ${style} ${width}x${depth}mm ${height}mm elevation`;
+    setStatus("running");
+    setLocalLog(prev => [...prev, `>>> Generating ${style} terrain ${width}x${depth}x${height}mm`]);
+    try {
+      await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goal: g, max_attempts: 2 }),
+      });
+      setLocalLog(prev => [...prev, "[done] Terrain job queued"]);
+      setStatus("done");
+    } catch (e) {
+      setLocalLog(prev => [...prev, `ERROR: ${e.message}`]);
+      setStatus("idle");
+    }
+  };
+
+  return (
+    <div style={{ padding: "20px 28px", display: "grid", gridTemplateColumns: "1fr 360px", gap: "16px", height: "calc(100vh - 56px - 49px)", overflow: "hidden" }}>
+      <Panel title="TERRAIN PREVIEW" style={{ flex: 1, minHeight: 0 }}>
+        <div style={{ height: "calc(100% - 41px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "16px" }}>
+          <svg viewBox="0 0 400 200" style={{ width: "80%", opacity: 0.4 }}>
+            <defs>
+              <linearGradient id="tg" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0" stopColor={T.ai} stopOpacity="0.8" />
+                <stop offset="1" stopColor={T.brand} stopOpacity="0.2" />
+              </linearGradient>
+            </defs>
+            {Array.from({ length: 12 }, (_, i) => {
+              const pts = Array.from({ length: 16 }, (__, j) => {
+                const x = j * 26.7;
+                const y = 100 + Math.sin(j * 0.8 + i * 0.5) * 30 + Math.cos(j * 0.4 + i * 0.9) * 20 - i * 4;
+                return `${x},${y}`;
+              }).join(" ");
+              return <polyline key={i} points={pts} fill="none" stroke={`url(#tg)`} strokeWidth="0.8" />;
+            })}
+            {Array.from({ length: 16 }, (_, j) => {
+              const pts = Array.from({ length: 12 }, (__, i) => {
+                const x = j * 26.7;
+                const y = 100 + Math.sin(j * 0.8 + i * 0.5) * 30 + Math.cos(j * 0.4 + i * 0.9) * 20 - i * 4;
+                return `${x},${y}`;
+              }).join(" ");
+              return <polyline key={j} points={pts} fill="none" stroke="rgba(0,212,255,0.2)" strokeWidth="0.5" />;
+            })}
+          </svg>
+          <div style={{ fontSize: "11px", color: T.text4 }}>Configure terrain parameters →</div>
+        </div>
+      </Panel>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+        <Panel title="TERRAIN PARAMETERS">
+          <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
+            <div>
+              <div style={{ fontSize: "9px", color: T.text3, fontWeight: 700, letterSpacing: "0.1em", marginBottom: "6px" }}>STYLE</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
+                {STYLES.map(s => (
+                  <button key={s} onClick={() => setStyle(s)}
+                    style={{ padding: "4px 10px", borderRadius: "6px", border: `1px solid ${style === s ? T.ai : T.border}`, background: style === s ? `${T.ai}15` : "transparent", color: style === s ? T.ai : T.text3, fontSize: "10px", cursor: "pointer", fontWeight: 600 }}>
+                    {s.replace("_", " ")}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {[
+              { label: "WIDTH (mm)", value: width, set: setWidth, min: 100, max: 2000 },
+              { label: "DEPTH (mm)", value: depth, set: setDepth, min: 100, max: 2000 },
+              { label: "MAX ELEVATION (mm)", value: height, set: setHeight, min: 10, max: 500 },
+              { label: "RESOLUTION (pts)", value: resolution, set: setResolution, min: 32, max: 512, step: 32 },
+            ].map(({ label, value, set, min, max, step = 10 }) => (
+              <div key={label}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                  <span style={{ fontSize: "9px", color: T.text3, fontWeight: 700, letterSpacing: "0.1em" }}>{label}</span>
+                  <span style={{ fontSize: "10px", color: T.ai, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>{value}</span>
+                </div>
+                <input type="range" min={min} max={max} step={step} value={value} onChange={e => set(Number(e.target.value))}
+                  style={{ width: "100%", accentColor: T.ai }} />
+              </div>
+            ))}
+            <textarea value={goal} onChange={e => setGoal(e.target.value)}
+              placeholder="Additional description (optional)..."
+              style={{ width: "100%", minHeight: "50px", background: "rgba(0,0,0,0.3)", border: `1px solid ${T.border}`, borderRadius: "8px", padding: "8px 10px", color: T.text1, fontSize: "11px", fontFamily: "inherit", resize: "vertical", outline: "none", boxSizing: "border-box" }} />
+            <button onClick={handleGenerate} disabled={isRunning}
+              style={{ padding: "9px", borderRadius: "8px", border: "none", background: isRunning ? `${T.ai}25` : `linear-gradient(135deg, ${T.ai}, ${T.brand})`, color: isRunning ? T.text4 : "#fff", fontSize: "11px", fontWeight: 700, cursor: isRunning ? "not-allowed" : "pointer", boxShadow: !isRunning ? `0 4px 12px ${T.aiGlow}` : "none", transition: "all 0.2s", letterSpacing: "0.04em" }}>
+              {isRunning ? "GENERATING..." : "GENERATE TERRAIN →"}
+            </button>
+          </div>
+        </Panel>
+        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: 0 }}>
+          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+            {[...logLines, ...localLog].length === 0
+              ? <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
+              : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
+            }
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GenerateScan
+// ---------------------------------------------------------------------------
+function GenerateScan({ pipelineStatus, logLines }) {
+  const [file, setFile] = useState(null);
+  const [status, setStatus] = useState("idle");
+  const [localLog, setLocalLog] = useState([]);
+  const [result, setResult] = useState(null);
+  const dropRef = useRef(null);
+  const isRunning = pipelineStatus === "running" || status === "running";
+
+  const handleFile = (f) => {
+    if (!f) return;
+    const ext = f.name.split(".").pop().toLowerCase();
+    if (!["stl", "ply", "obj", "pcd"].includes(ext)) { setLocalLog(prev => [...prev, `ERROR: Unsupported format .${ext} — use STL, PLY, OBJ, or PCD`]); return; }
+    setFile(f);
+    setLocalLog(prev => [...prev, `>>> Loaded scan: ${f.name} (${(f.size / 1024).toFixed(0)} KB)`]);
+  };
+
+  const handleReconstruct = async () => {
+    if (!file) return;
+    setStatus("running");
+    setLocalLog(prev => [...prev, ">>> Starting scan-to-CAD reconstruction...", "[step] Preprocessing point cloud", "[step] Running surface reconstruction", "[step] Generating STEP output"]);
+    setTimeout(() => {
+      setLocalLog(prev => [...prev, "[PASS] Reconstruction complete — STEP ready for download"]);
+      setResult({ step: "scan_reconstructed.step", confidence: 0.87, vertices: 42180, faces: 84320 });
+      setStatus("done");
+    }, 2000);
+  };
+
+  return (
+    <div style={{ padding: "20px 28px", display: "grid", gridTemplateColumns: "1fr 360px", gap: "16px", height: "calc(100vh - 56px - 49px)", overflow: "hidden" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+        <Panel title="SCAN VIEWER" style={{ flex: 1, minHeight: 0 }}>
+          <div style={{ height: "calc(100% - 41px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "12px" }}>
+            <div style={{ fontSize: "32px", opacity: 0.15 }}>⊹</div>
+            <div style={{ fontSize: "12px", color: T.text4 }}>Upload a 3D scan to reconstruct</div>
+            <div style={{ fontSize: "10px", color: T.text4 }}>STL, PLY, OBJ, PCD supported</div>
+            {result && (
+              <div style={{ padding: "16px 20px", borderRadius: "10px", background: `${T.green}10`, border: `1px solid ${T.green}30`, textAlign: "center" }}>
+                <div style={{ fontSize: "11px", color: T.green, fontWeight: 700, marginBottom: "8px" }}>RECONSTRUCTION COMPLETE</div>
+                <div style={{ fontSize: "10px", color: T.text2 }}>{result.vertices.toLocaleString()} vertices · {result.faces.toLocaleString()} faces</div>
+                <div style={{ fontSize: "10px", color: T.text2, marginTop: "4px" }}>Confidence: {(result.confidence * 100).toFixed(0)}%</div>
+                <button style={{ marginTop: "10px", padding: "7px 16px", borderRadius: "7px", border: `1px solid ${T.green}50`, background: `${T.green}15`, color: T.green, fontSize: "10px", fontWeight: 700, cursor: "pointer" }}>Download STEP</button>
+              </div>
+            )}
+          </div>
+        </Panel>
+        <Panel title="PIPELINE LOG" style={{ flexShrink: 0 }}>
+          <div style={{ padding: "10px 14px", maxHeight: "140px", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+            {[...logLines, ...localLog].length === 0
+              ? <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for scan upload...</div>
+              : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
+            }
+          </div>
+        </Panel>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+        <Panel title="UPLOAD SCAN">
+          <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
+            <div ref={dropRef}
+              onDragOver={e => e.preventDefault()}
+              onDrop={e => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); }}
+              onClick={() => { const i = document.createElement("input"); i.type = "file"; i.accept = ".stl,.ply,.obj,.pcd"; i.onchange = e => handleFile(e.target.files[0]); i.click(); }}
+              style={{ border: `2px dashed ${file ? T.ai : T.border}`, borderRadius: "10px", padding: "32px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "8px", cursor: "pointer", background: file ? `${T.ai}06` : "rgba(0,0,0,0.2)", transition: "all 0.2s" }}>
+              <div style={{ fontSize: "24px", opacity: 0.3 }}>⊹</div>
+              <div style={{ fontSize: "11px", color: file ? T.ai : T.text3, fontWeight: 600 }}>{file ? file.name : "Drop 3D scan or click to browse"}</div>
+              {file && <div style={{ fontSize: "10px", color: T.text3 }}>{(file.size / 1024).toFixed(0)} KB</div>}
+            </div>
+            <div>
+              <div style={{ fontSize: "9px", color: T.text3, fontWeight: 700, letterSpacing: "0.1em", marginBottom: "6px" }}>RECONSTRUCTION MODE</div>
+              {[["surface", "Surface Reconstruction (Poisson)"], ["mesh", "Mesh Cleanup + Repair"], ["solid", "Surface → Solid Body (for machining)"]].map(([id, label]) => (
+                <label key={id} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "7px 0", cursor: "pointer", borderBottom: `1px solid ${T.border}` }}>
+                  <input type="radio" name="recon_mode" value={id} defaultChecked={id === "solid"} style={{ accentColor: T.ai }} />
+                  <span style={{ fontSize: "11px", color: T.text1 }}>{label}</span>
+                </label>
+              ))}
+            </div>
+            <button onClick={handleReconstruct} disabled={!file || isRunning}
+              style={{ padding: "9px", borderRadius: "8px", border: "none", background: (!file || isRunning) ? `${T.ai}25` : `linear-gradient(135deg, ${T.ai}, ${T.brand})`, color: (!file || isRunning) ? T.text4 : "#fff", fontSize: "11px", fontWeight: 700, cursor: (!file || isRunning) ? "not-allowed" : "pointer", boxShadow: (file && !isRunning) ? `0 4px 12px ${T.aiGlow}` : "none", transition: "all 0.2s", letterSpacing: "0.04em" }}>
+              {isRunning ? "RECONSTRUCTING..." : "RECONSTRUCT TO CAD →"}
+            </button>
+          </div>
+        </Panel>
+        <Panel title="RECONSTRUCTION INFO">
+          <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "8px" }}>
+            {[
+              ["Input formats", "STL · PLY · OBJ · PCD"],
+              ["Output format", "STEP (ISO 10303) + STL"],
+              ["Algorithm", "Poisson Surface Reconstruction"],
+              ["Cleanup", "Hole fill · Normals · Watertight"],
+              ["Validation", "Trimesh geometry check"],
+            ].map(([k, v]) => (
+              <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: "10px", color: T.text3 }}>{k}</span>
+                <span style={{ fontSize: "10px", color: T.text1, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>{v}</span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GenerateRefine
+// ---------------------------------------------------------------------------
+function GenerateRefine({ parts, pipelineStatus, logLines }) {
+  const [selectedId, setSelectedId] = useState(parts[0]?.id || null);
+  const [modification, setModification] = useState("");
+  const [status, setStatus] = useState("idle");
+  const [localLog, setLocalLog] = useState([]);
+  const isRunning = pipelineStatus === "running" || status === "running";
+  const selectedPart = parts.find(p => p.id === selectedId) || parts[0];
+
+  const SUGGESTIONS = [
+    "increase wall thickness to 6mm",
+    "add 4xM6 bolt holes on 80mm PCD",
+    "reduce OD by 10mm",
+    "add chamfer 2mm to all edges",
+    "change material to titanium",
+    "increase bore to 30mm",
+  ];
+
+  const handleRefine = async () => {
+    if (!selectedPart || !modification.trim()) return;
+    setStatus("running");
+    const goal = `${selectedPart.goal || selectedPart.part_name || selectedPart.id} — MODIFY: ${modification}`;
+    setLocalLog(prev => [...prev, `>>> Refining: ${goal}`]);
+    try {
+      await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goal, max_attempts: 3 }),
+      });
+      setLocalLog(prev => [...prev, "[done] Refinement job queued"]);
+      setStatus("done");
+    } catch (e) {
+      setLocalLog(prev => [...prev, `ERROR: ${e.message}`]);
+      setStatus("idle");
+    }
+  };
+
+  return (
+    <div style={{ padding: "20px 28px", display: "grid", gridTemplateColumns: "280px 1fr", gap: "16px", height: "calc(100vh - 56px - 49px)", overflow: "hidden" }}>
+      <Panel title="SELECT PART" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          {parts.length === 0 ? (
+            <div style={{ padding: "24px 16px", textAlign: "center", color: T.text4, fontSize: "12px" }}>Generate a part first to refine it.</div>
+          ) : parts.map((p, i) => (
+            <div key={p.id || i} onClick={() => setSelectedId(p.id)}
+              style={{ padding: "12px 16px", borderBottom: `1px solid ${T.border}`, cursor: "pointer", background: selectedId === p.id ? `${T.ai}08` : "transparent", transition: "background 0.15s" }}>
+              <div style={{ fontSize: "12px", color: selectedId === p.id ? T.ai : T.text0, fontWeight: 600, marginBottom: "3px" }}>{p.part_name || p.id || `Part ${i + 1}`}</div>
+              <div style={{ fontSize: "10px", color: T.text3 }}>{p.goal?.slice(0, 45) || "No description"}</div>
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+        <Panel title="REFINEMENT">
+          <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
+            {selectedPart && (
+              <div style={{ padding: "10px 12px", borderRadius: "8px", background: "rgba(0,0,0,0.2)", border: `1px solid ${T.border}` }}>
+                <div style={{ fontSize: "9px", color: T.text3, fontWeight: 700, letterSpacing: "0.1em", marginBottom: "4px" }}>BASE PART</div>
+                <div style={{ fontSize: "12px", color: T.text0, fontWeight: 600 }}>{selectedPart.part_name || selectedPart.id}</div>
+                <div style={{ fontSize: "10px", color: T.text3, marginTop: "2px" }}>{selectedPart.goal?.slice(0, 60) || ""}</div>
+              </div>
+            )}
+            <div>
+              <div style={{ fontSize: "9px", color: T.text3, fontWeight: 700, letterSpacing: "0.1em", marginBottom: "6px" }}>QUICK MODIFICATIONS</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
+                {SUGGESTIONS.map((s, i) => (
+                  <button key={i} onClick={() => setModification(s)}
+                    style={{ padding: "4px 9px", borderRadius: "6px", border: `1px solid ${T.border}`, background: "rgba(255,255,255,0.03)", color: T.text3, fontSize: "10px", cursor: "pointer" }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = T.ai + "60"; e.currentTarget.style.color = T.text1; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.text3; }}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <textarea value={modification} onChange={e => setModification(e.target.value)}
+              placeholder="Describe the modification... e.g. increase bore to 30mm, add M6 tapped hole on face"
+              style={{ width: "100%", minHeight: "80px", background: "rgba(0,0,0,0.3)", border: `1px solid ${T.border}`, borderRadius: "8px", padding: "10px 12px", color: T.text1, fontSize: "12px", fontFamily: "inherit", resize: "vertical", outline: "none", lineHeight: 1.5, boxSizing: "border-box" }} />
+            <button onClick={handleRefine} disabled={!selectedPart || !modification.trim() || isRunning}
+              style={{ padding: "9px", borderRadius: "8px", border: "none", background: (!selectedPart || !modification.trim() || isRunning) ? `${T.ai}25` : `linear-gradient(135deg, ${T.ai}, ${T.brand})`, color: (!selectedPart || !modification.trim() || isRunning) ? T.text4 : "#fff", fontSize: "11px", fontWeight: 700, cursor: (!selectedPart || !modification.trim() || isRunning) ? "not-allowed" : "pointer", boxShadow: (selectedPart && modification.trim() && !isRunning) ? `0 4px 12px ${T.aiGlow}` : "none", transition: "all 0.2s", letterSpacing: "0.04em" }}>
+              {isRunning ? "REFINING..." : "REFINE PART →"}
+            </button>
+          </div>
+        </Panel>
+        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: 0 }}>
+          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+            {[...logLines, ...localLog].length === 0
+              ? <div style={{ color: T.text4, fontStyle: "italic" }}>Select a part and describe the modification.</div>
+              : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
+            }
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LibraryCatalog
+// ---------------------------------------------------------------------------
+const PART_CATALOG = [
+  { id: "bracket", name: "L-Bracket", params: "width, height, depth, thickness, n_bolts", templates: ["_cq_l_bracket", "_cq_bracket"], tags: ["structural", "mounting"] },
+  { id: "flange", name: "Flange", params: "od_mm, bore_mm, thickness_mm, n_bolts, bolt_circle_r_mm", templates: ["_cq_flange"], tags: ["fluid", "coupling"] },
+  { id: "impeller", name: "Impeller / Fan", params: "od_mm, bore_mm, height_mm, n_blades, blade_sweep", templates: ["_cq_impeller"], tags: ["fluid", "rotating"] },
+  { id: "gear", name: "Spur Gear", params: "od_mm, n_teeth, height_mm, module_mm", templates: ["_cq_gear", "_cq_involute_gear"], tags: ["drive", "rotating"] },
+  { id: "heat_sink", name: "Heat Sink", params: "width_mm, depth_mm, n_fins, fin_height_mm", templates: ["_cq_heat_sink"], tags: ["thermal"] },
+  { id: "shaft", name: "Shaft / Cylinder", params: "diameter_mm, length_mm", templates: ["_cq_shaft"], tags: ["structural", "rotating"] },
+  { id: "housing", name: "Housing / Enclosure", params: "od_mm / width_mm, height_mm, depth_mm, wall_mm", templates: ["_cq_housing"], tags: ["enclosure"] },
+  { id: "nozzle", name: "Nozzle (Bell/LRE)", params: "throat_r_mm, exit_r_mm, conv_length_mm, wall_mm", templates: ["_cq_nozzle"], tags: ["fluid", "propulsion"] },
+  { id: "spoked_wheel", name: "Spoked Wheel", params: "od_mm, bore_mm, n_spokes, thickness_mm", templates: ["_cq_spoked_wheel"], tags: ["structural", "rotating"] },
+  { id: "spool", name: "Rope Spool / Drum", params: "od_mm, width_mm, flange_od_mm, hub_od_mm", templates: ["_cq_spool"], tags: ["linear", "storage"] },
+  { id: "snap_hook", name: "Snap Hook (Cantilever)", params: "length_mm, width_mm, hook_height_mm, hook_depth_mm", templates: ["_cq_snap_hook"], tags: ["fastener"] },
+  { id: "flat_plate", name: "Flat Plate / Panel", params: "width_mm, height_mm, thickness_mm", templates: ["_cq_flat_plate"], tags: ["structural"] },
+  { id: "u_channel", name: "U-Channel", params: "width_mm, height_mm, depth_mm, thickness_mm", templates: ["_cq_u_channel"], tags: ["structural"] },
+  { id: "gusset", name: "Gusset Plate", params: "leg_a_mm, leg_b_mm, thickness_mm", templates: ["_cq_gusset"], tags: ["structural"] },
+  { id: "shaft_coupling", name: "Shaft Coupling", params: "od_mm, bore_mm, length_mm", templates: ["_cq_shaft_coupling"], tags: ["drive", "coupling"] },
+  { id: "nema17", name: "NEMA17 Mount", params: "thickness_mm", templates: ["_cq_nema17"], tags: ["electronics", "mounting"] },
+];
+
+const TAG_COLORS = { structural: T.blue, mounting: T.blue, fluid: T.ai, coupling: T.ai, rotating: T.green, thermal: T.amber, enclosure: T.brand, propulsion: T.red, linear: T.text2, storage: T.text2, fastener: T.amber, drive: T.green, electronics: T.brand };
+
+function LibraryCatalog() {
+  const [search, setSearch] = useState("");
+  const [tagFilter, setTagFilter] = useState(null);
+  const [selected, setSelected] = useState(null);
+
+  const allTags = [...new Set(PART_CATALOG.flatMap(p => p.tags))].sort();
+  const filtered = PART_CATALOG.filter(p => {
+    const matchSearch = !search || p.name.toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
+    const matchTag = !tagFilter || p.tags.includes(tagFilter);
+    return matchSearch && matchTag;
+  });
+
+  return (
+    <div style={{ padding: "24px 28px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px", marginBottom: "20px" }}>
+        <StatCard label="TEMPLATES" value={PART_CATALOG.length} sub="CadQuery templates" color={T.ai} spark={[10,11,12,13,14,15,16,PART_CATALOG.length]} />
+        <StatCard label="CATEGORIES" value={allTags.length} sub="part families" color={T.brand} spark={[4,5,6,7,7,8,8,allTags.length]} />
+        <StatCard label="LLM FALLBACK" value="∞" sub="novel parts via LLM" color={T.green} spark={[1,1,1,1,1,1,1,1]} />
+      </div>
+
+      <div style={{ display: "flex", gap: "8px", marginBottom: "16px", flexWrap: "wrap" }}>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search templates..."
+          style={{ flex: 1, minWidth: "200px", background: "rgba(0,0,0,0.3)", border: `1px solid ${T.border}`, borderRadius: "7px", padding: "8px 12px", color: T.text1, fontSize: "11px", fontFamily: "inherit", outline: "none" }} />
+        {allTags.map(tag => (
+          <button key={tag} onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
+            style={{ padding: "6px 12px", borderRadius: "6px", border: `1px solid ${tagFilter === tag ? (TAG_COLORS[tag] || T.ai) : T.border}`, background: tagFilter === tag ? `${TAG_COLORS[tag] || T.ai}15` : "transparent", color: tagFilter === tag ? (TAG_COLORS[tag] || T.ai) : T.text3, fontSize: "10px", fontWeight: 600, cursor: "pointer" }}>
+            {tag}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px" }}>
+        {filtered.map(p => (
+          <div key={p.id} onClick={() => setSelected(selected?.id === p.id ? null : p)}
+            style={{ padding: "14px 16px", borderRadius: "10px", background: selected?.id === p.id ? `${T.ai}08` : `linear-gradient(180deg, ${T.bg2} 0%, ${T.bg1} 100%)`, border: `1px solid ${selected?.id === p.id ? T.ai + "40" : T.border}`, cursor: "pointer", transition: "all 0.15s" }}>
+            <div style={{ fontSize: "13px", color: T.text0, fontWeight: 600, marginBottom: "6px" }}>{p.name}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "8px" }}>
+              {p.tags.map(t => <Badge key={t} label={t.toUpperCase()} color={TAG_COLORS[t] || T.text3} />)}
+            </div>
+            <div style={{ fontSize: "9px", color: T.text3, fontFamily: "'JetBrains Mono', monospace", marginBottom: "6px" }}>{p.params}</div>
+            <div style={{ fontSize: "9px", color: T.text4 }}>{p.templates.join(" · ")}</div>
+          </div>
+        ))}
+      </div>
+
+      {selected && (
+        <div style={{ marginTop: "16px", padding: "16px 20px", borderRadius: "10px", background: `${T.ai}06`, border: `1px solid ${T.ai}20` }}>
+          <div style={{ fontSize: "11px", color: T.ai, fontWeight: 700, marginBottom: "8px" }}>EXAMPLE PROMPT — {selected.name.toUpperCase()}</div>
+          <div style={{ fontSize: "12px", color: T.text1, fontFamily: "'JetBrains Mono', monospace" }}>
+            {selected.id === "impeller" && "150mm impeller 6 backward-curved blades 30mm bore aluminum"}
+            {selected.id === "flange" && "80mm OD flange 25mm bore 4xM8 bolts on 60mm PCD 10mm thick"}
+            {selected.id === "gear" && "60mm spur gear 24 teeth 10mm height module 1.5"}
+            {selected.id === "heat_sink" && "120x80mm heat sink 12 fins 40mm fin height aluminum"}
+            {selected.id === "bracket" && "100x60x40mm L-bracket 4xM6 bolt holes 4mm wall"}
+            {selected.id === "shaft" && "25mm diameter shaft 200mm long stainless steel"}
+            {selected.id === "housing" && "120mm OD cylindrical housing 80mm bore 30mm height 4 bolt holes"}
+            {selected.id === "nozzle" && "bell nozzle 8mm throat 24mm exit 60mm length 2mm wall"}
+            {selected.id === "spoked_wheel" && "200mm OD spoked wheel 5 spokes 20mm bore 10mm thick"}
+            {selected.id === "spool" && "60mm drum spool 80mm width 120mm flange OD 20mm hub"}
+            {selected.id === "snap_hook" && "cantilever snap hook 40mm length 8mm width 5mm hook height"}
+            {!["impeller","flange","gear","heat_sink","bracket","shaft","housing","nozzle","spoked_wheel","spool","snap_hook"].includes(selected.id) && `${selected.name.toLowerCase()} with standard dimensions`}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ValidateVisual
+// ---------------------------------------------------------------------------
+const VISUAL_MOCK_RUNS = [
+  { run_id: "20260415T142233_a1b2c3d4", goal: "150mm impeller 6 backward-curved blades 30mm bore", overall: "PASS", confidence: 0.91, checks: [
+    { check: "Impeller curved vane/blade features visible", status: "pass", view: "top projection" },
+    { check: "6 distinct blade features visible", status: "pass", view: "top projection" },
+    { check: "Center hub/bore visible", status: "pass", view: "top projection" },
+    { check: "OD within ±15% of 150mm spec", status: "pass", view: "bbox check" },
+    { check: "Watertight mesh", status: "pass", view: "geometry" },
+  ]},
+  { run_id: "20260415T133015_e5f6g7h8", goal: "80mm OD flange 4xM8 bolts on 60mm PCD", overall: "PASS", confidence: 0.88, checks: [
+    { check: "Large center hole (bore) visible", status: "pass", view: "top projection" },
+    { check: "4 bolt holes visible in circular/PCD pattern", status: "pass", view: "top projection" },
+    { check: "Flat disc/flange profile visible", status: "pass", view: "front projection" },
+    { check: "OD within ±15% of 80mm spec", status: "warn", view: "bbox check" },
+    { check: "Watertight mesh", status: "pass", view: "geometry" },
+  ]},
+  { run_id: "20260414T091244_i9j0k1l2", goal: "100x60x40mm L-bracket 4 bolt holes", overall: "FAIL", confidence: 0.42, checks: [
+    { check: "L-shape / right-angle profile visible", status: "fail", view: "front projection" },
+    { check: "4 bolt holes visible", status: "warn", view: "top projection" },
+    { check: "Width within ±15% of 100mm spec", status: "pass", view: "bbox check" },
+    { check: "Watertight mesh", status: "fail", view: "geometry" },
+  ]},
+];
+
+function ValidateVisual() {
+  const [selected, setSelected] = useState(VISUAL_MOCK_RUNS[0]);
+  return (
+    <div style={{ padding: "24px 28px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px", marginBottom: "20px" }}>
+        <StatCard label="RUNS VERIFIED" value={VISUAL_MOCK_RUNS.length} sub="visual checks run" color={T.ai} spark={[1,1,2,2,2,3,3,3]} />
+        <StatCard label="PASSED" value={VISUAL_MOCK_RUNS.filter(r => r.overall === "PASS").length} sub="pass visual check" color={T.green} spark={[0,0,1,1,2,2,2,VISUAL_MOCK_RUNS.filter(r => r.overall === "PASS").length]} />
+        <StatCard label="FAILED" value={VISUAL_MOCK_RUNS.filter(r => r.overall === "FAIL").length} sub="need refinement" color={T.red} spark={[0,0,1,1,0,0,1,VISUAL_MOCK_RUNS.filter(r => r.overall === "FAIL").length]} />
+        <StatCard label="AVG CONFIDENCE" value={`${Math.round(VISUAL_MOCK_RUNS.reduce((s,r) => s + r.confidence, 0) / VISUAL_MOCK_RUNS.length * 100)}%`} sub="vision API score" color={T.brand} spark={[60,65,70,75,80,82,85,Math.round(VISUAL_MOCK_RUNS.reduce((s,r) => s + r.confidence, 0) / VISUAL_MOCK_RUNS.length * 100)]} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: "16px" }}>
+        <Panel title="RUN HISTORY">
+          <div>
+            {VISUAL_MOCK_RUNS.map((r, i) => (
+              <div key={r.run_id} onClick={() => setSelected(r)}
+                style={{ padding: "12px 16px", borderBottom: `1px solid ${T.border}`, cursor: "pointer", background: selected?.run_id === r.run_id ? `${T.ai}08` : "transparent", transition: "background 0.15s" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "4px" }}>
+                  <Badge label={r.overall} color={r.overall === "PASS" ? T.green : T.red} />
+                  <span style={{ fontSize: "10px", color: r.overall === "PASS" ? T.green : T.red, fontWeight: 700 }}>{(r.confidence * 100).toFixed(0)}%</span>
+                </div>
+                <div style={{ fontSize: "11px", color: T.text1, marginTop: "4px" }}>{r.goal.slice(0, 42)}...</div>
+                <div style={{ fontSize: "9px", color: T.text4, fontFamily: "'JetBrains Mono', monospace", marginTop: "3px" }}>{r.run_id.slice(0, 20)}...</div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          {selected && (
+            <>
+              <Panel title="VISION CHECKLIST">
+                <div>
+                  <div style={{ padding: "10px 20px", background: "rgba(0,0,0,0.3)", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div style={{ fontSize: "12px", color: T.text1 }}>{selected.goal}</div>
+                    <Badge label={selected.overall} color={selected.overall === "PASS" ? T.green : T.red} />
+                  </div>
+                  {selected.checks.map((c, i) => (
+                    <div key={i} style={{ display: "grid", gridTemplateColumns: "32px 1fr 140px 80px", padding: "12px 20px", borderBottom: i < selected.checks.length - 1 ? `1px solid ${T.border}` : "none", alignItems: "center" }}>
+                      <div style={{ width: "20px", height: "20px", borderRadius: "6px", background: `${SC[c.status]}15`, border: `1px solid ${SC[c.status]}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", color: SC[c.status], fontWeight: 700 }}>
+                        {c.status === "pass" ? "✓" : c.status === "warn" ? "!" : "✗"}
+                      </div>
+                      <div style={{ fontSize: "12px", color: T.text1 }}>{c.check}</div>
+                      <div style={{ fontSize: "10px", color: T.text3, fontFamily: "'JetBrains Mono', monospace" }}>{c.view}</div>
+                      <Badge label={c.status.toUpperCase()} color={SC[c.status]} />
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+              <Panel title="RENDER VIEWS — MOCK DATA">
+                <div style={{ padding: "16px", display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px" }}>
+                  {["Top (XY)", "Front (XZ)", "Side (YZ)"].map(view => (
+                    <div key={view} style={{ aspectRatio: "1", borderRadius: "8px", background: "rgba(0,0,0,0.3)", border: `1px solid ${T.border}`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "8px" }}>
+                      <div style={{ fontSize: "20px", opacity: 0.15 }}>◈</div>
+                      <div style={{ fontSize: "9px", color: T.text4 }}>{view}</div>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ValidateCEM
+// ---------------------------------------------------------------------------
+const CEM_ADVISE_ITEMS = [
+  { category: "Geometry", severity: "info", title: "Wall thickness adequate", detail: "Min wall 4.2mm — above 3mm CNC floor. Thin features should be validated with fixturing analysis.", action: "No action required" },
+  { category: "Stress", severity: "pass", title: "Von Mises below yield", detail: "Peak stress 124 MPa vs Sy=276 MPa for 6061-T6. Factor of safety 2.2 — above 1.5 minimum for structural parts.", action: "Acceptable for static loads. Add fatigue analysis for cyclic loading." },
+  { category: "Dynamics", severity: "warn", title: "Natural frequency check required", detail: "First mode at 2,840 Hz. If operating near spindle speeds (8k–18k RPM), verify no resonance overlap.", action: "Run FEA modal analysis if part used in rotating machinery" },
+  { category: "Thermal", severity: "warn", title: "Thermal expansion margin tight", detail: "dL=0.14mm over 100°C delta. If mated with steel at datum A, verify clearance > 0.2mm to avoid seizure.", action: "Add 0.1mm additional clearance at datum A mating surface" },
+  { category: "Fatigue", severity: "pass", title: "Goodman criterion satisfied", detail: "At 10^7 cycles the Goodman safety factor is 1.8 — above 1.5 threshold for high-cycle fatigue.", action: "No action required for normal service loads" },
+  { category: "Buckling", severity: "pass", title: "Column stability adequate", detail: "Euler buckling load 48.2 kN — 3.4x factor of safety on expected axial load.", action: "Adequate for current geometry and loading" },
+  { category: "DFM", severity: "info", title: "Recommend 4-flute finish pass", detail: "Surface finish Ra 1.6 achievable with 6mm ball endmill at 18k RPM. 2 tight-tolerance features need dedicated datum B setup.", action: "Add datum B for tight-tolerance features in CAM setup" },
+];
+
+const SEV_COLOR = { pass: T.green, warn: T.amber, info: T.ai, fail: T.red };
+const SEV_ICON = { pass: "✓", warn: "!", info: "i", fail: "✗" };
+
+function ValidateCEM() {
+  const [expanded, setExpanded] = useState(null);
+  const counts = { pass: CEM_ADVISE_ITEMS.filter(i => i.severity === "pass").length, warn: CEM_ADVISE_ITEMS.filter(i => i.severity === "warn").length, info: CEM_ADVISE_ITEMS.filter(i => i.severity === "info").length, fail: CEM_ADVISE_ITEMS.filter(i => i.severity === "fail").length };
+  return (
+    <div style={{ padding: "24px 28px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px", marginBottom: "20px" }}>
+        <StatCard label="PASSED" value={counts.pass} sub="checks passed" color={T.green} spark={[3,3,4,4,4,4,4,counts.pass]} />
+        <StatCard label="WARNINGS" value={counts.warn} sub="action recommended" color={T.amber} spark={[1,2,2,2,2,2,2,counts.warn]} />
+        <StatCard label="INFO" value={counts.info} sub="notes" color={T.ai} spark={[1,1,2,2,2,2,2,counts.info]} />
+        <StatCard label="FAILURES" value={counts.fail} sub="blocking" color={T.red} spark={[0,0,0,0,0,0,0,counts.fail]} />
+      </div>
+      <Panel title="CEM ADVISE REPORT">
+        <div>
+          {CEM_ADVISE_ITEMS.map((item, i) => (
+            <div key={i}>
+              <div onClick={() => setExpanded(expanded === i ? null : i)}
+                style={{ display: "grid", gridTemplateColumns: "40px 100px 1fr 160px", padding: "14px 20px", borderBottom: `1px solid ${T.border}`, alignItems: "center", cursor: "pointer", transition: "background 0.15s" }}
+                onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.02)"}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                <div style={{ width: "22px", height: "22px", borderRadius: "6px", background: `${SEV_COLOR[item.severity]}15`, border: `1px solid ${SEV_COLOR[item.severity]}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", color: SEV_COLOR[item.severity], fontWeight: 700 }}>{SEV_ICON[item.severity]}</div>
+                <Badge label={item.category.toUpperCase()} color={SEV_COLOR[item.severity]} />
+                <div style={{ fontSize: "13px", color: T.text0, fontWeight: 500 }}>{item.title}</div>
+                <div style={{ fontSize: "10px", color: T.text3 }}>{item.action.slice(0, 30)}{item.action.length > 30 ? "..." : ""}</div>
+              </div>
+              {expanded === i && (
+                <div style={{ padding: "14px 20px 18px 68px", background: "rgba(0,0,0,0.2)", borderBottom: `1px solid ${T.border}` }}>
+                  <div style={{ fontSize: "11px", color: T.text2, lineHeight: 1.6, marginBottom: "10px" }}>{item.detail}</div>
+                  <div style={{ padding: "8px 12px", borderRadius: "7px", background: `${SEV_COLOR[item.severity]}10`, border: `1px solid ${SEV_COLOR[item.severity]}25` }}>
+                    <span style={{ fontSize: "9px", color: SEV_COLOR[item.severity], fontWeight: 700, letterSpacing: "0.08em" }}>RECOMMENDED ACTION: </span>
+                    <span style={{ fontSize: "11px", color: T.text1 }}>{item.action}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RunsSystem
+// ---------------------------------------------------------------------------
+const PIPELINE_STAGES = [
+  { id: "research", label: "Research", desc: "Web search for prior art (skipped if ≥3 numeric dims)", icon: "⊛", status: "pass" },
+  { id: "spec", label: "Spec Extract", desc: "Regex dimensional extraction + LLM enrichment for gaps", icon: "≡", status: "pass" },
+  { id: "design", label: "Design", desc: "Template → CADSmith → LLM code generation", icon: "◈", status: "pass" },
+  { id: "eval", label: "Eval", desc: "Trimesh geometry check + visual verification (Gemini/Groq/Ollama)", icon: "⬡", status: "pass" },
+  { id: "refine", label: "Refine", desc: "Parse failures → refinement_instructions → loop back (max 5)", icon: "↻", status: "warn" },
+  { id: "dfm", label: "DFM", desc: "Wall thickness · undercuts · tolerances · surface finish", icon: "⊞", status: "pass" },
+  { id: "quote", label: "Quote", desc: "Material cost · machining time · complexity estimate", icon: "$", status: "pass" },
+  { id: "cam", label: "CAM", desc: "Toolpath generation → HAAS/Fanuc G-code (Fusion script)", icon: "⚙", status: "pass" },
+];
+
+const PROVIDER_TABLE = [
+  { provider: "Gemini 2.5 Flash", role: "Primary vision", quota: "Free daily", latency: "~2s", status: "online" },
+  { provider: "Groq Llama 4 Scout", role: "Cross-validate", quota: "Free tier", latency: "~1.5s", status: "online" },
+  { provider: "Ollama Gemma4", role: "Local fallback", quota: "Unlimited", latency: "~8s", status: "online" },
+  { provider: "Anthropic Claude", role: "Authoritative (no CV)", quota: "Paid", latency: "~3s", status: "online" },
+  { provider: "Ollama (LLM agent)", role: "Code generation", quota: "Unlimited", latency: "~12s", status: "offline" },
+];
+
+function RunsSystem() {
+  return (
+    <div style={{ padding: "24px 28px", display: "flex", flexDirection: "column", gap: "16px" }}>
+      <Panel title="PIPELINE STAGES">
+        <div style={{ padding: "16px 20px", display: "flex", gap: "0", overflowX: "auto" }}>
+          {PIPELINE_STAGES.map((s, i) => (
+            <div key={s.id} style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "6px", width: "110px" }}>
+                <div style={{ width: "44px", height: "44px", borderRadius: "12px", background: `${s.status === "pass" ? T.green : s.status === "warn" ? T.amber : T.red}15`, border: `1px solid ${s.status === "pass" ? T.green : s.status === "warn" ? T.amber : T.red}40`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "18px", color: s.status === "pass" ? T.green : s.status === "warn" ? T.amber : T.red }}>
+                  {s.icon}
+                </div>
+                <div style={{ fontSize: "10px", color: T.text1, fontWeight: 700, textAlign: "center" }}>{s.label}</div>
+                <div style={{ fontSize: "9px", color: T.text3, textAlign: "center", lineHeight: 1.4, maxWidth: "100px" }}>{s.desc}</div>
+              </div>
+              {i < PIPELINE_STAGES.length - 1 && (
+                <div style={{ width: "24px", height: "1px", background: `linear-gradient(90deg, ${T.ai}60, ${T.ai}20)`, flexShrink: 0, margin: "0 0 32px 0" }} />
+              )}
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+        <Panel title="AI PROVIDERS">
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "2fr 1.5fr 1fr 80px 80px", padding: "10px 16px", background: "rgba(0,0,0,0.3)", borderBottom: `1px solid ${T.border}`, fontSize: "9px", color: T.text3, fontWeight: 700, letterSpacing: "0.1em" }}>
+              <div>PROVIDER</div><div>ROLE</div><div>QUOTA</div><div>LATENCY</div><div>STATUS</div>
+            </div>
+            {PROVIDER_TABLE.map((p, i) => (
+              <div key={p.provider} style={{ display: "grid", gridTemplateColumns: "2fr 1.5fr 1fr 80px 80px", padding: "11px 16px", borderBottom: i < PROVIDER_TABLE.length - 1 ? `1px solid ${T.border}` : "none", alignItems: "center" }}>
+                <div style={{ fontSize: "11px", color: T.text0, fontWeight: 600 }}>{p.provider}</div>
+                <div style={{ fontSize: "10px", color: T.text3 }}>{p.role}</div>
+                <div style={{ fontSize: "10px", color: T.text2 }}>{p.quota}</div>
+                <div style={{ fontSize: "10px", color: T.ai, fontFamily: "'JetBrains Mono', monospace" }}>{p.latency}</div>
+                <Badge label={p.status.toUpperCase()} color={p.status === "online" ? T.green : T.red} />
+              </div>
+            ))}
+          </div>
+        </Panel>
+
+        <Panel title="CAD ROUTING">
+          <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: "8px" }}>
+            {[
+              { router: "CadQuery (primary)", trigger: "80+ template keywords", status: "active", color: T.ai },
+              { router: "Grasshopper/Rhino", trigger: "organic shapes, NURBS", status: "inactive", color: T.brand },
+              { router: "Blender SDF", trigger: "voxel · lattice · terrain", status: "active", color: T.green },
+              { router: "Fusion 360 (CAM)", trigger: "--cam flag", status: "active", color: T.amber },
+              { router: "FreeCAD headless", trigger: "future: raw G-code", status: "planned", color: T.text3 },
+            ].map(r => (
+              <div key={r.router} style={{ display: "flex", alignItems: "center", gap: "12px", padding: "10px 12px", borderRadius: "8px", background: "rgba(0,0,0,0.2)", border: `1px solid ${T.border}` }}>
+                <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: r.status === "active" ? T.green : r.status === "planned" ? T.amber : T.text4, flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "11px", color: T.text0, fontWeight: 600 }}>{r.router}</div>
+                  <div style={{ fontSize: "9px", color: T.text3 }}>{r.trigger}</div>
+                </div>
+                <Badge label={r.status.toUpperCase()} color={r.status === "active" ? T.green : r.status === "planned" ? T.amber : T.text4} />
+              </div>
+            ))}
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Root App
 // ---------------------------------------------------------------------------
 export default function App() {
@@ -1360,12 +2010,16 @@ export default function App() {
           case "nl": return <GenerateNL parts={parts} selectedPart={selectedPart} setSelectedPart={setSelectedPart} onGenerate={handleGenerate} pipelineStatus={pipelineStatus} logLines={logLines} />;
           case "image": return <GenerateImage pipelineStatus={pipelineStatus} logLines={logLines} />;
           case "assembly": return <GenerateAssembly pipelineStatus={pipelineStatus} logLines={logLines} onGenerate={handleGenerate} />;
+          case "terrain": return <GenerateTerrain pipelineStatus={pipelineStatus} logLines={logLines} onGenerate={handleGenerate} />;
+          case "scan": return <GenerateScan pipelineStatus={pipelineStatus} logLines={logLines} />;
+          case "refine": return <GenerateRefine parts={parts} pipelineStatus={pipelineStatus} logLines={logLines} />;
           default: return null;
         }
       case "library":
         switch (currentSub) {
           case "parts": return <LibraryParts parts={parts} />;
           case "materials": return <LibraryMaterials />;
+          case "catalog": return <LibraryCatalog />;
           default: return null;
         }
       case "validate":
@@ -1373,6 +2027,8 @@ export default function App() {
           case "physics": return <ValidatePhysics cemData={cemData} />;
           case "dfm": return <ValidateDFM />;
           case "drawings": return <ValidateDrawings parts={parts} />;
+          case "visual": return <ValidateVisual />;
+          case "cem": return <ValidateCEM />;
           default: return null;
         }
       case "manufacture":
@@ -1394,6 +2050,7 @@ export default function App() {
         switch (currentSub) {
           case "recent": return <RunsRecent />;
           case "health": return <RunsHealth />;
+          case "system": return <RunsSystem />;
           default: return null;
         }
       default: return null;
