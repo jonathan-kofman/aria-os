@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Process-start timestamps used by /api/version
+_PROCESS_START_TS = time.time()
+_PROCESS_START_ISO = datetime.now(timezone.utc).isoformat()
 
 # In-memory run registry  {run_id: RunRecord}
 _runs: dict[str, dict] = {}
@@ -100,6 +105,26 @@ STRUCTSIGHT_URL = os.environ.get("STRUCTSIGHT_URL", "http://localhost:3009")
 MILLFORGE_URL = os.environ.get("MILLFORGE_API_URL", "http://localhost:8000")
 
 
+@app.get("/api/version")
+async def version_info():
+    """
+    Build / git metadata for the running container. Useful to verify
+    which deploy is actually serving requests after a Railway rollout.
+    Reads RAILWAY_GIT_COMMIT_SHA / RAILWAY_DEPLOYMENT_ID env vars set
+    by Railway, plus a process-start timestamp captured at module load.
+    """
+    return {
+        "service": "aria-os-dashboard",
+        "schema_version": ARIA_SCHEMA_VERSION,
+        "git_commit": os.environ.get("RAILWAY_GIT_COMMIT_SHA", "unknown"),
+        "git_branch": os.environ.get("RAILWAY_GIT_BRANCH", "unknown"),
+        "deployment_id": os.environ.get("RAILWAY_DEPLOYMENT_ID", "unknown"),
+        "started_at": _PROCESS_START_ISO,
+        "uptime_seconds": round(time.time() - _PROCESS_START_TS, 1),
+        "python_executable": sys.executable,
+    }
+
+
 @app.get("/api/pipeline/health")
 async def pipeline_health():
     """Aggregated health check across the full StructSight -> ARIA -> MillForge pipeline.
@@ -135,23 +160,33 @@ async def pipeline_health():
     except Exception:
         aria_backends = {"cadquery": {"available": False, "reason": "import failed"}}
 
-    # Check Ollama
-    ollama_ok = False
-    try:
-        import urllib.request as _ur
-        with _ur.urlopen("http://localhost:11434/api/tags", timeout=3) as r:
-            ollama_ok = r.status == 200
-    except Exception:
-        pass
+    # Check Ollama (skipped entirely in cloud-only mode so the probe doesn't
+    # add 3s of timeout latency to every health call on Railway)
+    cloud_only = os.environ.get("ARIA_CLOUD_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
+    if cloud_only:
+        ollama_status = "skipped (cloud_only)"
+    else:
+        ollama_status = "unavailable"
+        try:
+            import urllib.request as _ur
+            with _ur.urlopen("http://localhost:11434/api/tags", timeout=3) as r:
+                if r.status == 200:
+                    ollama_status = "available"
+        except Exception:
+            pass
 
     ss = structsight_health if isinstance(structsight_health, dict) else {"status": "error", "error": str(structsight_health)}
     mf = millforge_health if isinstance(millforge_health, dict) else {"status": "error", "error": str(millforge_health)}
 
-    all_healthy = (
-        ss.get("status") == "healthy"
-        and mf.get("status") == "healthy"
-        and aria_backends.get("cadquery", {}).get("available", False)
-    )
+    # MillForge alone is enough for the pipeline to be considered healthy
+    # in cloud-only mode — StructSight is optional and Ollama is intentionally
+    # absent. CadQuery being available is what gates real geometry generation.
+    cad_ok = aria_backends.get("cadquery", {}).get("available", False)
+    mf_ok = mf.get("status") == "healthy"
+    if cloud_only:
+        all_healthy = cad_ok and mf_ok
+    else:
+        all_healthy = cad_ok and mf_ok and ss.get("status") == "healthy"
 
     return {
         "pipeline_status": "healthy" if all_healthy else "degraded",
@@ -163,7 +198,8 @@ async def pipeline_health():
             "aria_os": {
                 "status": "healthy",
                 "backends": aria_backends,
-                "ollama": "available" if ollama_ok else "unavailable",
+                "ollama": ollama_status,
+                "cloud_only": cloud_only,
                 "schema_version": ARIA_SCHEMA_VERSION,
                 "bridge_enabled": bool(os.environ.get("MILLFORGE_API_URL") or os.environ.get("MILLFORGE_JWT")),
             },
