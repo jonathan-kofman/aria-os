@@ -1193,10 +1193,14 @@ def _cq_impeller(params: dict[str, Any]) -> str:
     else:
         sweep = abs(_raw_sweep)   # positive → tip trails rotation (backward, default)
 
+    tip_r   = od / 2                         # blades reach full OD
+    # Ensure bore doesn't consume the whole disc — cap at 80% OD
+    bore    = min(bore, od * 0.80)
     hub_r   = max(bore / 2 + 2, od * 0.12)  # hub outer radius
+    # Guard: hub must stay inside tip radius with room for at least one blade width
+    hub_r   = min(hub_r, tip_r * 0.85)
     shroud_h = max(3.0, h * 0.15)            # thin back shroud at bottom
     blade_h = h - shroud_h                   # blades full height above shroud
-    tip_r   = od / 2                         # blades reach full OD
     # Blade thickness: at least 6% of OD so blades are clearly visible as walls
     bt_use  = max(bt, od * 0.06)
 
@@ -1265,10 +1269,14 @@ def _cq_heat_sink(params: dict[str, Any]) -> str:
     base_t = float(params.get("base_thickness_mm", params.get("thickness_mm", 3.0)))
     fin_h = float(params.get("fin_height_mm", 20.0))
     fin_t = float(params.get("fin_thickness_mm", 1.5))
-    n_fins = int(params.get("n_fins", 8))
+    n_fins = max(1, int(params.get("n_fins", 8)))
     spacing = float(params.get("fin_spacing_mm", 0))
     if spacing <= 0 and n_fins > 1:
         spacing = (w - fin_t) / (n_fins - 1)
+    elif n_fins > 1:
+        # Clamp user-provided spacing so fins don't overhang the base plate
+        max_spacing = (w - fin_t) / max(n_fins - 1, 1)
+        spacing = min(spacing, max_spacing)
 
     return f"""
 import cadquery as cq
@@ -1809,6 +1817,14 @@ def _cq_nozzle(params: dict[str, Any]) -> str:
     conv_len  = float(params.get("conv_length_mm", 80.0))
     total_len = float(params.get("length_mm",     200.0))
     wall      = float(params.get("wall_mm",         3.0))
+    # Physical validity guards
+    if entry_r < throat_r:
+        entry_r = throat_r + 10.0          # convergent section must be converging
+    if exit_r <= throat_r:
+        exit_r = throat_r + 20.0           # divergent section must be expanding
+    if exit_r == throat_r:
+        exit_r = throat_r + 1.0            # prevent /0 in Rao formula
+    wall = min(wall, throat_r * 0.75)      # wall can't exceed 75% of throat radius
     n_bolts   = int(params.get("n_bolts", 0))
     bolt_dia  = float(params.get("bolt_dia_mm", params.get("bolt_r_mm", 2.5) * 2 if "bolt_r_mm" in params else 5.0))
     bolt_pcd  = float(params.get("bolt_pcd_mm", entry_r * 2 + 10))
