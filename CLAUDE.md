@@ -561,3 +561,31 @@ No test timeout plugin. Some e2e tests take ~2 min.
 - **Optional (agent)**: ollama (local LLM)
 - **Optional (render)**: scipy (ConvexHull in wireframe), PIL (image downscale for Ollama)
 - **Missing by design**: `aria_models` (auto-belay physics), `sdf_heat_exchanger.py`
+
+---
+
+## ARIA-OS Ship Status (updated 2026-04-15)
+
+**Phase 4 verification + fix loop complete.**
+
+| Area | Status |
+|------|--------|
+| 17 CadQuery templates | ✅ All ship-ready |
+| 10 pipeline modes | ✅ All ship-ready |
+| 6 specialized flows | ✅ Ship (3 green, 3 yellow — Railway OOM caveat only) |
+| Routing system | ✅ Fixed: "fusion360" rename, sheet metal re-routed to CQ |
+| Dashboard `_build_argv` | ✅ 18+ missing command→flag mappings added |
+| Subprocess output streaming | ✅ GET /api/run/{id} lines field fixed |
+| Import safety on Railway | ✅ aria_os/__init__.py lazy imports prevent crash |
+
+**No P0 ship blockers.** Redeploy Railway main branch to pick up Phase 4 fixes.
+
+### Key fixes applied in this cycle
+
+- `return "fusion"` → `return "fusion360"` everywhere in tool_router.py (orchestrator check was failing)
+- Sheet metal goals no longer route to non-existent Fusion 360 path (routes to CQ templates instead)
+- `aria_os/__init__.py` is now lazy — import errors in optional deps don't crash the whole package
+- gusset: leg_a_mm/leg_b_mm extraction added to spec_extractor; template falls back to width/depth
+- weld_bead: workplane fixed YZ→XY (was producing ~484-byte degenerate STL)
+- u_channel: dedicated `_cq_u_channel` wrapper with `n_bends=2` default (was producing single-flanged panel)
+- height_mm vs thickness_mm extraction bug fixed in spec_extractor (2026-04-15)
