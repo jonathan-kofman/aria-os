@@ -63,9 +63,11 @@ GRASSHOPPER_KEYWORDS = [
     # Rhino-specific geometry
     "brep", "polysurface", "fillet", "chamfer", "blend",
     "pipe", "revolve", "extrude along curve", "rail sweep",
-    # Complex mechanical parts
-    "impeller", "turbine blade", "propeller", "fan blade",
-    "cam profile", "gear tooth", "involute",
+    # Complex mechanical parts — NOTE: "impeller" and "involute" are NOT listed here
+    # because CadQuery now has _cq_impeller and _cq_involute_gear templates.
+    # Only list parts with NO CadQuery template (routes to Rhino Compute).
+    "turbine blade", "propeller", "fan blade",
+    "cam profile", "gear tooth",
     "manifold", "duct", "transition piece",
     "ergonomic", "contoured", "sculpted surface",
 ]
@@ -90,9 +92,13 @@ GRASSHOPPER_PART_IDS = {
     "aria_rope_guide",
 }
 
-# LRE / nozzle parts always route to CadQuery headless (no Grasshopper)
+# Parts that always route to CadQuery headless regardless of other keywords.
+# Include everything CadQuery has a dedicated template for — prevents them from
+# being mis-routed to Grasshopper/Compute via keyword overlap.
 CADQUERY_KEYWORDS = [
     "nozzle", "rocket", "lre", "liquid rocket", "turbopump", "injector",
+    "impeller", "centrifugal fan", "axial fan",     # _cq_impeller
+    "involute gear", "involute spur", "spur gear",  # _cq_involute_gear
 ]
 
 # Civil engineering plans route to AutoCAD/DXF generator
