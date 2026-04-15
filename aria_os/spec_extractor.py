@@ -376,18 +376,32 @@ def extract_spec(description: str) -> dict[str, Any]:
         spec["bore_mm"] = bore
         spec["id_mm"]   = bore
 
-    # --- Thickness / height ---
+    # --- Thickness (wall / sheet thickness — small dimension) ---
+    # Note: previously this regex group also matched "tall"/"height" and
+    # mirrored the value into both thickness_mm AND height_mm. That broke
+    # phrases like "60mm tall, 8mm thick" — _find returned the first match
+    # (8) and dropped the height entirely. Now thickness and height are
+    # extracted independently. Reported by feature verification 2026-04-15.
     thick = _find([
         r"(\d+(?:\.\d+)?)\s*mm\s+thick(?:ness)?",
         r"thickness\s*[=:]\s*(\d+(?:\.\d+)?)\s*mm",
-        r"(\d+(?:\.\d+)?)\s*mm\s+tall",
-        r"(\d+(?:\.\d+)?)\s*mm\s+high(?:t)?",
-        r"(\d+(?:\.\d+)?)\s*mm\s+height\b",         # "120mm height"
-        r"height\s*[=:]\s*(\d+(?:\.\d+)?)\s*mm",
     ])
     if thick:
         spec["thickness_mm"] = thick
-        spec["height_mm"]    = thick
+
+    # --- Height / tallness — separate from thickness ---
+    height = _find([
+        r"(\d+(?:\.\d+)?)\s*mm\s+tall",
+        r"(\d+(?:\.\d+)?)\s*mm\s+high(?:t)?",
+        r"(\d+(?:\.\d+)?)\s*mm\s+height\b",
+        r"height\s*[=:]\s*(\d+(?:\.\d+)?)\s*mm",
+    ])
+    if height:
+        spec["height_mm"] = height
+    elif thick is not None:
+        # Backwards compat: older templates expect height_mm to fall back
+        # to thickness when no explicit height is present (e.g. flat plates).
+        spec["height_mm"] = thick
 
     # --- Width ---
     width = _find([
@@ -576,10 +590,60 @@ def extract_spec(description: str) -> dict[str, Any]:
 
     n_fins = _find([
         r"(\d+)\s+(?:parallel\s+)?fins?",
-        r"(\d+)\s+(?:parallel\s+)?blades?",
     ])
     if n_fins:
         spec["n_fins"] = int(n_fins)
+
+    # --- Blades / vanes (impellers, fans, turbines, props) ---
+    n_blades = _find_int([
+        r"(\d+)[- ]bladed?",                                         # "6-blade", "6-bladed"
+        r"(\d+)[- ]vaned?",                                          # "8-vane"
+        r"(\d+)\s+(?:backward[- ]curved?|forward[- ]swept?|radial|swept|curved)\s+(?:curved\s+)?(?:blades?|vanes?)",  # "6 backward-curved blades"
+        r"(\d+)\s+(?:blades?|vanes?)",                               # "6 blades", "8 vanes"
+        r"(?:blades?|vanes?)\s*[=:]\s*(\d+)",                       # "blades=6"
+    ])
+    if n_blades:
+        spec["n_blades"] = n_blades
+
+    # Blade sweep direction — qualitative, drives template choice of angle/orientation
+    _SWEEP_KEYWORDS: list[tuple[str, str]] = [
+        ("backward-curved",   "backward_curved"),
+        ("backward curved",   "backward_curved"),
+        ("backward-swept",    "backward_swept"),
+        ("backward swept",    "backward_swept"),
+        ("forward-curved",    "forward_curved"),
+        ("forward curved",    "forward_curved"),
+        ("forward-swept",     "forward_swept"),
+        ("forward swept",     "forward_swept"),
+        ("backward",          "backward"),
+        ("forward",           "forward"),
+        ("radial",            "radial"),
+    ]
+    goal_lower = text.lower()
+    for _kw, _val in _SWEEP_KEYWORDS:
+        if _kw in goal_lower:
+            spec["blade_sweep"] = _val
+            break
+
+    # --- Spokes / arms (wheels, hand-wheels, spider hubs) ---
+    n_spokes = _find_int([
+        r"(\d+)[- ]spokes?",
+        r"(\d+)\s+spokes?",
+        r"(\d+)[- ]armed?\b",                 # "5-arm", "6-armed"
+        r"(\d+)\s+arms?\b(?!\s*length)",       # "5 arms" but not "arm length"
+    ])
+    if n_spokes:
+        spec["n_spokes"] = n_spokes
+
+    # --- Blade sweep angle (numeric) ---
+    sweep_angle = _find([
+        r"sweep\s*(?:angle\s*)?[=:]?\s*(\d+(?:\.\d+)?)\s*(?:deg|degrees?|°)",
+        r"(\d+(?:\.\d+)?)\s*(?:deg|degrees?|°)\s+sweep",
+        r"backward[- ]curved?\s+(\d+(?:\.\d+)?)\s*(?:deg|degrees?|°)",
+        r"forward[- ]swept?\s+(\d+(?:\.\d+)?)\s*(?:deg|degrees?|°)",
+    ])
+    if sweep_angle:
+        spec["blade_angle_deg"] = sweep_angle
 
     # --- Angle ---
     angle = _find([
