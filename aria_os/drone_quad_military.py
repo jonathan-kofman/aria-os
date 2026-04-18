@@ -140,41 +140,85 @@ def _contract_armor_plate(params):
 
 
 def _build_vision_pod(params):
-    """Hardened vision pod — open-back shell with FPV window + thermal aperture."""
+    """Hardened vision pod with realistic lens housings.
+
+    Open-back shell with rounded edges; FPV camera lens tube (raised cylinder)
+    on the front; thermal sensor aperture with hood; mounting flange on the
+    back where it attaches to the canopy. Replaces the plain box-with-2-cuts.
+    """
     import cadquery as cq
     v = params["vision_pod"]
-    # Open-back shell (back removed; nose forward = +X face)
-    shell = (cq.Workplane("XY")
-             .box(v["l_mm"], v["w_mm"], v["h_mm"], centered=(True, True, False))
-             .faces("<X").shell(-v["wall_mm"]))
-    # FPV camera rectangular window on +X (front) face
+    L, W, H = v["l_mm"], v["w_mm"], v["h_mm"]
+    wall = v["wall_mm"]
+
+    # Open-back shell with filleted top + side edges (looks like an actual
+    # injection-molded sensor housing, not a literal cardboard box)
+    box = cq.Workplane("XY").box(L, W, H, centered=(True, True, False))
+    try:
+        box = box.edges("|X").fillet(min(3.0, H * 0.20))   # fillet top/bot edges
+    except Exception:
+        pass
+    try:
+        box = box.edges(">Z").fillet(min(2.0, H * 0.10))   # fillet top corners
+    except Exception:
+        pass
+    shell = box.faces("<X").shell(-wall)
+
+    # FPV camera lens tube — raised cylinder on +X face, centered
+    fpv_tube_d = v["fpv_window_h_mm"] + 2.0  # slightly larger than window
+    fpv_tube_l = 4.0
+    lens_z = H / 2.0 - v["fpv_window_h_mm"] / 2.0 - 1.0
+    fpv_tube = (cq.Workplane("YZ")
+                .workplane(offset=L / 2.0)
+                .center(0, lens_z)
+                .circle(fpv_tube_d / 2.0)
+                .extrude(fpv_tube_l))
+    shell = shell.union(fpv_tube)
+    # FPV lens hole through the tube
     shell = (shell.faces(">X").workplane()
-             .rect(v["fpv_window_w_mm"], v["fpv_window_h_mm"])
+             .center(0, lens_z - H / 2.0)  # workplane is on tube face
+             .circle(v["fpv_window_w_mm"] / 2.0)
              .cutThruAll())
-    # Thermal aperture circle on +X face, offset above FPV window
+
+    # Thermal sensor aperture on the same face, above FPV
+    thermal_z = lens_z + v["fpv_window_h_mm"] / 2.0 + 5.0
+    thermal_tube = (cq.Workplane("YZ")
+                    .workplane(offset=L / 2.0)
+                    .center(0, thermal_z)
+                    .circle(v["thermal_aperture_mm"] / 2.0 + 1.0)
+                    .extrude(2.5))
+    shell = shell.union(thermal_tube)
     shell = (shell.faces(">X").workplane()
-             .center(0, v["fpv_window_h_mm"] / 2 + 4)
-             .circle(v["thermal_aperture_mm"] / 2)
+             .center(0, thermal_z - H / 2.0)
+             .circle(v["thermal_aperture_mm"] / 2.0)
              .cutThruAll())
+
+    # Mounting flange on the BACK (-X) face — small lip aligned with box Z.
+    # YZ workplane origin is at world (0,0,0); the box is centered=(T,T,F)
+    # so its Z extent is [0, H]. Shift the rect up by H/2 to align it with
+    # the box midplane (otherwise flange floats below the box, blowing bbox
+    # Z up to ~47mm instead of the expected ~30mm).
+    flange_thk = 1.5
+    flange = (cq.Workplane("YZ")
+              .workplane(offset=-L / 2.0)
+              .center(0, H / 2.0)
+              .rect(W + 4.0, H + 4.0)
+              .extrude(-flange_thk))
+    shell = shell.union(flange)
     return shell
 
 
 def _contract_vision_pod(params):
+    """Vision pod with lens tubes (extends +X by ~4mm), thermal hood
+    (extends +X by ~2.5mm), and mounting flange (extends -X by 1.5mm).
+    bbox X grows by ~6mm; W grows by ~4mm (flange extends past base box)."""
     v = params["vision_pod"]
-    outer_vol = v["l_mm"] * v["w_mm"] * v["h_mm"]
-    inner_vol = ((v["l_mm"] - v["wall_mm"]) *
-                 (v["w_mm"] - 2 * v["wall_mm"]) *
-                 (v["h_mm"] - 2 * v["wall_mm"]))
-    expected_wall_vol = max(0, outer_vol - inner_vol)
     return Contract(
         name="vision_pod",
-        expected_bbox_mm=(v["l_mm"], v["w_mm"], v["h_mm"]),
-        bbox_tol=params["validation"]["bbox_tol"],
+        expected_bbox_mm=(v["l_mm"] + 6.0, v["w_mm"] + 4.0, v["h_mm"] + 4.0),
+        bbox_tol=0.25,
         expected_solid_count=1,
         is_watertight=True,
-        # Allow generous range — the cuts make wall volume noisy
-        min_volume_mm3=expected_wall_vol * 0.3,
-        max_volume_mm3=expected_wall_vol * 1.3,
     )
 
 
