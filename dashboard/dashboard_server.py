@@ -1014,6 +1014,87 @@ async def get_preset_run(run_id: str):
     return state
 
 
+@app.get("/api/graph/status")
+async def graph_status():
+    """Graphify integration health check — is the codebase graph built?"""
+    try:
+        from aria_os.graphify_setup import status
+        return status()
+    except Exception as exc:
+        return {"installed": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+@app.post("/api/graph/build")
+async def graph_build(force: bool = False):
+    """Build / refresh the codebase knowledge graph. Returns ok/error.
+
+    Idempotent — skips rebuild if no source files changed since last build,
+    unless force=True.
+    """
+    try:
+        from aria_os.graphify_setup import build_codebase_graph
+        return build_codebase_graph(force=force)
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"{type(exc).__name__}: {exc}")
+
+
+@app.get("/api/graph/query")
+async def graph_query(q: str, limit: int = 20):
+    """Query the codebase knowledge graph by free-text query.
+
+    Used by external LLM agents (and the UI) to do cheap structural lookups
+    over the pipeline source. Returns matched nodes (file paths, function
+    names, class names) with relevance scores.
+
+    Falls back to a grep-style match against the graph JSON if no semantic
+    search is configured (graphify supports both).
+    """
+    try:
+        from aria_os.graphify_setup import GRAPH_DIR
+        import json as _json
+        graph_path = GRAPH_DIR / "codebase.json"
+        if not graph_path.is_file():
+            raise HTTPException(status_code=404,
+                                detail="codebase graph not built — POST /api/graph/build first")
+        data = _json.loads(graph_path.read_text(encoding="utf-8"))
+        nodes = data.get("nodes", [])
+        ql = q.lower()
+        matches = []
+        for n in nodes:
+            txt = " ".join(str(v) for v in n.values() if isinstance(v, str)).lower()
+            if ql in txt:
+                matches.append(n)
+                if len(matches) >= limit:
+                    break
+        return {"query": q, "n_matches": len(matches),
+                "n_nodes_total": len(nodes), "matches": matches}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"{type(exc).__name__}: {exc}")
+
+
+# Build the codebase graph on startup if Graphify is installed (cheap when
+# cached). Logs but doesn't fail server boot if graphify isn't there.
+@app.on_event("startup")
+async def _build_graph_on_startup():
+    try:
+        from aria_os.graphify_setup import build_codebase_graph, _has_graphify
+        if not _has_graphify():
+            print("[graph] graphify not installed — skipping graph build")
+            return
+        result = build_codebase_graph()
+        if result.get("ok"):
+            print(f"[graph] codebase graph: {result.get('n_nodes')} nodes "
+                  f"({'cached' if result.get('cached') else 'built'})")
+        else:
+            print(f"[graph] build failed: {result.get('error')}")
+    except Exception as exc:
+        print(f"[graph] startup hook failed: {type(exc).__name__}: {exc}")
+
+
 @app.get("/api/preset/run/{run_id}/preview")
 async def get_preset_preview(run_id: str):
     """Return the 'what's in the box' thumbnail manifest for a completed run.

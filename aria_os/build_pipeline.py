@@ -193,6 +193,16 @@ def run_full_build(*, preset_id: str, params: dict | None = None) -> BuildResult
     # ── Stage 6: Preview manifest ────────────────────────────────────────────
     result.preview_artifacts = _build_preview_manifest(output_dir, result)
 
+    # ── Stage 7: Index this run into the Graphify knowledge graph ───────────
+    # Lets the visual-verify and spec-extraction agents do cheap lookups
+    # over the bundle (STEP↔BOM↔drawing relationships) via MCP.
+    # No-op if graphify not installed.
+    try:
+        from aria_os.graphify_setup import build_outputs_graph
+        build_outputs_graph(output_dir, run_id=preset_id)
+    except Exception:
+        pass  # Graph indexing is best-effort, don't break the build
+
     result.success = (result.mech_success and
                       (result.print_success or result.cam_success))
     result.elapsed_s = time.monotonic() - t0
