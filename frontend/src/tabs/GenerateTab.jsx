@@ -303,19 +303,24 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
   const vp = useViewport();
   const L = layout(vp);
   const S = spacing(vp);
+  // Viewer min height in px — avoids flex/% collapse; row height comes from whichever column is taller.
+  const viewerMinPx = vp.isMobile ? 280 : 320;
 
   return (
-    <div style={{ padding: `${S.pageY} ${S.pageX}`, display: "grid",
-                  gridTemplateColumns: L.twoColGrid,
-                  gridTemplateRows: vp.isMobile ? undefined : "minmax(0, 1fr)",
-                  gap: S.gap,
-                  height: vp.isMobile ? "auto" : "100%",
-                  minHeight: 0,
-                  overflow: vp.isMobile ? "visible" : "hidden" }}>
+    <div style={{
+      padding: `${S.pageY} ${S.pageX}`,
+      display: "grid",
+      gridTemplateColumns: L.twoColGrid,
+      gap: S.gap,
+      // Fill at least the main scrollport, but grow with tall right column so the App shell scrolls.
+      minHeight: "100%",
+      alignItems: "start",
+      width: "100%",
+    }}>
       {/* Left: 3D Viewer (full width on mobile, stacks above the form) */}
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0, overflow: "hidden" }}>
-        <Panel title="3D VIEWER" style={{ flex: 1, minHeight: 0 }}>
-          <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px", width: "100%", minWidth: 0 }}>
+        <Panel title="3D VIEWER" style={{ minHeight: `${viewerMinPx}px` }}>
+          <div style={{ height: `${viewerMinPx}px`, position: "relative" }}>
             <STLViewer stlUrl={stlUrl} />
             {selectedPart && (
               <div style={{ position: "absolute", bottom: "12px", left: "12px", padding: "6px 12px", background: "rgba(10,10,15,0.8)", borderRadius: "8px", border: `1px solid ${T.border}`, backdropFilter: "blur(12px)" }}>
@@ -350,13 +355,8 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
         })()}
       </div>
 
-      {/* Right: Quick Builds + Generate form + log.
-          overflowY:auto so the entire stack is scrollable — otherwise tall
-          QuickBuilds results push the Generate form + log out of view. */}
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px",
-                    minHeight: 0, overflowY: "auto", overflowX: "hidden",
-                    WebkitOverflowScrolling: "touch",
-                    paddingRight: "4px" }}>
+      {/* Right: Quick Builds + Generate form + log — scroll via main App column (minHeight:100% + natural height). */}
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minWidth: 0, width: "100%" }}>
         <QuickBuildsPanel />
         <Panel title="GENERATE">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -460,24 +460,25 @@ function GenerateImage({ pipelineStatus, logLines }) {
   const vp = useViewport();
   const L = layout(vp);
   const S = spacing(vp);
+  const viewerMinPx = vp.isMobile ? 280 : 320;
 
   return (
-    <div style={{ padding: `${S.pageY} ${S.pageX}`, display: "grid",
-                  gridTemplateColumns: L.twoColGrid,
-                  gridTemplateRows: vp.isMobile ? undefined : "minmax(0, 1fr)",
-                  gap: S.gap,
-                  height: vp.isMobile ? "auto" : "100%",
-                  minHeight: 0,
-                  overflow: vp.isMobile ? "visible" : "hidden" }}>
-      <Panel title="3D VIEWER" style={{ minHeight: 0, overflow: "hidden" }}>
-        <div style={{ flex: 1, minHeight: 0 }}>
+    <div style={{
+      padding: `${S.pageY} ${S.pageX}`,
+      display: "grid",
+      gridTemplateColumns: L.twoColGrid,
+      gap: S.gap,
+      minHeight: "100%",
+      alignItems: "start",
+      width: "100%",
+    }}>
+      <Panel title="3D VIEWER" style={{ minHeight: `${viewerMinPx}px`, width: "100%" }}>
+        <div style={{ height: `${viewerMinPx}px` }}>
           <STLViewer stlUrl={null} />
         </div>
       </Panel>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px",
-                    minHeight: 0, overflowY: "auto", overflowX: "hidden",
-                    WebkitOverflowScrolling: "touch", paddingRight: "4px" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minWidth: 0, width: "100%" }}>
         <Panel title="GENERATE FROM IMAGE">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
             <div style={{ padding: "8px 12px", borderRadius: "8px", background: `${T.amber}10`, border: `1px solid ${T.amber}30`, fontSize: "11px", color: T.amber, display: "flex", alignItems: "flex-start", gap: "8px" }}>
