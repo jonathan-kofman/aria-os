@@ -1,4 +1,5 @@
 """ARIA-OS orchestrator: load context -> plan -> route -> generate -> validate -> export -> log."""
+import os
 import sys as _sys
 from pathlib import Path
 from .context_loader import load_context
