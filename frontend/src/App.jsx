@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import * as THREE from "three";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { useViewport, layout, spacing } from "./responsive.js";
 
 // ---------------------------------------------------------------------------
 // Theme
@@ -101,44 +102,161 @@ function SubTabs({ tabs, active, setActive }) {
 // ---------------------------------------------------------------------------
 function Sidebar({ active, setActive }) {
   const [hover, setHover] = useState(null);
+  const vp = useViewport();
+  const L = layout(vp);
+
+  // On mobile: bottom-anchored horizontal nav bar.
+  // On desktop/tablet: left-anchored vertical rail (the original layout).
+  const containerStyle = {
+    width: L.sidebarWidth,
+    height: L.sidebarHeight,
+    position: "fixed",
+    ...L.sidebarPos,
+    background: "rgba(15,15,24,0.85)",
+    backdropFilter: "blur(20px)",
+    borderRight: vp.isMobile ? "0" : `1px solid ${T.border}`,
+    borderTop:   vp.isMobile ? `1px solid ${T.border}` : "0",
+    display: "flex",
+    flexDirection: L.sidebarFlexDir,
+    alignItems: "center",
+    justifyContent: vp.isMobile ? "space-around" : "flex-start",
+    padding: L.sidebarPad,
+    zIndex: 100,
+  };
+
   return (
-    <div style={{ width: "64px", height: "100vh", position: "fixed", left: 0, top: 0, background: "rgba(15,15,24,0.8)", backdropFilter: "blur(20px)", borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column", alignItems: "center", padding: "16px 0", zIndex: 100 }}>
-      <div style={{ width: "36px", height: "36px", borderRadius: "10px", background: `linear-gradient(135deg, ${T.ai}, ${T.brand})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "16px", color: "#fff", fontWeight: 700, marginBottom: "24px", boxShadow: `0 0 24px ${T.aiGlow}` }}>α</div>
-      <div style={{ display: "flex", flexDirection: "column", gap: "4px", flex: 1 }}>
+    <div style={containerStyle}>
+      {/* Brand mark — hide on mobile to save horizontal space */}
+      {!vp.isMobile && (
+        <div style={{ width: "36px", height: "36px", borderRadius: "10px",
+                      background: `linear-gradient(135deg, ${T.ai}, ${T.brand})`,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: "16px", color: "#fff", fontWeight: 700,
+                      marginBottom: "24px", boxShadow: `0 0 24px ${T.aiGlow}` }}>α</div>
+      )}
+      <div style={{ display: "flex", flexDirection: L.sidebarFlexDir,
+                    gap: vp.isMobile ? "0" : "4px",
+                    flex: 1,
+                    width: vp.isMobile ? "100%" : "auto",
+                    justifyContent: vp.isMobile ? "space-around" : "flex-start" }}>
         {NAV.map(n => (
-          <div key={n.id} style={{ position: "relative" }} onMouseEnter={() => setHover(n.id)} onMouseLeave={() => setHover(null)}>
-            <button onClick={() => setActive(n.id)} style={{ width: "44px", height: "44px", borderRadius: "10px", border: "none", background: active === n.id ? `linear-gradient(135deg, ${T.ai}25, ${T.ai}10)` : "transparent", color: active === n.id ? T.ai : T.text3, fontSize: "16px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s", boxShadow: active === n.id ? `inset 0 0 0 1px ${T.ai}40, 0 0 16px ${T.aiGlow}` : "none" }}>{n.icon}</button>
-            {hover === n.id && <div style={{ position: "absolute", left: "52px", top: "50%", transform: "translateY(-50%)", padding: "6px 10px", background: T.bg3, border: `1px solid ${T.borderHi}`, borderRadius: "6px", fontSize: "11px", color: T.text1, fontWeight: 500, whiteSpace: "nowrap", pointerEvents: "none", zIndex: 200 }}>{n.label}</div>}
+          <div key={n.id} style={{ position: "relative" }}
+               onMouseEnter={() => setHover(n.id)} onMouseLeave={() => setHover(null)}>
+            <button onClick={() => setActive(n.id)}
+                    style={{ width: "44px", height: "44px", borderRadius: "10px",
+                             border: "none",
+                             background: active === n.id
+                               ? `linear-gradient(135deg, ${T.ai}25, ${T.ai}10)`
+                               : "transparent",
+                             color: active === n.id ? T.ai : T.text3,
+                             fontSize: "16px", cursor: "pointer",
+                             display: "flex", alignItems: "center", justifyContent: "center",
+                             transition: "all 0.2s",
+                             boxShadow: active === n.id
+                               ? `inset 0 0 0 1px ${T.ai}40, 0 0 16px ${T.aiGlow}`
+                               : "none" }}>{n.icon}</button>
+            {/* Hover tooltip — desktop/tablet only */}
+            {hover === n.id && !vp.isMobile && (
+              <div style={{ position: "absolute", left: "52px", top: "50%",
+                            transform: "translateY(-50%)",
+                            padding: "6px 10px", background: T.bg3,
+                            border: `1px solid ${T.borderHi}`, borderRadius: "6px",
+                            fontSize: "11px", color: T.text1, fontWeight: 500,
+                            whiteSpace: "nowrap", pointerEvents: "none", zIndex: 200 }}>
+                {n.label}
+              </div>
+            )}
           </div>
         ))}
       </div>
-      <div style={{ width: "36px", height: "36px", borderRadius: "9px", background: `linear-gradient(135deg, ${T.ai}20, ${T.brand}20)`, border: `1px solid ${T.borderHi}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", color: T.ai, fontWeight: 700 }}>AI</div>
+      {/* "AI" badge — desktop/tablet only */}
+      {!vp.isMobile && (
+        <div style={{ width: "36px", height: "36px", borderRadius: "9px",
+                      background: `linear-gradient(135deg, ${T.ai}20, ${T.brand}20)`,
+                      border: `1px solid ${T.borderHi}`,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: "10px", color: T.ai, fontWeight: 700 }}>AI</div>
+      )}
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// ResponsiveMain — wraps the page content with the right left/bottom inset
+// for the active sidebar layout (left rail on desktop, bottom bar on mobile).
+// ---------------------------------------------------------------------------
+function ResponsiveMain({ children }) {
+  const vp = useViewport();
+  const L = layout(vp);
+  return (
+    <div style={{
+      marginLeft: L.contentPadLeft,
+      paddingBottom: L.contentPadBot,
+      height: "100vh",
+      overflow: "hidden",
+      display: "flex",
+      flexDirection: "column",
+    }}>
+      {children}
+    </div>
+  );
+}
+
 
 // ---------------------------------------------------------------------------
 // TopBar
 // ---------------------------------------------------------------------------
 function TopBar({ section, subsection, pipelineStatus }) {
   const [time, setTime] = useState(new Date());
+  const vp = useViewport();
+  const L = layout(vp);
+  const S = spacing(vp);
   useEffect(() => { const i = setInterval(() => setTime(new Date()), 1000); return () => clearInterval(i); }, []);
   const statusColor = pipelineStatus === "running" ? T.amber : pipelineStatus === "done" ? T.green : T.text4;
   const statusLabel = pipelineStatus === "running" ? "GENERATING" : pipelineStatus === "done" ? "COMPLETE" : "IDLE";
   return (
-    <div style={{ position: "sticky", top: 0, height: "56px", padding: "0 28px", background: "rgba(10,10,15,0.8)", backdropFilter: "blur(20px)", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", zIndex: 50 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }}>
+    <div style={{ position: "sticky", top: 0, height: L.headerHeight,
+                  padding: `0 ${S.pageX}`,
+                  background: "rgba(10,10,15,0.85)",
+                  backdropFilter: "blur(20px)",
+                  borderBottom: `1px solid ${T.border}`,
+                  display: "flex", justifyContent: "space-between", alignItems: "center", zIndex: 50 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px",
+                    fontSize: vp.isMobile ? "11px" : "13px",
+                    minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
         <span style={{ color: T.text3, fontWeight: 500 }}>ARIA-OS</span>
         <span style={{ color: T.text4 }}>/</span>
         <span style={{ color: T.text1, fontWeight: 500 }}>{section}</span>
-        {subsection && <><span style={{ color: T.text4 }}>/</span><span style={{ color: T.text0, fontWeight: 600 }}>{subsection}</span></>}
+        {subsection && !vp.isMobile && (
+          <><span style={{ color: T.text4 }}>/</span>
+            <span style={{ color: T.text0, fontWeight: 600 }}>{subsection}</span></>
+        )}
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "6px", padding: "6px 10px", borderRadius: "7px", background: `${statusColor}08`, border: `1px solid ${statusColor}30` }}>
-          <div style={{ width: "5px", height: "5px", borderRadius: "50%", background: statusColor, boxShadow: `0 0 8px ${statusColor}`, animation: pipelineStatus === "running" ? "pulse 1s infinite" : "none" }} />
-          <span style={{ fontSize: "10px", color: statusColor, fontWeight: 700, letterSpacing: "0.06em" }}>{statusLabel}</span>
+      <div style={{ display: "flex", alignItems: "center", gap: vp.isMobile ? "6px" : "12px",
+                    flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "6px",
+                      padding: vp.isMobile ? "4px 8px" : "6px 10px",
+                      borderRadius: "7px",
+                      background: `${statusColor}08`,
+                      border: `1px solid ${statusColor}30` }}>
+          <div style={{ width: "5px", height: "5px", borderRadius: "50%",
+                        background: statusColor, boxShadow: `0 0 8px ${statusColor}`,
+                        animation: pipelineStatus === "running" ? "pulse 1s infinite" : "none" }} />
+          <span style={{ fontSize: vp.isMobile ? "9px" : "10px",
+                         color: statusColor, fontWeight: 700, letterSpacing: "0.06em" }}>
+            {vp.isMobile && statusLabel === "GENERATING" ? "GEN" : statusLabel}
+          </span>
         </div>
-        <div style={{ fontSize: "12px", color: T.text2, fontFeatureSettings: "'tnum'", padding: "6px 10px", borderRadius: "7px", background: "rgba(255,255,255,0.03)", border: `1px solid ${T.border}` }}>{time.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}</div>
+        {/* Clock — hide on mobile to save horizontal space */}
+        {!vp.isMobile && (
+          <div style={{ fontSize: "12px", color: T.text2,
+                        fontFeatureSettings: "'tnum'",
+                        padding: "6px 10px", borderRadius: "7px",
+                        background: "rgba(255,255,255,0.03)",
+                        border: `1px solid ${T.border}` }}>
+            {time.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false })}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -246,10 +364,17 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
   const [goal, setGoal] = useState("");
   const [maxAttempts, setMaxAttempts] = useState(3);
   const stlUrl = selectedPart?.stl_path ? `/api/parts/${selectedPart.id}/stl` : null;
+  const vp = useViewport();
+  const L = layout(vp);
+  const S = spacing(vp);
 
   return (
-    <div style={{ padding: "20px 28px", display: "grid", gridTemplateColumns: "1fr 380px", gap: "16px", height: "calc(100vh - 56px - 49px)", overflow: "hidden" }}>
-      {/* Left: 3D Viewer */}
+    <div style={{ padding: `${S.pageY} ${S.pageX}`, display: "grid",
+                  gridTemplateColumns: L.twoColGrid, gap: S.gap,
+                  height: vp.isMobile ? "auto" : "calc(100vh - 56px - 49px)",
+                  minHeight: vp.isMobile ? "calc(100vh - 56px - 49px - 64px)" : undefined,
+                  overflow: vp.isMobile ? "auto" : "hidden" }}>
+      {/* Left: 3D Viewer (full width on mobile, stacks above the form) */}
       <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
         <Panel title="3D VIEWER" style={{ flex: 1, minHeight: 0 }}>
           <div style={{ height: "calc(100% - 41px)", position: "relative" }}>
@@ -374,9 +499,16 @@ function GenerateImage({ pipelineStatus, logLines }) {
   };
 
   const allLog = [...logLines, ...localLog];
+  const vp = useViewport();
+  const L = layout(vp);
+  const S = spacing(vp);
 
   return (
-    <div style={{ padding: "20px 28px", display: "grid", gridTemplateColumns: "1fr 380px", gap: "16px", height: "calc(100vh - 56px - 49px)", overflow: "hidden" }}>
+    <div style={{ padding: `${S.pageY} ${S.pageX}`, display: "grid",
+                  gridTemplateColumns: L.twoColGrid, gap: S.gap,
+                  height: vp.isMobile ? "auto" : "calc(100vh - 56px - 49px)",
+                  minHeight: vp.isMobile ? "calc(100vh - 56px - 49px - 64px)" : undefined,
+                  overflow: vp.isMobile ? "auto" : "hidden" }}>
       <Panel title="3D VIEWER" style={{ minHeight: 0 }}>
         <div style={{ height: "calc(100% - 41px)" }}>
           <STLViewer stlUrl={null} />
@@ -2063,13 +2195,13 @@ export default function App() {
       <div style={{ position: "fixed", top: "-30%", right: "-20%", width: "60%", height: "60%", background: `radial-gradient(ellipse, ${T.brandGlow} 0%, transparent 60%)`, opacity: 0.05, pointerEvents: "none" }} />
       <div style={{ position: "fixed", bottom: "-30%", left: "-20%", width: "60%", height: "60%", background: `radial-gradient(ellipse, ${T.aiGlow} 0%, transparent 60%)`, opacity: 0.05, pointerEvents: "none" }} />
       <Sidebar active={active} setActive={setActive} />
-      <div style={{ marginLeft: "64px", height: "100vh", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+      <ResponsiveMain>
         <TopBar section={currentNavLabel} subsection={currentSubLabel} pipelineStatus={pipelineStatus} />
         <SubTabs tabs={SUB_TABS[active]} active={currentSub} setActive={(id) => setSub(active, id)} />
-        <div style={{ flex: 1, overflowY: "auto" }}>
+        <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
           {renderContent()}
         </div>
-      </div>
+      </ResponsiveMain>
     </div>
   );
 }
