@@ -46,6 +46,8 @@ class BuildResult:
 
     # Computed totals
     total_mass_g: float = 0.0        # Sum of every part's STEP-volume × density
+    total_cost_usd: float = 0.0      # Print + CNC + PCB + electronics + fasteners
+    cost_breakdown_path: str | None = None
 
     # Artifact paths (relative to repo root for transport)
     step_path: str | None = None
@@ -57,6 +59,7 @@ class BuildResult:
     drawings_dir: str | None = None
     instructions_path: str | None = None
     instructions_pdf_path: str | None = None
+    fasteners_path: str | None = None
     sim_trace_path: str | None = None
     sim_summary: dict | None = None
     circuit_sim_summary: dict | None = None
@@ -67,6 +70,11 @@ class BuildResult:
     # Cross-project bridges (StructSight judgment + MillForge pre-CAM handoff)
     structsight_judgment: dict | None = None
     millforge_handoff: dict | None = None
+
+    # Per-board ECAD artifacts (gerber paths + zip + file counts).
+    # Populated from drone_quad_result.json["ecad"] so the bundle + summary
+    # report which boards have fab-ready Gerbers.
+    ecad: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -86,6 +94,8 @@ class BuildResult:
                 "circuit_sim": self.circuit_sim_success,
             },
             "total_mass_g": self.total_mass_g,
+            "total_cost_usd": self.total_cost_usd,
+            "cost_breakdown_path": self.cost_breakdown_path,
             "sim_summary": self.sim_summary,
             "sim_trace_path": self.sim_trace_path,
             "circuit_sim_summary": self.circuit_sim_summary,
@@ -98,9 +108,11 @@ class BuildResult:
             "drawings_dir": self.drawings_dir,
             "instructions_path": self.instructions_path,
             "instructions_pdf_path": self.instructions_pdf_path,
+            "fasteners_path": self.fasteners_path,
             "preview_artifacts": self.preview_artifacts,
             "structsight_judgment": self.structsight_judgment,
             "millforge_handoff": self.millforge_handoff,
+            "ecad": self.ecad,
         }
 
 
@@ -158,6 +170,21 @@ def run_full_build(*, preset_id: str, params: dict | None = None,
             result.ecad_success = any(
                 isinstance(v, dict) and not v.get("error") for v in ecad.values()
             )
+            # Surface per-board gerber artifacts on BuildResult so the bundle +
+            # build_summary.json report fab-ready outputs (zips + file counts).
+            if isinstance(ecad, dict):
+                result.ecad = {
+                    board: {
+                        "kicad_pcb_path": v.get("kicad_pcb_path"),
+                        "bom_path":       v.get("bom_path"),
+                        "gerber_dir":     v.get("gerber_dir"),
+                        "n_gerber_files": v.get("n_gerber_files", 0),
+                        "gerber_zip_path": v.get("gerber_zip_path"),
+                        "error":          v.get("error"),
+                    }
+                    for board, v in ecad.items()
+                    if isinstance(v, dict)
+                }
             drawings = dr.get("drawings") or {}
             result.drawings_dir = str(output_dir / "drawings") if drawings else None
             result.drawings_success = bool(drawings) and "error" not in drawings
@@ -210,6 +237,53 @@ def run_full_build(*, preset_id: str, params: dict | None = None,
             _stage("instructions", "fail")
     else:
         _stage("instructions", "skip")
+
+    # ── Stage 1.9: Bill-of-Fasteners (aggregated hardware buy-list) ──────
+    # Walk the BOM, roll up motor/arm/standoff/etc. fastener counts, and
+    # emit fasteners.md with McMaster/BoltDepot SKUs + estimated cost. The
+    # per-step assembly_instructions.md covers WHERE they go; this stage
+    # covers WHAT TO BUY.
+    _stage("fasteners", "start")
+    if result.bom_path and Path(result.bom_path).is_file():
+        try:
+            from aria_os.fasteners_bom import (
+                aggregate_fasteners, generate_fasteners_md,
+            )
+            bom = json.loads(Path(result.bom_path).read_text(encoding="utf-8"))
+            rows = aggregate_fasteners(bom)
+            fm_path = generate_fasteners_md(rows, output_dir)
+            result.fasteners_path = str(fm_path)
+            _stage("fasteners", "done",
+                   fasteners_path=result.fasteners_path,
+                   n_rows=len(rows),
+                   total_qty=sum(r["qty"] for r in rows),
+                   est_cost_usd=round(
+                       sum(float(r["est_cost_usd"]) for r in rows), 2))
+        except Exception as exc:
+            print(f"[build] fasteners skipped: {type(exc).__name__}: {exc}")
+            _stage("fasteners", "fail")
+    else:
+        _stage("fasteners", "skip")
+
+    # ── Stage 1.7: Total cost estimate (sums everything) ──────────────────
+    # Headline: total_usd. Sums: print material + CNC stock + machine time +
+    # PCB fab + electronics catalog + fasteners. Reads bundle dirs and
+    # writes cost_breakdown.json. Turns the bundle into a quotable kit.
+    _stage("cost", "start")
+    if result.bom_path and Path(result.bom_path).is_file():
+        try:
+            from aria_os.cost_estimate import estimate_cost
+            cost = estimate_cost(result.bom_path, preset_id=preset_id)
+            result.total_cost_usd = float(cost["totals"]["total_usd"])
+            result.cost_breakdown_path = cost.get("cost_breakdown_path")
+            _stage("cost", "done",
+                   total_usd=result.total_cost_usd,
+                   breakdown=cost["totals"])
+        except Exception as exc:
+            print(f"[build] cost estimate skipped: {type(exc).__name__}: {exc}")
+            _stage("cost", "fail")
+    else:
+        _stage("cost", "skip")
 
     # ── Stage 2: Print bundle (slicer-ready STLs + Elegoo config) ────────────
     _stage("print", "start")
