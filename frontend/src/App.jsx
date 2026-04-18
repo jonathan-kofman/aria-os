@@ -804,12 +804,39 @@ function QuickBuildsPanel() {
         {result && (
           <div style={{ marginTop: "4px", padding: "10px", borderRadius: "8px",
                         background: result.success ? `${T.green}10` : `${T.red}10`,
-                        border: `1px solid ${result.success ? T.green : T.red}40` }}>
+                        border: `1px solid ${result.success ? T.green : T.red}40`,
+                        maxHeight: "60vh", overflowY: "auto",
+                        WebkitOverflowScrolling: "touch",
+                        overscrollBehavior: "contain" }}>
             <div style={{ fontSize: "11px", fontWeight: 600,
                           color: result.success ? T.green : T.red, marginBottom: "6px" }}>
               {result.success ? "BUILD COMPLETE" : "BUILD FAILED"}
               {result.elapsed_s && ` (${Math.round(result.elapsed_s)}s)`}
             </div>
+            {/* Save location — where the bundle landed on the server. Tap to copy. */}
+            {result.success && result.output_dir && (() => {
+              const rel = result.output_dir.replace(/^.*?outputs[\\/]/, "outputs/").replace(/\\/g, "/");
+              return (
+                <div
+                  onClick={() => { try { navigator.clipboard.writeText(rel); } catch {} }}
+                  title="Click to copy path"
+                  style={{ marginBottom: "8px", padding: "6px 8px", borderRadius: "5px",
+                           background: "rgba(0,0,0,0.25)", border: `1px solid ${T.border}`,
+                           cursor: "pointer" }}>
+                  <div style={{ fontSize: "9px", color: T.text3, fontWeight: 700,
+                                letterSpacing: "0.08em", marginBottom: "2px" }}>
+                    SAVED TO
+                  </div>
+                  <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: "10px",
+                                color: T.text1, wordBreak: "break-all", lineHeight: 1.35 }}>
+                    {rel}
+                  </div>
+                  <div style={{ fontSize: "9px", color: T.text4, marginTop: "3px" }}>
+                    tap to copy · open in Files tab to browse
+                  </div>
+                </div>
+              );
+            })()}
             {/* Per-stage status pills (mechanical / ECAD / drawings / print / CAM) */}
             {result.stages && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "8px" }}>
