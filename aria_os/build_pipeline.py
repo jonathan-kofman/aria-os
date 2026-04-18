@@ -43,6 +43,7 @@ class BuildResult:
     drc_success: bool = False      # KiCad kicad-cli pcb drc — fab-ready check
     autoroute_success: bool = False  # Freerouting Specctra autorouter
     fea_success: bool = False      # gmsh + CalculiX static-linear FEA
+    nc_sim_success: bool = False   # CAMotics G-code collision check
     print_success: bool = False
     cam_success: bool = False
     sim_success: bool = False        # Genesis flight dynamics
@@ -91,6 +92,8 @@ class BuildResult:
     autoroute: dict = field(default_factory=dict)
     # Per-part FEA results from gmsh + CalculiX.
     fea: dict = field(default_factory=dict)
+    # Per-gcode CAMotics simulation results — collision + axis-limit check.
+    nc_sim: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +113,7 @@ class BuildResult:
                 "fea":        self.fea_success,
                 "print":      self.print_success,
                 "cam":        self.cam_success,
+                "nc_sim":     self.nc_sim_success,
                 "sim":        self.sim_success,
                 "circuit_sim": self.circuit_sim_success,
             },
@@ -137,6 +141,7 @@ class BuildResult:
             "drc": self.drc,
             "autoroute": self.autoroute,
             "fea": self.fea,
+            "nc_sim": self.nc_sim,
         }
 
 
@@ -479,6 +484,40 @@ def run_full_build(*, preset_id: str, params: dict | None = None,
     result.cam_dir = str(cam_dir) if cam_count > 0 else None
     result.cam_success = cam_count > 0
     _stage("cam", "done" if result.cam_success else "skip", n_parts=cam_count)
+
+    # ── Stage 3.5: NC simulation — CAMotics collision check ──────────────
+    # Runs on every generated .gcode/.nc/.ngc. Catches rapids-into-stock,
+    # tool-past-stock, axis-limit errors. Skips if CAMotics not installed.
+    _stage("nc_sim", "start")
+    nc_any_run = False
+    nc_any_ok = False
+    if result.cam_success and result.cam_dir and Path(result.cam_dir).is_dir():
+        try:
+            from aria_os.cam.nc_sim import simulate_gcode
+            # Find all G-code files emitted by the CAM stage
+            gcodes: list[Path] = []
+            for ext in ("*.nc", "*.ngc", "*.gcode", "*.tap"):
+                gcodes.extend(Path(result.cam_dir).rglob(ext))
+            for gc in gcodes:
+                out = gc.parent / "nc_sim"
+                # Look for a corresponding stock STL next to the gcode
+                stock = gc.parent / "stock.stl"
+                r = simulate_gcode(gc, stock_stl=stock if stock.is_file() else None,
+                                   out_dir=out)
+                result.nc_sim[gc.stem] = r
+                if r.get("available"):
+                    nc_any_run = True
+                    if r.get("passed"):
+                        nc_any_ok = True
+        except Exception as exc:
+            print(f"[build] nc_sim import failed: {type(exc).__name__}: {exc}")
+    result.nc_sim_success = nc_any_ok
+    if not nc_any_run:
+        _stage("nc_sim", "skip", reason="camotics not installed")
+    else:
+        _stage("nc_sim", "done" if nc_any_ok else "fail",
+               n_ok=sum(1 for v in result.nc_sim.values()
+                        if isinstance(v, dict) and v.get("passed")))
 
     # ── Stage 4: Flight dynamics sim (Genesis if installed, else stub) ────────
     _stage("sim", "start")
