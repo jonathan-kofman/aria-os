@@ -973,37 +973,20 @@ async def run_preset(preset_id: str):
     run_id = uuid.uuid4().hex[:12]
 
     def _run_drone():
+        """Use the unified build_pipeline so the user gets the FULL bundle:
+        mechanical + ECAD + drawings + slicer-ready prints + CAM scripts +
+        preview thumbnails. Single call, single result, single ZIP at the end.
+        """
         try:
-            if preset_id == "military_recon":
-                from aria_os.drone_quad_military import run_drone_quad_military
-                result = run_drone_quad_military(name=f"preset_{preset_id}_{run_id[:6]}")
-            elif preset_id == "5inch_fpv":
-                from aria_os.drone_quad import run_drone_quad
-                result = run_drone_quad(name=f"preset_{preset_id}_{run_id[:6]}")
-            elif preset_id == "7inch_long_range":
-                from aria_os.drone_quad import run_drone_quad
-                result = run_drone_quad(
-                    name=f"preset_{preset_id}_{run_id[:6]}",
-                    params={
-                        "frame": {"diagonal_mm": 295.0, "plate_size_mm": 100.0,
-                                  "arm_length_mm": 145.0, "arm_width_mm": 22.0},
-                        "prop":  {"dia_mm": 178.0},
-                        "motor": {"stator_dia_mm": 32.0, "bell_dia_mm": 33.0},
-                    },
-                )
-            else:
-                return {"error": f"preset {preset_id} has no handler"}
-            return {
-                "success": result.success,
-                "step_path": result.step_path,
-                "stl_path":  result.stl_path,
-                "render_path": result.render_path,
-                "bom_path":  result.bom_path,
-                "output_dir": result.output_dir,
-                "elapsed_s": result.elapsed_s,
-            }
+            from aria_os.build_pipeline import run_full_build
+            result = run_full_build(preset_id=preset_id)
+            return result.to_dict()
         except Exception as exc:
-            return {"error": f"{type(exc).__name__}: {exc}"}
+            import traceback
+            return {
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(),
+            }
 
     # Kick off in a background thread; client polls /api/preset/run/{run_id}
     import threading
@@ -1029,6 +1012,27 @@ async def get_preset_run(run_id: str):
     if state is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return state
+
+
+@app.get("/api/preset/run/{run_id}/preview")
+async def get_preset_preview(run_id: str):
+    """Return the 'what's in the box' thumbnail manifest for a completed run.
+
+    Frontend uses this to render the preview tile grid (assembly render +
+    GD&T drawing thumbnails) before user downloads the ZIP.
+    """
+    state = _PRESET_RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if state.get("status") != "done":
+        return {"status": state.get("status"), "preview_artifacts": []}
+    result = state.get("result") or {}
+    return {
+        "status": "done",
+        "preview_artifacts": result.get("preview_artifacts", []),
+        "stages": result.get("stages", {}),
+        "output_dir": result.get("output_dir"),
+    }
 
 
 @app.post("/api/millforge/token")

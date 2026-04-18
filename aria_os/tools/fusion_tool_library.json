@@ -1,0 +1,33 @@
+{
+  "_doc": "Minimal Fusion 360 CAM tool library. Used by aria_os/cam/cam_generator.py to pick roughing/finishing endmills + drills and compute feeds/speeds. Add tools by appending to the relevant list.",
+  "endmills": [
+    { "name": "EM_2mm_2flute_carbide",  "dia_mm": 2.0,  "flutes": 2, "chip_load_mm": 0.010, "max_doc_mm": 1.0,  "type": "flat", "material": "carbide" },
+    { "name": "EM_3mm_3flute_carbide",  "dia_mm": 3.0,  "flutes": 3, "chip_load_mm": 0.013, "max_doc_mm": 1.5,  "type": "flat", "material": "carbide" },
+    { "name": "EM_4mm_3flute_carbide",  "dia_mm": 4.0,  "flutes": 3, "chip_load_mm": 0.018, "max_doc_mm": 2.0,  "type": "flat", "material": "carbide" },
+    { "name": "EM_6mm_3flute_carbide",  "dia_mm": 6.0,  "flutes": 3, "chip_load_mm": 0.025, "max_doc_mm": 3.0,  "type": "flat", "material": "carbide" },
+    { "name": "EM_8mm_4flute_carbide",  "dia_mm": 8.0,  "flutes": 4, "chip_load_mm": 0.030, "max_doc_mm": 4.0,  "type": "flat", "material": "carbide" },
+    { "name": "EM_10mm_4flute_carbide", "dia_mm": 10.0, "flutes": 4, "chip_load_mm": 0.040, "max_doc_mm": 5.0,  "type": "flat", "material": "carbide" },
+    { "name": "EM_12mm_4flute_carbide", "dia_mm": 12.0, "flutes": 4, "chip_load_mm": 0.050, "max_doc_mm": 6.0,  "type": "flat", "material": "carbide" }
+  ],
+  "drills": [
+    { "name": "Drill_2.5mm_M3_tap", "dia_mm": 2.5, "flutes": 2, "chip_load_mm": 0.04, "type": "drill", "material": "hss" },
+    { "name": "Drill_3.2mm_M3_clr", "dia_mm": 3.2, "flutes": 2, "chip_load_mm": 0.05, "type": "drill", "material": "hss" },
+    { "name": "Drill_4.2mm_M4_tap", "dia_mm": 4.2, "flutes": 2, "chip_load_mm": 0.06, "type": "drill", "material": "hss" },
+    { "name": "Drill_5.0mm_M5_tap", "dia_mm": 5.0, "flutes": 2, "chip_load_mm": 0.07, "type": "drill", "material": "hss" },
+    { "name": "Drill_5.5mm_M6_tap", "dia_mm": 5.5, "flutes": 2, "chip_load_mm": 0.08, "type": "drill", "material": "hss" },
+    { "name": "Drill_6.5mm_M6_clr", "dia_mm": 6.5, "flutes": 2, "chip_load_mm": 0.09, "type": "drill", "material": "hss" },
+    { "name": "Drill_8.5mm_M8_tap", "dia_mm": 8.5, "flutes": 2, "chip_load_mm": 0.10, "type": "drill", "material": "hss" },
+    { "name": "Drill_10mm",         "dia_mm": 10.0,"flutes": 2, "chip_load_mm": 0.12, "type": "drill", "material": "hss" }
+  ],
+  "materials": {
+    "default":          { "sfm": 200, "chip_load_factor": 1.0,  "axial_doc_factor": 0.5, "radial_doc_factor": 0.4 },
+    "aluminium_6061":   { "sfm": 800, "chip_load_factor": 1.0,  "axial_doc_factor": 1.0, "radial_doc_factor": 0.5, "comment": "aluminum likes high RPM" },
+    "aluminium_7075":   { "sfm": 700, "chip_load_factor": 0.9,  "axial_doc_factor": 0.9, "radial_doc_factor": 0.45 },
+    "carbon_fibre":     { "sfm": 250, "chip_load_factor": 0.5,  "axial_doc_factor": 0.5, "radial_doc_factor": 0.3, "comment": "abrasive — use carbide, climb-mill, low DOC" },
+    "steel_4140":       { "sfm": 100, "chip_load_factor": 0.7,  "axial_doc_factor": 0.6, "radial_doc_factor": 0.3 },
+    "stainless_steel":  { "sfm":  80, "chip_load_factor": 0.6,  "axial_doc_factor": 0.5, "radial_doc_factor": 0.25 },
+    "titanium_6al4v":   { "sfm":  60, "chip_load_factor": 0.5,  "axial_doc_factor": 0.4, "radial_doc_factor": 0.2, "comment": "flood coolant required" },
+    "brass":            { "sfm": 350, "chip_load_factor": 1.0,  "axial_doc_factor": 1.0, "radial_doc_factor": 0.5 },
+    "delrin_acetal":    { "sfm": 600, "chip_load_factor": 1.0,  "axial_doc_factor": 1.5, "radial_doc_factor": 0.6, "comment": "high feed, no coolant" }
+  }
+}

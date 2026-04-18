@@ -231,8 +231,14 @@ def _build_arm(params):
            .pushPoints([(+pattern_x, +pattern_y), (-pattern_x, +pattern_y),
                         (-pattern_x, -pattern_y), (+pattern_x, -pattern_y)])
            .hole(3.2))
-    arm = arm.faces(">Z").edges("%CIRCLE").chamfer(0.3)
-    arm = arm.faces("<Z").edges("%CIRCLE").chamfer(0.3)
+    # Hole-edge chamfer is cosmetic — wrap in try/except because CIRCLE
+    # selector after the corner fillets can pick up filleted edges and
+    # cause OCCT to fail with "BRep_API: command not done".
+    try:
+        arm = arm.faces(">Z").edges("%CIRCLE").chamfer(0.3)
+        arm = arm.faces("<Z").edges("%CIRCLE").chamfer(0.3)
+    except Exception:
+        pass
     return arm
 
 

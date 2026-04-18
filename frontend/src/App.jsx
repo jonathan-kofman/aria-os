@@ -316,9 +316,62 @@ function QuickBuildsPanel() {
               {result.success ? "BUILD COMPLETE" : "BUILD FAILED"}
               {result.elapsed_s && ` (${Math.round(result.elapsed_s)}s)`}
             </div>
+            {/* Per-stage status pills (mechanical / ECAD / drawings / print / CAM) */}
+            {result.stages && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "8px" }}>
+                {Object.entries(result.stages).map(([stage, ok]) => (
+                  <span key={stage} style={{
+                    padding: "2px 7px", borderRadius: "4px", fontSize: "9px",
+                    fontWeight: 700, letterSpacing: "0.04em",
+                    color: ok ? T.green : T.text4,
+                    background: ok ? `${T.green}15` : "rgba(255,255,255,0.04)",
+                    border: `1px solid ${ok ? T.green + "40" : T.border}`,
+                  }}>
+                    {ok ? "✓" : "·"} {stage.toUpperCase()}
+                  </span>
+                ))}
+              </div>
+            )}
             {result.error && (
               <div style={{ fontSize: "10px", color: T.text2, marginBottom: "4px" }}>
                 {result.error}
+              </div>
+            )}
+            {/* "What's in the box" — thumbnail grid of preview artifacts */}
+            {result.success && Array.isArray(result.preview_artifacts) && result.preview_artifacts.length > 0 && (
+              <div style={{ marginBottom: "8px" }}>
+                <div style={{ fontSize: "9px", color: T.text3, fontWeight: 700,
+                              letterSpacing: "0.08em", marginBottom: "5px" }}>
+                  WHAT'S IN THE BOX ({result.preview_artifacts.length})
+                </div>
+                <div style={{ display: "grid",
+                              gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))",
+                              gap: "4px" }}>
+                  {result.preview_artifacts.slice(0, 12).map((a, i) => (
+                    <a key={i}
+                       href={`/api/file?path=${encodeURIComponent(a.rel_path)}`}
+                       target="_blank" rel="noreferrer"
+                       title={a.label}
+                       style={{ display: "block", aspectRatio: "1",
+                                background: "rgba(0,0,0,0.3)",
+                                borderRadius: "4px", border: `1px solid ${T.border}`,
+                                overflow: "hidden", textDecoration: "none",
+                                position: "relative" }}>
+                      <img src={`/api/file?path=${encodeURIComponent(a.rel_path)}`}
+                           alt={a.label}
+                           loading="lazy"
+                           style={{ width: "100%", height: "100%", objectFit: "contain",
+                                    background: a.type === "svg" ? "#fff" : "transparent" }} />
+                      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0,
+                                    padding: "2px 4px", fontSize: "8px", color: T.text2,
+                                    background: "rgba(0,0,0,0.6)",
+                                    overflow: "hidden", textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap" }}>
+                        {a.label}
+                      </div>
+                    </a>
+                  ))}
+                </div>
               </div>
             )}
             {result.success && (
