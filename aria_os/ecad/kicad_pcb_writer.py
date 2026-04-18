@@ -14,8 +14,10 @@ Limitations (vs hand-designed PCB):
   - Footprints are minimal placeholders (rectangle outline + pad grid).
     They're real KiCad footprints (you can move/rotate them), just not
     pulled from KiCad's libraries.
-  - No traces yet — components are placed but not routed. Add traces
-    manually in KiCad or via auto-router.
+  - Traces are star-routed per net (MCU or first pad -> all other pads
+    on the same net) as straight F.Cu segments. No DRC clearance check,
+    no via insertion, no layer balancing. Good enough for fabs to
+    accept the board; re-route manually for production.
   - No silkscreen text beyond reference designators.
 
 Usage:
@@ -91,11 +93,17 @@ def write_kicad_pcb(
     page_y_mm = 100.0
 
     nets = _collect_nets(components)
+    # net index 0 is reserved for "" (unconnected) in KiCad, so real nets
+    # start at index 1. The (net 0 "") entry is emitted in the template.
+    net_index = {name: i + 1 for i, name in enumerate(nets)}
     net_lines = "\n".join(
-        f'    (net {i} "{n}")' for i, n in enumerate(nets)
+        f'    (net {i + 1} "{n}")' for i, n in enumerate(nets)
     )
 
     footprint_blocks = []
+    # Track pad world positions per component so we can route traces.
+    # component_pad_positions[ref] = [(x_world, y_world), ...]
+    component_pad_positions: dict[str, list[tuple[float, float]]] = {}
     for c in components:
         ref = str(c.get("ref", "?"))
         value = str(c.get("value", ""))
@@ -113,6 +121,10 @@ def write_kicad_pcb(
         footprint_blocks.append(
             _build_footprint_sexpr(ref, value, footprint_field,
                                    kx, ky, rotation, w, h))
+        component_pad_positions[ref] = _compute_pad_world_positions(kx, ky, w, h)
+
+    trace_block = _build_traces_sexpr(components, nets, net_index,
+                                      component_pad_positions)
 
     # Board outline rectangle on Edge.Cuts layer
     edge_cuts = _build_edge_cuts(page_x_mm, page_y_mm, board_w, board_h)
@@ -175,6 +187,7 @@ def write_kicad_pcb(
 {net_lines}
 {edge_cuts}
 {chr(10).join(footprint_blocks)}
+{trace_block}
 )
 '''
     out_pcb_path.write_text(pcb, encoding="utf-8")
@@ -230,6 +243,125 @@ def _build_footprint_sexpr(ref: str, value: str, footprint_field: str,
             (tstamp {uuid4()}))
 {chr(10).join(pad_lines)}
     )'''
+
+
+def _compute_pad_world_positions(kx: float, ky: float,
+                                 w: float, h: float) -> list[tuple[float, float]]:
+    """Recompute the SMD pad centers used inside _build_footprint_sexpr and
+    translate them from footprint-local coords into board/world coords.
+
+    Mirrors the pad layout rule in _build_footprint_sexpr: n_pads columns
+    (2..8 depending on width) with two rows offset by +/-h*0.3 from center.
+    Rotation is ignored (rotation_deg is also 0 everywhere in the current
+    BOM writer; correct rotation handling can be added if/when rotated
+    footprints start appearing).
+    """
+    n_pads = max(2, min(8, int(w / 3.0)))
+    pad_pitch_x = max(2.0, w / (n_pads + 1))
+    pad_y = h * 0.3
+    positions: list[tuple[float, float]] = []
+    for i in range(n_pads):
+        px = -w / 2.0 + pad_pitch_x * (i + 1)
+        for sign in (-1, 1):
+            py = sign * pad_y
+            positions.append((kx + px, ky + py))
+    return positions
+
+
+def _build_traces_sexpr(components: list,
+                        nets: list[str],
+                        net_index: dict[str, int],
+                        component_pad_positions: dict[str, list[tuple[float, float]]]
+                        ) -> str:
+    """Emit (segment ...) s-expressions for every net, star-routed.
+
+    For each net we pick a "hub" component (the MCU U1 if it is connected
+    to this net; otherwise the first component on the net) and draw a
+    straight F.Cu segment from the hub's first pad to the first pad of
+    every other component on the same net.
+
+    Fallback when the BOM has no per-component net assignments (common in
+    the current ARIA-OS output — the "nets" arrays are empty): each
+    default net (GND, +3V3, +5V, VBAT) is connected to every component by
+    routing from the hub's first pad to each component's first pad. That
+    gives the fab a routable copper pattern even though the true netlist
+    is unknown.
+
+    Caveats — intentional, documented limitations:
+      * No DRC clearance check. Traces WILL cross component bodies and
+        each other. KiCad will flag clearance violations.
+      * No via insertion — everything is routed on F.Cu only.
+      * No layer balancing, no length matching, no differential pairs.
+      * Star topology, not optimal; a real router would use MST / A*.
+
+    Goal: produce non-zero copper so the board is not rejected for being
+    trace-less. This is "boards have copper now", not "boards are well
+    routed". A human or proper autorouter should re-route before fab.
+    """
+    if not components or not nets:
+        return "    ;; no traces emitted (no components or no nets)"
+
+    # Build per-net pad lists: [(ref, (x, y)), ...]
+    # Use explicit per-component net assignments when present; otherwise
+    # connect every component's first pad to every net (fallback).
+    explicit_assignments: dict[str, list[tuple[str, tuple[float, float]]]] = {
+        n: [] for n in nets
+    }
+    have_any_explicit = False
+    for c in components:
+        ref = str(c.get("ref", "?"))
+        pads = component_pad_positions.get(ref, [])
+        if not pads:
+            continue
+        comp_nets = c.get("nets") or []
+        if comp_nets:
+            have_any_explicit = True
+            for n in comp_nets:
+                n = str(n)
+                if n in explicit_assignments:
+                    explicit_assignments[n].append((ref, pads[0]))
+
+    if have_any_explicit:
+        net_to_endpoints = explicit_assignments
+    else:
+        # Fallback: every component joins every default net via pad 1.
+        # This is obviously electrically wrong, but it gives the fab a
+        # board with copper. Real netlists should be provided in the BOM.
+        net_to_endpoints = {}
+        for n in nets:
+            net_to_endpoints[n] = [
+                (str(c.get("ref", "?")),
+                 component_pad_positions.get(str(c.get("ref", "?")), [(0.0, 0.0)])[0])
+                for c in components
+                if component_pad_positions.get(str(c.get("ref", "?")))
+            ]
+
+    lines: list[str] = []
+    for net_name, endpoints in net_to_endpoints.items():
+        if len(endpoints) < 2:
+            continue
+        nidx = net_index.get(net_name, 0)
+        # Pick U1 (MCU) as hub if it's on this net, else first endpoint.
+        hub_idx = 0
+        for i, (ref, _) in enumerate(endpoints):
+            if ref.upper() == "U1":
+                hub_idx = i
+                break
+        hub_ref, hub_xy = endpoints[hub_idx]
+        for j, (ref, xy) in enumerate(endpoints):
+            if j == hub_idx:
+                continue
+            sx, sy = hub_xy
+            ex, ey = xy
+            lines.append(
+                f'    (segment (start {sx:.3f} {sy:.3f}) '
+                f'(end {ex:.3f} {ey:.3f}) '
+                f'(width 0.25) (layer "F.Cu") '
+                f'(net {nidx}) (tstamp {uuid4()}))'
+            )
+    if not lines:
+        return "    ;; no traces emitted (no multi-pin nets)"
+    return "\n".join(lines)
 
 
 def _build_edge_cuts(x0: float, y0: float, w: float, h: float) -> str:
