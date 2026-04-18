@@ -223,76 +223,349 @@ function Sidebar({ active, setActive }) {
 // dashboard's `--view <file>` CLI does: open ANY artifact (STL/STEP/SVG/PNG/
 // JSON/DXF) and render it with the right viewer per file extension.
 // ---------------------------------------------------------------------------
+// File-system helpers shared across the Files tab
+const _KIND_BADGE = {
+  step: { color: "#A78BFA", label: "STEP" },
+  stl:  { color: "#00D4FF", label: "STL"  },
+  svg:  { color: "#34D399", label: "SVG"  },
+  png:  { color: "#F59E0B", label: "PNG"  },
+  jpg:  { color: "#F59E0B", label: "JPG"  },
+  jpeg: { color: "#F59E0B", label: "JPG"  },
+  dxf:  { color: "#60A5FA", label: "DXF"  },
+  json: { color: "#FBBF24", label: "JSON" },
+  py:   { color: "#3B82F6", label: "PY"   },
+  md:   { color: "#9CA3AF", label: "MD"   },
+  zip:  { color: "#EC4899", label: "ZIP"  },
+  gcode:{ color: "#10B981", label: "GCODE"},
+  pcb:  { color: "#22D3EE", label: "PCB"  },
+  kicad_pcb: { color: "#22D3EE", label: "PCB" },
+  other:{ color: "#71717A", label: "FILE" },
+};
+
+function _fmtBytes(n) {
+  if (!n && n !== 0) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function _fmtRelTime(epoch_s) {
+  if (!epoch_s) return "";
+  const dt = Date.now() / 1000 - epoch_s;
+  if (dt < 60)        return `${Math.floor(dt)}s ago`;
+  if (dt < 3600)      return `${Math.floor(dt / 60)}m ago`;
+  if (dt < 86400)     return `${Math.floor(dt / 3600)}h ago`;
+  if (dt < 86400 * 7) return `${Math.floor(dt / 86400)}d ago`;
+  return new Date(epoch_s * 1000).toISOString().slice(0, 10);
+}
+
+function _kindOf(name) {
+  const m = (name || "").toLowerCase().match(/\.([a-z0-9_]+)$/);
+  if (!m) return "other";
+  const ext = m[1];
+  if (ext === "kicad_pcb" || ext === "kicad_sch") return "pcb";
+  return _KIND_BADGE[ext] ? ext : "other";
+}
+
+function _parentOf(path) {
+  const parts = (path || "").replace(/\\/g, "/").split("/");
+  parts.pop();
+  return parts.join("/") || "outputs";
+}
+
 function FilesBrowse() {
   const vp = useViewport();
   const S = spacing(vp);
   const [files, setFiles] = useState([]);
   const [selected, setSelected] = useState(null);
   const [filter, setFilter] = useState("");
+  const [activeKinds, setActiveKinds] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("files.kinds") || "[]")); }
+    catch { return new Set(); }
+  });
+  const [sortBy, setSortBy] = useState(
+    () => localStorage.getItem("files.sort") || "mtime");
+  const [groupByRun, setGroupByRun] = useState(
+    () => localStorage.getItem("files.group") !== "false");
+  const [collapsed, setCollapsed] = useState(new Set());
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    setLoading(true);
     fetch("/api/outputs")
       .then(r => r.json())
       .then(d => setFiles(d.files || []))
-      .catch(() => setFiles([]));
-  }, []);
+      .catch(() => setFiles([]))
+      .finally(() => setLoading(false));
+  }, [refreshTick]);
 
-  const filtered = files.filter(f =>
-    !filter || (typeof f === "string" ? f : f.path || f.name || "")
-      .toLowerCase().includes(filter.toLowerCase())
-  );
+  // Persist UI prefs
+  useEffect(() => { localStorage.setItem("files.kinds", JSON.stringify([...activeKinds])); }, [activeKinds]);
+  useEffect(() => { localStorage.setItem("files.sort", sortBy); }, [sortBy]);
+  useEffect(() => { localStorage.setItem("files.group", String(groupByRun)); }, [groupByRun]);
 
   const fileLike = (f) => typeof f === "string"
-    ? { path: f, name: f.split(/[\\/]/).pop(), size: 0 }
-    : { path: f.path || f, name: (f.name || f.path || "").split(/[\\/]/).pop(), size: f.size || 0 };
+    ? { path: f, name: f.split(/[\\/]/).pop(), size: 0, mtime: 0, kind: _kindOf(f) }
+    : {
+        path: f.path || f,
+        name: (f.name || f.path || "").split(/[\\/]/).pop(),
+        size: f.size || 0,
+        mtime: f.mtime || 0,
+        kind: f.kind || _kindOf(f.name || f.path || ""),
+      };
+
+  const allFiles = files.map(fileLike);
+
+  // Available kinds for filter pills (only show kinds actually present)
+  const kindCounts = {};
+  for (const f of allFiles) kindCounts[f.kind] = (kindCounts[f.kind] || 0) + 1;
+  const availableKinds = Object.keys(kindCounts).sort();
+
+  // Apply filters
+  let filtered = allFiles;
+  if (activeKinds.size > 0) {
+    filtered = filtered.filter(f => activeKinds.has(f.kind));
+  }
+  if (filter) {
+    const q = filter.toLowerCase();
+    filtered = filtered.filter(f =>
+      f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q));
+  }
+
+  // Sort
+  const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === "name") return a.name.localeCompare(b.name);
+    if (sortBy === "size") return b.size - a.size;
+    if (sortBy === "kind") return a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name);
+    return b.mtime - a.mtime; // mtime (newest first)
+  });
+
+  // Group
+  const groups = {};
+  if (groupByRun) {
+    for (const f of sorted) {
+      // Group by run dir if path is outputs/runs/<id>/..., else by parent dir
+      const m = f.path.match(/^outputs\/runs\/([^\/]+)/);
+      const key = m ? `runs/${m[1]}` : _parentOf(f.path).replace(/^outputs\/?/, "") || "(top)";
+      (groups[key] = groups[key] || []).push(f);
+    }
+  } else {
+    groups[""] = sorted;
+  }
+
+  const totalSize = sorted.reduce((s, f) => s + (f.size || 0), 0);
+  const toggleKind = (k) => {
+    const next = new Set(activeKinds);
+    next.has(k) ? next.delete(k) : next.add(k);
+    setActiveKinds(next);
+  };
+  const toggleGroup = (g) => {
+    const next = new Set(collapsed);
+    next.has(g) ? next.delete(g) : next.add(g);
+    setCollapsed(next);
+  };
+  const copyPath = (p) => { try { navigator.clipboard.writeText(p); } catch {} };
+
+  const toolbarBtn = (active, onClick, children, title) => (
+    <button onClick={onClick} title={title}
+      style={{ padding: "4px 8px", borderRadius: "5px",
+               border: `1px solid ${active ? T.ai + "60" : T.border}`,
+               background: active ? `${T.ai}18` : "rgba(255,255,255,0.02)",
+               color: active ? T.ai : T.text2, cursor: "pointer",
+               fontSize: "10px", fontWeight: 600, letterSpacing: "0.04em",
+               whiteSpace: "nowrap" }}>
+      {children}
+    </button>
+  );
 
   return (
     <div style={{ padding: `${S.pageY} ${S.pageX}`, display: "grid",
-                  gridTemplateColumns: vp.isMobile ? "1fr" : "320px 1fr",
+                  gridTemplateColumns: vp.isMobile ? "1fr" : "360px 1fr",
                   gap: S.gap,
                   height: vp.isMobile ? "auto" : "calc(100vh - 56px - 49px)",
                   overflow: vp.isMobile ? "auto" : "hidden" }}>
       <Panel title="OUTPUT FILES" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
-        <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.border}` }}>
-          <input type="text" value={filter} onChange={e => setFilter(e.target.value)}
-            placeholder="filter by name…"
-            style={{ width: "100%", background: "rgba(0,0,0,0.3)",
-                     border: `1px solid ${T.border}`, borderRadius: "6px",
-                     padding: "6px 10px", color: T.text1,
-                     fontSize: vp.isMobile ? "16px" : "12px" }} />
-          <div style={{ fontSize: "10px", color: T.text3, marginTop: "4px" }}>
-            {filtered.length} of {files.length} files
+        {/* Toolbar — search + clear + refresh */}
+        <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.border}`,
+                      display: "flex", flexDirection: "column", gap: "8px" }}>
+          <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+            <div style={{ flex: 1, position: "relative" }}>
+              <input type="text" value={filter} onChange={e => setFilter(e.target.value)}
+                placeholder="search files & paths…"
+                style={{ width: "100%", background: "rgba(0,0,0,0.3)",
+                         border: `1px solid ${T.border}`, borderRadius: "6px",
+                         padding: "6px 26px 6px 28px", color: T.text1,
+                         fontSize: vp.isMobile ? "16px" : "12px",
+                         outline: "none" }} />
+              <span style={{ position: "absolute", left: "9px", top: "50%",
+                             transform: "translateY(-50%)", color: T.text4,
+                             fontSize: "11px", pointerEvents: "none" }}>⌕</span>
+              {filter && (
+                <button onClick={() => setFilter("")}
+                  style={{ position: "absolute", right: "4px", top: "50%",
+                           transform: "translateY(-50%)", background: "transparent",
+                           border: "none", color: T.text3, cursor: "pointer",
+                           padding: "2px 6px", fontSize: "12px" }}>×</button>
+              )}
+            </div>
+            <button onClick={() => setRefreshTick(t => t + 1)} title="Refresh"
+              style={{ padding: "6px 10px", borderRadius: "6px",
+                       border: `1px solid ${T.border}`, color: T.text2,
+                       background: "rgba(255,255,255,0.02)", cursor: "pointer",
+                       fontSize: "12px" }}>↻</button>
+          </div>
+          {/* Kind pills */}
+          {availableKinds.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+              {availableKinds.map(k => {
+                const meta = _KIND_BADGE[k] || _KIND_BADGE.other;
+                const on = activeKinds.has(k);
+                return (
+                  <button key={k} onClick={() => toggleKind(k)}
+                    style={{ padding: "3px 7px", borderRadius: "4px",
+                             border: `1px solid ${on ? meta.color + "80" : T.border}`,
+                             background: on ? `${meta.color}20` : "rgba(255,255,255,0.02)",
+                             color: on ? meta.color : T.text3,
+                             cursor: "pointer", fontSize: "9px",
+                             fontWeight: 700, letterSpacing: "0.05em" }}>
+                    {meta.label} <span style={{ opacity: 0.6 }}>{kindCounts[k]}</span>
+                  </button>
+                );
+              })}
+              {activeKinds.size > 0 && (
+                <button onClick={() => setActiveKinds(new Set())}
+                  style={{ padding: "3px 7px", borderRadius: "4px",
+                           border: `1px solid ${T.border}`, color: T.text3,
+                           background: "transparent", cursor: "pointer",
+                           fontSize: "9px", fontWeight: 700 }}>CLEAR</button>
+              )}
+            </div>
+          )}
+          {/* Sort + group controls */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "4px",
+                        alignItems: "center" }}>
+            <span style={{ fontSize: "9px", color: T.text4, fontWeight: 700,
+                           letterSpacing: "0.06em", marginRight: "2px" }}>SORT</span>
+            {toolbarBtn(sortBy === "mtime", () => setSortBy("mtime"), "RECENT", "Sort by modified time")}
+            {toolbarBtn(sortBy === "name",  () => setSortBy("name"),  "NAME",   "Sort by name")}
+            {toolbarBtn(sortBy === "size",  () => setSortBy("size"),  "SIZE",   "Sort by size")}
+            {toolbarBtn(sortBy === "kind",  () => setSortBy("kind"),  "TYPE",   "Sort by file type")}
+            <span style={{ flex: 1 }} />
+            {toolbarBtn(groupByRun, () => setGroupByRun(g => !g), "GROUP", "Group by run / folder")}
+          </div>
+          <div style={{ fontSize: "10px", color: T.text3,
+                        display: "flex", justifyContent: "space-between" }}>
+            <span>{loading ? "loading…" : `${sorted.length} of ${allFiles.length} files`}</span>
+            <span style={{ fontFamily: "JetBrains Mono, monospace" }}>{_fmtBytes(totalSize)}</span>
           </div>
         </div>
+        {/* File list */}
         <div style={{ flex: 1, overflowY: "auto" }}>
-          {filtered.map((f, i) => {
-            const fl = fileLike(f);
-            const ext = (fl.name.match(/\.([^.]+)$/) || [, ""])[1].toLowerCase();
-            const isSelected = selected?.path === fl.path;
+          {Object.entries(groups).map(([groupName, items]) => {
+            const isCollapsed = collapsed.has(groupName);
             return (
-              <button key={i} onClick={() => setSelected(fl)}
-                style={{ width: "100%", textAlign: "left", padding: "8px 12px",
-                         border: "none", borderBottom: `1px solid ${T.border}`,
-                         background: isSelected ? `${T.ai}15` : "transparent",
-                         color: isSelected ? T.ai : T.text1,
-                         cursor: "pointer", fontSize: "11px",
-                         display: "flex", alignItems: "center", gap: "8px" }}>
-                <span style={{ fontFamily: "JetBrains Mono, monospace",
-                              fontSize: "9px", color: T.text3,
-                              minWidth: "44px", textTransform: "uppercase" }}>
-                  {ext || "—"}
-                </span>
-                <span style={{ flex: 1, overflow: "hidden",
-                              textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {fl.name}
-                </span>
-              </button>
+              <div key={groupName}>
+                {groupByRun && groupName && (
+                  <button onClick={() => toggleGroup(groupName)}
+                    style={{ width: "100%", textAlign: "left",
+                             padding: "6px 12px", border: "none",
+                             borderBottom: `1px solid ${T.border}`,
+                             background: "rgba(255,255,255,0.025)",
+                             color: T.text2, cursor: "pointer",
+                             fontSize: "10px", fontWeight: 700,
+                             letterSpacing: "0.06em",
+                             display: "flex", alignItems: "center", gap: "6px",
+                             position: "sticky", top: 0, zIndex: 1,
+                             backdropFilter: "blur(6px)" }}>
+                    <span style={{ color: T.text4, fontSize: "9px" }}>
+                      {isCollapsed ? "▸" : "▾"}
+                    </span>
+                    <span style={{ flex: 1, overflow: "hidden",
+                                   textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                   color: groupName.startsWith("runs/") ? T.ai : T.text2 }}>
+                      {groupName}
+                    </span>
+                    <span style={{ color: T.text4, fontWeight: 500 }}>
+                      {items.length}
+                    </span>
+                  </button>
+                )}
+                {!isCollapsed && items.map((fl, i) => {
+                  const meta = _KIND_BADGE[fl.kind] || _KIND_BADGE.other;
+                  const isSelected = selected?.path === fl.path;
+                  return (
+                    <div key={`${groupName}-${i}`}
+                      style={{ borderBottom: `1px solid ${T.border}`,
+                               background: isSelected ? `${T.ai}12` : "transparent",
+                               display: "flex", alignItems: "center" }}>
+                      <button onClick={() => setSelected(fl)}
+                        style={{ flex: 1, textAlign: "left", padding: "8px 8px 8px 12px",
+                                 border: "none", background: "transparent",
+                                 color: isSelected ? T.ai : T.text1,
+                                 cursor: "pointer", fontSize: "11px",
+                                 display: "flex", alignItems: "center", gap: "8px",
+                                 minWidth: 0 }}>
+                        <span style={{ fontFamily: "JetBrains Mono, monospace",
+                                       fontSize: "8px", color: meta.color,
+                                       background: `${meta.color}15`,
+                                       border: `1px solid ${meta.color}40`,
+                                       borderRadius: "3px", padding: "2px 5px",
+                                       minWidth: "44px", textAlign: "center",
+                                       fontWeight: 700, letterSpacing: "0.04em" }}>
+                          {meta.label}
+                        </span>
+                        <span style={{ flex: 1, minWidth: 0, display: "flex",
+                                       flexDirection: "column", gap: "1px" }}>
+                          <span style={{ overflow: "hidden",
+                                         textOverflow: "ellipsis",
+                                         whiteSpace: "nowrap" }}>{fl.name}</span>
+                          <span style={{ fontSize: "9px", color: T.text4,
+                                         display: "flex", gap: "8px",
+                                         fontFamily: "JetBrains Mono, monospace" }}>
+                            <span>{_fmtBytes(fl.size)}</span>
+                            {fl.mtime ? <span>· {_fmtRelTime(fl.mtime)}</span> : null}
+                          </span>
+                        </span>
+                      </button>
+                      {/* Quick actions */}
+                      <div style={{ display: "flex", gap: "2px", padding: "0 6px 0 0" }}>
+                        <button onClick={(e) => { e.stopPropagation(); copyPath(fl.path); }}
+                          title="Copy path"
+                          style={{ padding: "4px 6px", border: "none",
+                                   background: "transparent", color: T.text4,
+                                   cursor: "pointer", fontSize: "10px",
+                                   borderRadius: "3px" }}>⎘</button>
+                        <a href={`/api/file?path=${encodeURIComponent(fl.path)}`}
+                           target="_blank" rel="noreferrer"
+                           onClick={(e) => e.stopPropagation()}
+                           title="Open in new tab"
+                           style={{ padding: "4px 6px", color: T.text4,
+                                    cursor: "pointer", fontSize: "10px",
+                                    borderRadius: "3px",
+                                    textDecoration: "none" }}>↗</a>
+                        <a href={`/api/file?path=${encodeURIComponent(fl.path)}`}
+                           download={fl.name}
+                           onClick={(e) => e.stopPropagation()}
+                           title="Download"
+                           style={{ padding: "4px 6px", color: T.text4,
+                                    cursor: "pointer", fontSize: "10px",
+                                    borderRadius: "3px",
+                                    textDecoration: "none" }}>↓</a>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             );
           })}
-          {filtered.length === 0 && (
-            <div style={{ padding: "20px", color: T.text4, fontSize: "11px",
-                          textAlign: "center" }}>
-              No files. Run a build first.
+          {sorted.length === 0 && !loading && (
+            <div style={{ padding: "24px 16px", color: T.text4, fontSize: "11px",
+                          textAlign: "center", lineHeight: 1.5 }}>
+              {allFiles.length === 0
+                ? "No files yet. Run a build from QUICK BUILDS or GENERATE to populate this tab."
+                : "No files match the active filters."}
             </div>
           )}
         </div>
