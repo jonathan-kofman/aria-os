@@ -40,7 +40,7 @@ class LatticeParams:
     strut_width_mm: float = 1.6       # min material between cuts
     skin_mm: float = 4.0              # solid border around the lattice region
     curvature_radius_mm: float = 0.0  # 0 = flat; positive = cylindrical bend
-    pattern: str = "rosette"          # "rosette" | "diamond" | "honeycomb"
+    pattern: str = "rosette"          # "rosette" | "diamond" | "honeycomb" | "arc_x"
     cell_aspect: float = 1.0          # X-stretch of cells (1.0 = square)
 
 
@@ -114,6 +114,8 @@ def _build_pattern_cutter(cq, params: LatticeParams,
                 voids.extend(_diamond_cell_voids(cx, cy, cs_x, cs_y, sw))
             elif pattern == "honeycomb":
                 voids.extend(_hex_cell_voids(cx, cy, cs_x, cs_y, sw))
+            elif pattern == "arc_x":
+                voids.extend(_arc_x_cell_voids(cx, cy, cs_x, cs_y, sw))
             else:
                 voids.extend(_rosette_cell_voids(cx, cy, cs_x, cs_y, sw))
 
@@ -190,6 +192,60 @@ def _diamond_cell_voids(cx: float, cy: float, sx: float, sy: float,
         (cx, cy + half), (cx + half, cy),
         (cx, cy - half), (cx - half, cy),
     ]]
+
+
+def _arc_x_cell_voids(cx: float, cy: float, sx: float, sy: float,
+                      strut_w: float) -> list[list[tuple[float, float]]]:
+    """X-strut pattern matching SLM-printed metal lattice aesthetic.
+
+    Each cell has ONE diamond-shape void with each side ARC-BOWED INWARD
+    toward the cell center. Material between cells forms a + (X-strut)
+    with bulged/curved arms. Adjacent cells share corner-circle arcs so
+    the assembled grid reads as overlapping circles forming X-struts —
+    exactly the photo aesthetic.
+
+    Construction:
+      - 4 vertices at cell-edge midpoints (slightly inset by strut_w/2)
+      - Each connecting side replaced by a curve bowing toward (cx, cy)
+      - Bow amplitude proportional to cell size for visual impact
+    """
+    half_x = sx / 2.0
+    half_y = sy / 2.0
+    inset  = strut_w / 2.0
+
+    # Diamond vertices at edge midpoints (inset for inter-cell wall)
+    diamond = [
+        (cx,                  cy + half_y - inset),  # top
+        (cx + half_x - inset, cy),                   # right
+        (cx,                  cy - half_y + inset),  # bottom
+        (cx - half_x + inset, cy),                   # left
+    ]
+
+    # Each side becomes a curve bowing toward the cell center.
+    # Bow amplitude = ~22% of half cell — gives the SLM "arc" look without
+    # eating into the strut nodes at corners.
+    n_per_arc = 12
+    bow_amp = 0.22 * min(half_x, half_y)
+
+    outline = []
+    for i in range(4):
+        p1 = diamond[i]
+        p2 = diamond[(i + 1) % 4]
+        for j in range(n_per_arc):
+            t = j / n_per_arc
+            # Linear interp p1 → p2
+            x = p1[0] + (p2[0] - p1[0]) * t
+            y = p1[1] + (p2[1] - p1[1]) * t
+            # Bow displacement: max at midpoint, smooth falloff via sin
+            bow = math.sin(t * math.pi) * bow_amp
+            # Direction toward cell center
+            dxc, dyc = cx - x, cy - y
+            d = math.hypot(dxc, dyc) + 1e-9
+            x += (dxc / d) * bow
+            y += (dyc / d) * bow
+            outline.append((x, y))
+
+    return [outline]
 
 
 def _hex_cell_voids(cx: float, cy: float, sx: float, sy: float,
@@ -274,7 +330,7 @@ if __name__ == "__main__":
     p.add_argument("--cell", type=float, default=12.0)
     p.add_argument("--strut", type=float, default=1.6)
     p.add_argument("--pattern", default="rosette",
-                   choices=["rosette", "diamond", "honeycomb"])
+                   choices=["rosette", "diamond", "honeycomb", "arc_x"])
     p.add_argument("--out", default="outputs/lattice/plate.step")
     args = p.parse_args()
     params = LatticeParams(
