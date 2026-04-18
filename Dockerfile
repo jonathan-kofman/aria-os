@@ -34,8 +34,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         libwxgtk3.2-1 \
+        libwxgtk-gl3.2-1 \
         libngspice0 \
         libpython3.11 \
+        libsecret-1-0 \
+        libnss3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Pull kicad-cli from the official KiCad image so the backend can export
