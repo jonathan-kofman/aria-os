@@ -2,8 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>ARIA-OS</title>
+    <!-- PWA: install to home screen, dark theme color, iOS support -->
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#0A0A0F" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ARIA" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <!-- Mobile-responsive overrides for the inline-styled React app -->
+    <link rel="stylesheet" href="/mobile.css" />
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
       body { background: #0A0A0F; overflow-x: hidden; }
@@ -12,5 +21,12 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
+        });
+      }
+    </script>
   </body>
 </html>

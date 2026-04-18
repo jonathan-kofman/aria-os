@@ -1,0 +1,161 @@
+/* ARIA-OS mobile overrides
+ * --------------------------
+ * The Vite app uses inline styles with fixed widths (64px sidebar, 380px
+ * panels, 28px padding). This file overrides those for ≤900px screens so
+ * the UI is actually usable on a phone.
+ *
+ * !important is required because inline styles win specificity battles
+ * against external CSS by default.
+ */
+
+/* iOS notched safe-area padding */
+:root {
+  --safe-top:    env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+}
+
+body {
+  padding-top: var(--safe-top) !important;
+  padding-bottom: var(--safe-bottom) !important;
+}
+
+/* Form inputs: 16px font prevents iOS auto-zoom on focus */
+@media (max-width: 900px) {
+  input, textarea, select, button {
+    font-size: 16px !important;
+    min-height: 44px !important;
+  }
+  /* But preserve smaller text for status pills, badges, etc. */
+  span, small, code {
+    font-size: inherit !important;
+  }
+}
+
+/* Phone layout (≤640px) */
+@media (max-width: 640px) {
+
+  /* Sidebar: hide the 64px fixed-position vertical nav, show as bottom bar */
+  body > div > div[style*="width: 64px"],
+  body > div > div[style*="width:64px"],
+  div[style*="width: 64px"][style*="position: fixed"],
+  div[style*="width:64px"][style*="position:fixed"] {
+    width: 100% !important;
+    height: 56px !important;
+    position: fixed !important;
+    bottom: 0 !important;
+    top: auto !important;
+    left: 0 !important;
+    right: 0 !important;
+    flex-direction: row !important;
+    padding: 4px 8px !important;
+    border-top: 1px solid rgba(255,255,255,0.08) !important;
+    border-right: 0 !important;
+    z-index: 200 !important;
+  }
+  /* Nav buttons in the bar: spread out, smaller */
+  div[style*="width: 64px"] button,
+  div[style*="width:64px"] button {
+    width: 44px !important;
+    height: 44px !important;
+    margin: 0 4px !important;
+  }
+  /* The "AI" badge at the bottom of the original sidebar — hide on phone */
+  div[style*="width: 64px"] > div:last-child[style*="36px"][style*="36px"] {
+    display: none !important;
+  }
+
+  /* Main content: shift right by 0 (was 64px), bottom-pad for the new bar */
+  body > div > main,
+  div[style*="margin-left: 64px"],
+  div[style*="marginLeft: 64px"],
+  div[style*="paddingLeft: 64px"] {
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+    padding-bottom: 64px !important;
+  }
+
+  /* All grid layouts collapse to single column */
+  div[style*="gridTemplateColumns"],
+  div[style*="grid-template-columns"] {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: auto !important;
+  }
+
+  /* Tighten 28px padding everywhere */
+  div[style*="padding: 20px 28px"],
+  div[style*="padding:20px 28px"],
+  div[style*="padding: 28px"],
+  div[style*="padding:28px"] {
+    padding: 12px !important;
+  }
+  /* Sticky header: tighten */
+  div[style*="height: 56px"][style*="padding: 0 28px"],
+  div[style*="height:56px"][style*="padding:0 28px"] {
+    padding: 0 12px !important;
+  }
+  /* Sub-tab strip: smaller padding so tabs don't wrap awkwardly */
+  div[style*="padding: 12px 28px"],
+  div[style*="padding:12px 28px"] {
+    padding: 8px 12px !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    flex-wrap: nowrap !important;
+  }
+
+  /* Three.js viewer canvas: full width, fixed reasonable height */
+  canvas {
+    max-width: 100% !important;
+    height: auto !important;
+    min-height: 280px !important;
+    max-height: 60vh !important;
+  }
+
+  /* Make headings smaller */
+  h1 { font-size: 18px !important; }
+  h2 { font-size: 16px !important; }
+  h3 { font-size: 14px !important; }
+
+  /* Code/terminal blocks: smaller text, scroll horizontally */
+  pre, code {
+    font-size: 11px !important;
+    overflow-x: auto !important;
+    white-space: pre !important;
+  }
+
+  /* Generic "card" containers (look for 16px gap divs) shrink padding */
+  div[style*="gap: 16px"][style*="grid"],
+  div[style*="gap:16px"][style*="grid"] {
+    gap: 8px !important;
+  }
+}
+
+/* Tablet (641-900px): keep sidebar but compress everything else */
+@media (min-width: 641px) and (max-width: 900px) {
+  div[style*="gridTemplateColumns: \"1fr 380px\""],
+  div[style*="gridTemplateColumns:\"1fr 380px\""] {
+    grid-template-columns: 1fr !important;
+  }
+  div[style*="padding: 20px 28px"],
+  div[style*="padding:20px 28px"] {
+    padding: 16px 18px !important;
+  }
+}
+
+/* Touch-friendly tap targets on any coarse pointer device */
+@media (pointer: coarse) {
+  button, a, [role="button"], select {
+    min-height: 44px !important;
+    min-width: 44px !important;
+  }
+}
+
+/* Smooth scroll, native momentum on iOS */
+html, body {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+
+/* Prevent horizontal scroll bleed */
+body {
+  overflow-x: hidden !important;
+}
