@@ -9,11 +9,14 @@
 #   2. `apt install kicad` on bookworm-slim — the `kicad` metapackage
 #      pulls the full IDE + 3D models + symbols + footprints (~1.8GB
 #      unpacked). Railway builder ran out of memory/disk during unpack.
-#   3. Current: switch base to Debian trixie (13) via python:3.11-slim-trixie.
+#   3. Current: switch base to Debian trixie (13) via python:3.13-slim-trixie.
 #      Trixie ships a standalone `kicad-cli` package (~150MB) separate
 #      from the full IDE — exactly what we need for headless Gerber export.
+#      NOTE: python:3.11-slim-trixie does NOT exist on Docker Hub — only
+#      3.13/3.14/bare `slim-trixie` tags exist. 3.11 was never published
+#      against trixie. Using 3.13 (stable, ~2x faster than 3.11 for pure py).
 
-FROM python:3.11-slim-trixie AS runtime
+FROM python:3.13-slim-trixie AS runtime
 
 # System libraries cadquery / OCP / VTK / matplotlib / kicad-cli need at
 # runtime. `kicad-cli` on trixie is a small standalone package — it does
