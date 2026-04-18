@@ -8,12 +8,13 @@ import STLViewer from "../aria/STLViewer.jsx";
 // KiCad PCBs+drawings+slicer-ready prints. The fastest "prompt → manufacturing"
 // path in the app. Fetches /api/presets, polls /api/preset/run/{id} for results.
 // ---------------------------------------------------------------------------
-function QuickBuildsPanel() {
+function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }) {
   const [presets, setPresets] = useState({});
   const [running, setRunning] = useState(null);   // { run_id, preset_id }
   const [progress, setProgress] = useState(null); // { stages: [...], current_stage, started_at }
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const loggedPresetStagesRef = useRef(0);
 
   useEffect(() => {
     fetch("/api/presets")
@@ -31,9 +32,16 @@ function QuickBuildsPanel() {
         const r = await fetch(`/api/preset/run/${running.run_id}`);
         if (!r.ok) return;
         const d = await r.json();
+        const stages = d.stages || [];
+        for (let i = loggedPresetStagesRef.current; i < stages.length; i++) {
+          const ev = stages[i];
+          const extra = ev.elapsed_s != null ? ` (${ev.elapsed_s}s)` : "";
+          appendPipelineLog?.(`[preset] ${ev.stage}: ${ev.status}${extra}`);
+        }
+        loggedPresetStagesRef.current = stages.length;
         // Always pick up partial progress (stages array, current_stage)
         setProgress({
-          stages: d.stages || [],
+          stages,
           current_stage: d.current_stage,
           started_at: d.started_at,
         });
@@ -41,21 +49,35 @@ function QuickBuildsPanel() {
           setResult(d.result);
           setRunning(null);
           clearInterval(id);
+          const ok = d.result?.success === true;
+          if (d.result?.error) {
+            appendPipelineLog?.(`[preset] ERROR: ${d.result.error}`);
+          } else {
+            appendPipelineLog?.(`[preset] finished ${ok ? "OK" : "with issues"}`);
+          }
+          setPipelineStatus?.("done");
+          refreshParts?.();
         }
       } catch {}
     }, 1000);
     return () => clearInterval(id);
-  }, [running]);
+  }, [running, appendPipelineLog, setPipelineStatus, refreshParts]);
 
   const launch = async (preset_id) => {
     setError(null); setResult(null); setProgress(null);
+    loggedPresetStagesRef.current = 0;
     try {
       const r = await fetch(`/api/preset/${preset_id}`, { method: "POST" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
+      const label = presets[preset_id]?.label || preset_id;
+      appendPipelineLog?.(`>>> Quick build: ${label} (run ${d.run_id})`);
+      setPipelineStatus?.("running");
       setRunning({ run_id: d.run_id, preset_id });
     } catch (e) {
       setError(e.message);
+      appendPipelineLog?.(`ERROR: quick build failed to start: ${e.message}`);
+      setPipelineStatus?.("idle");
     }
   };
 
@@ -296,7 +318,7 @@ function logColor(line) {
   return T.text2;
 }
 
-function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipelineStatus, logLines }) {
+function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipelineStatus, logLines, appendPipelineLog, setPipelineStatus, refreshParts }) {
   const [goal, setGoal] = useState("");
   const [maxAttempts, setMaxAttempts] = useState(3);
   const stlUrl = selectedPart?.stl_path ? `/api/parts/${selectedPart.id}/stl` : null;
@@ -357,7 +379,7 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
 
       {/* Right: Quick Builds + Generate form + log — scroll via main App column (minHeight:100% + natural height). */}
       <div style={{ display: "flex", flexDirection: "column", gap: "12px", minWidth: 0, width: "100%" }}>
-        <QuickBuildsPanel />
+        <QuickBuildsPanel appendPipelineLog={appendPipelineLog} setPipelineStatus={setPipelineStatus} refreshParts={refreshParts} />
         <Panel title="GENERATE">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
             <textarea
@@ -953,9 +975,9 @@ function GenerateRefine({ parts, pipelineStatus, logLines }) {
     </div>
   );
 }
-export default function GenerateTab({ currentSub, parts, selectedPart, setSelectedPart, onGenerate, pipelineStatus, logLines }) {
+export default function GenerateTab({ currentSub, parts, selectedPart, setSelectedPart, onGenerate, pipelineStatus, logLines, appendPipelineLog, setPipelineStatus, refreshParts }) {
   switch (currentSub) {
-    case "nl": return <GenerateNL parts={parts} selectedPart={selectedPart} setSelectedPart={setSelectedPart} onGenerate={onGenerate} pipelineStatus={pipelineStatus} logLines={logLines} />;
+    case "nl": return <GenerateNL parts={parts} selectedPart={selectedPart} setSelectedPart={setSelectedPart} onGenerate={onGenerate} pipelineStatus={pipelineStatus} logLines={logLines} appendPipelineLog={appendPipelineLog} setPipelineStatus={setPipelineStatus} refreshParts={refreshParts} />;
     case "image": return <GenerateImage pipelineStatus={pipelineStatus} logLines={logLines} />;
     case "assembly": return <GenerateAssembly pipelineStatus={pipelineStatus} logLines={logLines} onGenerate={onGenerate} />;
     case "terrain": return <GenerateTerrain pipelineStatus={pipelineStatus} logLines={logLines} onGenerate={onGenerate} />;

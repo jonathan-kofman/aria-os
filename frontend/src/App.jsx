@@ -1115,7 +1115,23 @@ export default function App() {
   const [pipelineStatus, setPipelineStatus] = useState("idle");
   const [logLines, setLogLines] = useState([]);
   const [cemData, setCemData] = useState(null);
-  const eventSourceRef = useRef(null);
+  const generateStreamRef = useRef(null);
+
+  const appendPipelineLog = useCallback((line) => {
+    const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    setLogLines((prev) => [...prev.slice(-200), `[${ts}] ${line}`]);
+  }, []);
+
+  const refreshParts = useCallback(() => {
+    fetch("/api/parts")
+      .then((r) => (r.ok ? r.json() : { parts: [] }))
+      .then((d) => {
+        const arr = Array.isArray(d) ? d : (d?.parts || []);
+        setParts(arr);
+        if (arr.length > 0) setSelectedPart((prev) => prev || arr[0]);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetch("/api/parts")
@@ -1135,45 +1151,61 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  useEffect(() => {
-    const es = new EventSource("/api/log/stream");
-    eventSourceRef.current = es;
-    es.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        const msg = data.message || data.data || e.data;
-        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-        setLogLines(prev => [...prev.slice(-200), `[${ts}] ${msg}`]);
-        if (data.type === "complete" || data.type === "done") {
-          setPipelineStatus("done");
-          fetch("/api/parts").then(r => r.ok ? r.json() : { parts: [] }).then(d => {
-            const arr = Array.isArray(d) ? d : (d?.parts || []);
-            setParts(arr);
-            if (arr.length > 0) setSelectedPart(prev => prev || arr[0]);
-          }).catch(() => {});
-        } else if (data.type === "step" || data.type === "info") {
-          setPipelineStatus("running");
-        }
-      } catch {}
-    };
-    es.onerror = () => setPipelineStatus(s => s === "running" ? "done" : s);
-    return () => es.close();
+  useEffect(() => () => {
+    if (generateStreamRef.current) {
+      generateStreamRef.current.close();
+      generateStreamRef.current = null;
+    }
   }, []);
 
   const handleGenerate = useCallback(async (goal, maxAttempts) => {
     setPipelineStatus("running");
-    setLogLines(prev => [...prev, `>>> Starting: ${goal}`]);
+    appendPipelineLog(`>>> Starting: ${goal}`);
+    if (generateStreamRef.current) {
+      generateStreamRef.current.close();
+      generateStreamRef.current = null;
+    }
     try {
-      await fetch("/api/generate", {
+      const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ goal, max_attempts: maxAttempts }),
       });
+      const data = await res.json().catch(() => ({}));
+      const runId = data.run_id;
+      if (!runId) {
+        appendPipelineLog("(no run_id from server — live log unavailable; try dashboard on :8001)");
+        setPipelineStatus("idle");
+        return;
+      }
+      const es = new EventSource(`/api/run/${runId}/stream`);
+      generateStreamRef.current = es;
+      es.onmessage = (e) => {
+        try {
+          const payload = JSON.parse(e.data);
+          if (payload.done) {
+            setPipelineStatus(payload.status === "done" ? "done" : "idle");
+            refreshParts();
+            es.close();
+            if (generateStreamRef.current === es) generateStreamRef.current = null;
+            return;
+          }
+          const msg = payload.text ?? payload.message ?? payload.data;
+          if (msg) appendPipelineLog(String(msg));
+        } catch {
+          appendPipelineLog(e.data);
+        }
+      };
+      es.onerror = () => {
+        es.close();
+        if (generateStreamRef.current === es) generateStreamRef.current = null;
+        setPipelineStatus((s) => (s === "running" ? "idle" : s));
+      };
     } catch (e) {
-      setLogLines(prev => [...prev, `ERROR: ${e.message}`]);
+      appendPipelineLog(`ERROR: ${e.message}`);
       setPipelineStatus("idle");
     }
-  }, []);
+  }, [appendPipelineLog, refreshParts]);
 
   const setSub = (section, id) => setSubActive(prev => ({ ...prev, [section]: id }));
 
@@ -1194,6 +1226,9 @@ export default function App() {
               onGenerate={handleGenerate}
               pipelineStatus={pipelineStatus}
               logLines={logLines}
+              appendPipelineLog={appendPipelineLog}
+              setPipelineStatus={setPipelineStatus}
+              refreshParts={refreshParts}
             />
           </Suspense>
         );
