@@ -3,6 +3,14 @@ import { useViewport, layout, spacing, viewContainer } from "../responsive.js";
 import { T } from "../aria/theme.js";
 import { Panel, StatCard, Badge } from "../aria/uiPrimitives.jsx";
 import STLViewer from "../aria/STLViewer.jsx";
+
+/** rel_path for /api/file must be under outputs/ (repo-relative). Backend used to omit the prefix. */
+function outputsFileQueryPath(relPath) {
+  if (!relPath) return "";
+  const p = String(relPath).replace(/\\/g, "/").replace(/^\/+/, "");
+  if (p.startsWith("outputs/")) return p;
+  return `outputs/${p}`;
+}
 // ---------------------------------------------------------------------------
 // QuickBuildsPanel — pre-canned drone builds. One click → 30s → STEP+STL+
 // KiCad PCBs+drawings+slicer-ready prints. The fastest "prompt → manufacturing"
@@ -256,7 +264,7 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
                               gap: "4px" }}>
                   {result.preview_artifacts.slice(0, 12).map((a, i) => (
                     <a key={i}
-                       href={`/api/file?path=${encodeURIComponent(a.rel_path)}`}
+                       href={`/api/file?path=${encodeURIComponent(outputsFileQueryPath(a.rel_path))}`}
                        target="_blank" rel="noreferrer"
                        title={a.label}
                        style={{ display: "block", aspectRatio: "1",
@@ -264,7 +272,7 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
                                 borderRadius: "4px", border: `1px solid ${T.border}`,
                                 overflow: "hidden", textDecoration: "none",
                                 position: "relative" }}>
-                      <img src={`/api/file?path=${encodeURIComponent(a.rel_path)}`}
+                      <img src={`/api/file?path=${encodeURIComponent(outputsFileQueryPath(a.rel_path))}`}
                            alt={a.label}
                            loading="lazy"
                            style={{ width: "100%", height: "100%", objectFit: "contain",

@@ -483,11 +483,20 @@ def _build_preview_manifest(output_dir: Path, result: BuildResult) -> list[dict]
     renders or 'svg' for drawings. rel_path is suitable for /api/file?path=...
     """
     items: list[dict] = []
+    # Paths must include the "outputs/" prefix: /api/file resolves REPO_ROOT / path
+    # and only allows files under REPO_ROOT / outputs.
+    _outputs_root = output_dir.resolve().parent.parent
 
     def _rel(p: Path) -> str:
+        p = Path(p).resolve()
         try:
-            return str(p.relative_to(output_dir.parent.parent)).replace("\\", "/")
+            rel = p.relative_to(_outputs_root)
+            return f"outputs/{rel.as_posix()}"
         except ValueError:
+            for anc in p.parents:
+                if anc.name == "outputs":
+                    rel = p.relative_to(anc)
+                    return f"outputs/{rel.as_posix()}"
             return str(p).replace("\\", "/")
 
     # Main render
