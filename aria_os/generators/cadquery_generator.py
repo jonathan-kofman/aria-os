@@ -1652,12 +1652,26 @@ def _cq_gear(params: dict[str, Any]) -> str:
          "minimal"; spoke_style="straight" produces zero booleans.
 
     OCCT work: 1 extrude  +  0-2 booleans  (was 6+ on a 1700-face polygon).
+
+    NOTE: N_PTS=3 produces teeth that the vision verifier flags as "plain disc"
+    for n_teeth >= 12 (tooth depth visible at ~5% of OD only). For that regime
+    we defer to _cq_involute_gear, which uses N_PTS=8 per flank + a proper
+    tip-arc — vision LLMs see distinct tooth features. Small pinions (n<12)
+    stay on this fast path because OCCT struggles with dense polylines at that
+    scale.
     """
     import math as _m
 
     module_mm   = float(params.get("module_mm", 1.0))
     n_teeth     = int(params.get("n_teeth", 40))
     pa_deg      = float(params.get("pressure_angle_deg", 20.0))
+
+    # Delegate to the high-resolution involute gear for normal spur-gear sizes.
+    # _cq_involute_gear produces teeth the vision verifier can actually see
+    # instead of reporting "appears as plain disc". Preserves bore, face width,
+    # and pressure angle via the shared params dict.
+    if n_teeth >= 12:
+        return _cq_involute_gear(params)
     face_w      = float(params.get("face_width_mm", 6.0))
     bore        = float(params.get("bore_mm", 6.0))
     hub_od_def  = max(bore * 2.4, bore + 6.0)
