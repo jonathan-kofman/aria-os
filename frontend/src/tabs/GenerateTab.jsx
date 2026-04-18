@@ -305,6 +305,104 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
                 </div>
               </div>
             )}
+            {/* Docs + bill links — assembly MD/PDF, fasteners MD, BOM. */}
+            {result.success && (() => {
+              const links = [];
+              const push = (label, path, kind) => {
+                if (path && typeof path === "string") {
+                  links.push({ label, path: outputsFileQueryPath(
+                    path.replace(/^.*?outputs[\\/]/, "outputs/").replace(/\\/g, "/")), kind });
+                }
+              };
+              push("Assembly steps (MD)",     result.instructions_path,      "md");
+              push("Assembly steps (PDF)",    result.instructions_pdf_path,  "pdf");
+              push("Bill of fasteners",       result.fasteners_path,         "md");
+              push("BOM",                     result.bom_path,               "json");
+              if (links.length === 0) return null;
+              return (
+                <div style={{ marginBottom: "8px" }}>
+                  <div style={{ fontSize: "9px", color: T.text3, fontWeight: 700,
+                                letterSpacing: "0.08em", marginBottom: "5px" }}>
+                    DOCS & BILL
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                    {links.map((l, i) => (
+                      <a key={i}
+                         href={`/api/file?path=${encodeURIComponent(l.path)}`}
+                         target="_blank" rel="noreferrer"
+                         style={{ fontSize: "10px", color: T.ai,
+                                  padding: "3px 8px", borderRadius: "4px",
+                                  border: `1px solid ${T.ai}40`,
+                                  background: `${T.ai}10`,
+                                  textDecoration: "none", whiteSpace: "nowrap" }}>
+                        {l.label} <span style={{ color: T.text4, fontSize: "8px" }}>
+                          .{l.kind}
+                        </span>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+            {/* DIY fab artifacts — per PCB board: G-code + STLs + SVG.
+                Lets user download individual files for CNC or 3D printer. */}
+            {result.success && result.diy_fab && Object.keys(result.diy_fab).length > 0 && (
+              <div style={{ marginBottom: "8px" }}>
+                <div style={{ fontSize: "9px", color: T.text3, fontWeight: 700,
+                              letterSpacing: "0.08em", marginBottom: "5px" }}>
+                  DIY PCB FAB
+                </div>
+                {Object.entries(result.diy_fab).map(([board, info]) => {
+                  if (!info || info.error || !info.paths) return null;
+                  const tiles = [
+                    ["isolation.gcode", info.paths.isolation_gcode, "CNC"],
+                    ["drill.gcode",     info.paths.drill_gcode,     "CNC"],
+                    ["substrate.stl",   info.paths.substrate_stl,   "3DP"],
+                    ["stencil.stl",     info.paths.stencil_stl,     "3DP"],
+                    ["copper_tape.svg", info.paths.copper_tape_svg, "CUT"],
+                  ].filter(([, p]) => p);
+                  return (
+                    <div key={board} style={{ marginBottom: "4px",
+                                               padding: "6px 8px",
+                                               borderRadius: "5px",
+                                               background: "rgba(0,0,0,0.2)",
+                                               border: `1px solid ${T.border}` }}>
+                      <div style={{ fontSize: "10px", color: T.text1,
+                                    fontWeight: 600, marginBottom: "3px",
+                                    display: "flex", justifyContent: "space-between" }}>
+                        <span>{board}</span>
+                        <span style={{ color: T.text4, fontWeight: 500,
+                                       fontFamily: "JetBrains Mono, monospace" }}>
+                          {info.n_traces || 0} traces
+                          {info.board_size_mm && ` · ${info.board_size_mm[0].toFixed(1)}×${info.board_size_mm[1].toFixed(1)}mm`}
+                        </span>
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "3px" }}>
+                        {tiles.map(([label, path, tag]) => {
+                          const rel = outputsFileQueryPath(
+                            String(path).replace(/^.*?outputs[\\/]/, "outputs/").replace(/\\/g, "/"));
+                          return (
+                            <a key={label}
+                               href={`/api/file?path=${encodeURIComponent(rel)}`}
+                               target="_blank" rel="noreferrer"
+                               style={{ fontSize: "9px", color: T.text2,
+                                        padding: "2px 6px", borderRadius: "3px",
+                                        border: `1px solid ${T.border}`,
+                                        background: "rgba(255,255,255,0.02)",
+                                        textDecoration: "none",
+                                        fontFamily: "JetBrains Mono, monospace" }}>
+                              <span style={{ color: T.ai, marginRight: "4px",
+                                             fontWeight: 700 }}>{tag}</span>
+                              {label}
+                            </a>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             {/* Cost breakdown card — totals per category + top line items. */}
             {result.success && cost && cost.totals && (
               <div style={{ marginBottom: "8px", padding: "8px 10px",
