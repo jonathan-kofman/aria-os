@@ -1,0 +1,8 @@
+[cosmic-ray]
+module-path = "aria_os/ecad/diy_fab.py"
+timeout = 30
+excluded-modules = []
+test-command = "C:/Users/jonko/miniforge3/python.exe -m pytest tests/test_diy_fab.py -q --no-header"
+
+[cosmic-ray.distributor]
+name = "local"

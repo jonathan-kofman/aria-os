@@ -28,7 +28,13 @@ class TestSelectCadTool:
     def _plan(self, part_id="aria_part", features=None):
         return {"part_id": part_id, "features": features or []}
 
-    def test_default_is_cadquery(self):
+    def test_default_is_cadquery(self, monkeypatch):
+        # Pin Compute to "unavailable" so the fallback branch that picks
+        # grasshopper when Compute is up doesn't contaminate this test.
+        # The test's intent is: when no keyword / part_id / feature matches,
+        # the default is cadquery — which only holds when Compute is down.
+        monkeypatch.setattr("aria_os.tool_router._is_compute_available",
+                            lambda: False)
         assert select_cad_tool("simple bracket", self._plan()) == "cadquery"
 
     def test_grasshopper_keyword_helix(self):
