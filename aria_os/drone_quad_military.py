@@ -386,14 +386,23 @@ def _place_armor_bottom(params, i):
 
 
 def _place_vision_pod(params, i):
-    """Mount on canopy front (+X side)."""
+    """Mount FLUSH against canopy front (+X side).
+
+    User feedback: pod was sticking out awkwardly with a gap. Two fixes:
+      1. Reduce the +X gap from 2mm to 0mm (back-flange of pod sits flush
+         against canopy front face, like a real bolt-on housing)
+      2. Lower the pod so its base sits AT the canopy mid-plane, not just
+         vertically centered — this puts the camera lens at canopy
+         midline (real drones) instead of floating above
+    """
     f = params["frame"]
     fc = params["fc_pcb"]
     can = params["canopy"]
     v = params["vision_pod"]
-    # Pod center: +X of canopy, vertically centered on canopy mid-height
     canopy_z = f["plate_bottom_thk_mm"] + fc["z_offset_mm"] + fc["thk_mm"] + 1.0
-    px = can["l_mm"] / 2 + v["l_mm"] / 2 + 2.0
+    # Flush mount: pod center at canopy_front + pod_l/2 (no gap)
+    px = can["l_mm"] / 2 + v["l_mm"] / 2
+    # Vertical: pod base at canopy mid-height (lens centerline = canopy mid)
     pz = canopy_z + can["h_mm"] / 2 - v["h_mm"] / 2
     return ((px, 0.0, pz), (0.0, 0.0, 0.0))
 

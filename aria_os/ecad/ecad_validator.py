@@ -223,7 +223,11 @@ def run_erc(
     # components that happen to share pad numbering (e.g. pin "1" on STM32 and L298N).
     # Skip power/ground nets — they're intentionally shared.
     _SHARED_NETS = {"GND", "VCC", "+3V3", "3V3", "+5V", "5V", "VIN",
-                    "12V", "+12V", "24V", "VBUS", "VBAT", "GND_PWR"}
+                    "12V", "+12V", "24V", "VBUS", "VBAT", "GND_PWR",
+                    # Shared buses — open-drain or multi-drop, legitimate for
+                    # multiple ICs to share.
+                    "I2C_SDA", "I2C_SCL", "SPI_MOSI", "SPI_MISO", "SPI_CLK",
+                    "UART_TX", "UART_RX", "USB_DP", "USB_DM", "CAN_H", "CAN_L"}
     net_drivers: dict[str, list[str]] = {}
     for c in comps:
         if c.ref[:1] in ("U", "I"):  # ICs / MCUs only

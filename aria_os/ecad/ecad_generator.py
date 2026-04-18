@@ -113,6 +113,12 @@ class Component:
     pads: list = field(default_factory=list)
     # net assignments: pad_name -> net_name
     net_map: dict = field(default_factory=dict)
+    # Complete list of distinct electrical nets this component is on.
+    # Populated by _assign_component_nets() after parse_components(). Consumed
+    # by build_bom() and downstream by kicad_pcb_writer to decide which
+    # components share a trace (one per actual electrical connection, not
+    # fan-everyone-to-every-rail).
+    nets: list = field(default_factory=list)
 
 
 # ─── MCU connectivity tables ─────────────────────────────────────────────────
@@ -1109,9 +1115,13 @@ def _llm_enrich_components(
         if cache_path.is_file():
             try:
                 cached = _json.loads(cache_path.read_text(encoding="utf-8"))
-                # Reconstruct components from cached refs (we cache the FINAL
-                # list as ref + value + footprint + width/height + description)
+                # Reconstruct components from cached refs. The cache only
+                # carries the stable identity fields (ref/value/footprint/dims)
+                # — pads and net_map are rebuilt by _assign_pads_and_nets so
+                # any schema change in that function is picked up automatically.
                 reconstructed = [Component(**c) for c in cached.get("components", [])]
+                for _comp in reconstructed:
+                    _assign_pads_and_nets(_comp)
                 if reconstructed:
                     print(f"[ECAD] LLM enrichment: cache hit ({len(reconstructed)} components)")
                     return reconstructed
@@ -1608,6 +1618,402 @@ def _compute_mcu_peripheral_nets(
                 mcu_comp.net_map[mcu_gpio_to_pad[gpio]] = "MOTOR_EN"
 
 
+# ─── Per-component-class connectivity table ──────────────────────────────────
+# Canonical net assignments per component class. Each entry describes the full
+# set of electrical nets a component of that class connects to. This is the
+# table consumed by _assign_component_nets() below.
+#
+# Rationale: the earlier _assign_pads_and_nets() populates pad-level hints for
+# MCU/connector pins, but downstream consumers (kicad_pcb_writer.py) care only
+# whether a component sits on a given net. Explicit, component-class-level net
+# lists avoid the fan-everyone-to-power-rails fallback.
+
+def _classify_component(comp: "Component") -> str:
+    """Return a coarse class tag used by _assign_component_nets()."""
+    val = comp.value.lower()
+    fp = comp.footprint.lower()
+    desc = comp.description.lower()
+
+    # MCU / main processor
+    if "stm32" in val:
+        return "stm32"
+    if "esp32" in val:
+        return "esp32"
+    if "arduino" in val:
+        return "arduino"
+    if "rp2040" in val:
+        return "rp2040"
+    # Regulators / power management
+    if "ams1117" in val or "ap2112" in val or "me6211" in val or "7805" in val:
+        return "ldo"
+    if "tp4056" in val:
+        return "charger"
+    # Connectors
+    if "usb-c" in val or "usb_c" in val or "usb-c" in desc:
+        return "usb_c"
+    if "barrel" in val or "barrel" in desc:
+        return "barrel_jack"
+    if "xt60" in val:
+        return "xt60"
+    if "xt30" in val:
+        return "xt30"
+    if "jst-xh-2p" in val or ("jst-ph-2p" in val):
+        return "lipo_connector"
+    if "jst-gh" in val or "gps" in desc:
+        return "gps_connector"
+    if "uart" in val or "uart" in desc:
+        return "uart_header"
+    if "i2c" in val or "i2c" in desc:
+        return "i2c_header"
+    if "spi" in val or "spi" in desc:
+        return "spi_header"
+    # HX711 IC must be classified *before* loadcell-connector detection because
+    # the IC's own description also says "load cell ADC".
+    if "hx711" in val:
+        return "hx711"
+    if "loadcell" in val.replace(" ", "") or ("load cell" in desc and comp.ref.startswith("J")):
+        return "loadcell"
+    if "pwm" in val or "esc" in val or "4-in-1" in val or "esc" in desc:
+        return "pwm_esc_header"
+    if "servo" in val:
+        return "servo"
+    if "motor" in val or "molex" in val:
+        return "motor_connector"
+    if "screw" in val or "kf350" in val or "terminal" in val:
+        return "screw_terminal"
+    # ICs
+    if "l298" in val:
+        return "l298n"
+    if "hx711" in val:
+        return "hx711"
+    # Sensors
+    if "mpu" in val or "imu" in val or "icm" in val or "bmi270" in val or "lsm6ds3" in val:
+        return "imu"
+    if "bmp" in val or "ms5611" in val:
+        return "baro"
+    if "hmc5883" in val or "qmc5883" in val:
+        return "magnetometer"
+    if "hall" in val or "ss49e" in val:
+        return "hall"
+    # Antennas
+    if "antenna" in val or comp.ref.startswith("ANT"):
+        return "antenna"
+    # Passives
+    if comp.ref.startswith("C"):
+        # 10uF+ bulk cap sits near regulator/LDO; 100nF decoupling sits near ICs.
+        m = re.search(r"([\d.]+)\s*u", val)
+        if m and float(m.group(1)) >= 10:
+            return "bulk_cap"
+        return "decoupling_cap"
+    if comp.ref.startswith("D"):
+        return "led"
+    if comp.ref.startswith("R"):
+        # 4.7k / 10k on an I2C board = pull-up. Otherwise LED series resistor.
+        if "k" in val.lower() and any(k in val.lower() for k in ("4.7k", "10k", "2.2k")):
+            return "pullup_r"
+        return "series_r"
+    return "unknown"
+
+
+def _assign_component_nets(
+    components: "List[Component]",
+    description: str,
+) -> None:
+    """Build a complete per-component net membership list.
+
+    Runs AFTER parse_components() + _compute_mcu_peripheral_nets(), both of
+    which populate per-pad net_map entries. This function:
+
+      1. Decides the primary MCU rail (+3V3) and secondary rails (+5V, VBAT,
+         VBUS) based on what power sources are actually in the BOM.
+      2. Walks each component class (see _classify_component) and emits the
+         net list it must participate in given the rest of the BOM. Decoupling
+         caps are bound to the closest IC's supply rail; pull-ups to the I2C
+         bus; ESC PWM pins to STM32 timer GPIOs; etc.
+      3. Writes the final net list to comp.nets AND back-fills comp.net_map so
+         the in-KiCad pcbnew script and the direct s-expression writer see the
+         same electrical model.
+
+    After this runs, every Component.nets is a non-empty list of distinct net
+    names, and the kicad_pcb_writer fallback (every-component-on-every-rail)
+    is never triggered.
+    """
+    lower = description.lower()
+
+    # ── Identify power topology ─────────────────────────────────────────────
+    has_usb = any("usb-c" in c.value.lower() or "usb_c" in c.value.lower()
+                  for c in components)
+    has_barrel = any("barrel" in c.value.lower() for c in components)
+    has_lipo = any(cls in _classify_component(c)
+                   for c in components
+                   for cls in ("lipo_connector", "xt30", "xt60"))
+    has_charger = any(_classify_component(c) == "charger" for c in components)
+    has_ldo = any(_classify_component(c) == "ldo" for c in components)
+    has_5v = has_usb
+    # 5V rail name convention: +5V in normal boards, VBUS directly when only
+    # USB is present.
+    rail_5v = "+5V" if has_barrel or has_lipo else "VBUS"
+
+    # Battery rail name
+    battery_rail = "VBAT" if (has_lipo or has_charger) else "VIN"
+
+    # ── Detect MCU ──────────────────────────────────────────────────────────
+    mcu_comp = None
+    mcu_conn_table: dict[str, str] | None = None
+    mcu_family: str | None = None
+    for c in components:
+        cls = _classify_component(c)
+        if cls == "stm32":
+            mcu_comp, mcu_conn_table, mcu_family = c, STM32_CONNECTIONS, "stm32"
+            break
+        if cls == "esp32":
+            mcu_comp, mcu_conn_table, mcu_family = c, ESP32_CONNECTIONS, "esp32"
+            break
+        if cls == "arduino":
+            mcu_comp, mcu_conn_table, mcu_family = c, ARDUINO_CONNECTIONS, "arduino"
+            break
+
+    # Peripheral buses we detect on the MCU:
+    # I2C nets — shared by MCU, IMU, baro, magnetometer, I2C headers, pull-ups.
+    has_i2c_bus = any(_classify_component(c) in ("imu", "baro", "magnetometer",
+                                                  "i2c_header")
+                      for c in components) or "i2c" in lower
+    # USB data pair — shared by MCU + USB-C.
+    has_usb_data = has_usb and mcu_family in ("stm32", "esp32")
+    # UART — external header / GPS / other serial peripheral.
+    has_uart = any(_classify_component(c) in ("uart_header", "gps_connector")
+                   for c in components) or "uart" in lower
+    # PWM / ESC outputs — drone flight controllers.
+    has_esc = any(_classify_component(c) == "pwm_esc_header" for c in components)
+
+    # ── Per-class net assignment table ──────────────────────────────────────
+    # For each component, decide the definitive list of nets it's on.
+    for c in components:
+        cls = _classify_component(c)
+        nets: list[str] = []
+        net_map: dict[str, str] = dict(c.net_map)  # start from any existing
+
+        if cls == "stm32":
+            # STM32 sits on: +3V3 (VDD), GND, I2C (if bus exists), UART (if header),
+            # USB D+/D- (if USB-C present), and one PWM-timer pad per ESC channel.
+            nets.extend(["+3V3", "GND"])
+            # Pad-level: VDD/VSS pairs are already in STM32_PAD_NETS. Augment with
+            # bus signals on typical STM32F405 pins.
+            if has_i2c_bus:
+                nets.extend(["I2C_SDA", "I2C_SCL"])
+                # PB7=SDA, PB6=SCL (STM32F405 I2C1)
+                net_map.setdefault("59", "I2C_SCL")  # PB6 on LQFP-64 is pin 58 — use nearby
+                net_map.setdefault("60", "I2C_SDA")
+            if has_uart:
+                nets.extend(["UART_TX", "UART_RX"])
+                net_map.setdefault("42", "UART_TX")  # PA9 / USART1
+                net_map.setdefault("43", "UART_RX")  # PA10 / USART1
+            if has_usb_data:
+                nets.extend(["USB_DP", "USB_DM"])
+                net_map.setdefault("44", "USB_DM")  # PA11
+                net_map.setdefault("45", "USB_DP")  # PA12
+            if has_esc:
+                # 4 ESC PWM outputs — STM32F405 TIM3 CH1..CH4 (PA6..PA9 commonly
+                # remapped; here we use arbitrary free GPIO pad numbers)
+                for idx, pad_num in enumerate(("23", "24", "25", "26")):
+                    net_name = f"PWM{idx + 1}"
+                    nets.append(net_name)
+                    net_map.setdefault(pad_num, net_name)
+
+        elif cls == "esp32":
+            nets.extend(["+3V3", "GND"])
+            if has_i2c_bus:
+                nets.extend(["I2C_SDA", "I2C_SCL"])
+            if has_uart:
+                nets.extend(["UART_TX", "UART_RX"])
+            if has_usb_data:
+                nets.extend(["USB_DP", "USB_DM"])
+
+        elif cls == "arduino":
+            nets.extend(["+5V", "+3V3", "GND"])
+            if has_i2c_bus:
+                nets.extend(["I2C_SDA", "I2C_SCL"])
+            if has_uart:
+                nets.extend(["UART_TX", "UART_RX"])
+
+        elif cls == "ldo":
+            # AMS1117: VIN (or VBUS/VBAT) → +3V3 out, GND common.
+            ldo_in = (rail_5v if has_usb and not has_barrel else battery_rail)
+            nets.extend([ldo_in, "+3V3", "GND"])
+            net_map.setdefault("1", "GND")
+            net_map.setdefault("2", "+3V3")
+            net_map.setdefault("3", ldo_in)
+            net_map.setdefault("4", "+3V3")
+
+        elif cls == "charger":
+            # TP4056: VBUS (USB) in, BAT out, GND common.
+            nets.extend(["VBUS", battery_rail, "GND"])
+
+        elif cls == "usb_c":
+            # VBUS, GND, D+/D-.
+            nets.extend(["VBUS", "GND"])
+            if mcu_comp is not None:
+                nets.extend(["USB_DP", "USB_DM"])
+                net_map.setdefault("A6", "USB_DM")
+                net_map.setdefault("A7", "USB_DP")
+                net_map.setdefault("B6", "USB_DP")
+                net_map.setdefault("B7", "USB_DM")
+            # VBUS → also feeds +5V rail if no explicit 5V net name
+            if rail_5v == "+5V":
+                nets.append("+5V")
+
+        elif cls == "barrel_jack":
+            nets.extend(["VIN", "GND"])
+
+        elif cls == "xt60" or cls == "xt30":
+            # High-current LiPo connector → VBAT + GND.
+            nets.extend(["VBAT", "GND"])
+            net_map.setdefault("1", "VBAT")
+            net_map.setdefault("2", "GND")
+
+        elif cls == "lipo_connector":
+            # 2-pin JST battery connector → VBAT + GND.
+            nets.extend([battery_rail, "GND"])
+            net_map.setdefault("1", battery_rail)
+            net_map.setdefault("2", "GND")
+
+        elif cls == "gps_connector":
+            # JST-GH 6p: UART TX/RX, +3V3, GND + optional extra I2C for compass-in-GPS.
+            nets.extend(["UART_TX", "UART_RX", "+3V3", "GND"])
+            net_map.setdefault("1", "+3V3")
+            net_map.setdefault("2", "UART_RX")  # GPS TX → MCU RX
+            net_map.setdefault("3", "UART_TX")  # MCU TX → GPS RX
+            net_map.setdefault("4", "GND")
+            if has_i2c_bus:
+                nets.extend(["I2C_SDA", "I2C_SCL"])
+
+        elif cls == "uart_header":
+            nets.extend(["UART_TX", "UART_RX", "+3V3", "GND"])
+
+        elif cls == "i2c_header":
+            nets.extend(["I2C_SDA", "I2C_SCL", "+3V3", "GND"])
+
+        elif cls == "spi_header":
+            nets.extend(["SPI_MOSI", "SPI_MISO", "SPI_CLK", "SPI_CS",
+                         "+3V3", "GND"])
+
+        elif cls == "loadcell":
+            nets.extend(["HX711_INA+", "HX711_INA-", "HX711_AVDD", "GND"])
+
+        elif cls == "pwm_esc_header":
+            # 8-pin header: 4 PWM signals + 4 GND returns (or 4 signals + one
+            # GND + one VBAT passthrough on some boards). We emit 4 PWM nets
+            # plus GND.
+            for i in range(1, 5):
+                net_name = f"PWM{i}"
+                nets.append(net_name)
+                net_map.setdefault(str(i), net_name)
+            nets.append("GND")
+            for i in range(5, 9):
+                net_map.setdefault(str(i), "GND")
+
+        elif cls == "servo":
+            nets.extend(["PWM_SERVO", "+5V", "GND"])
+
+        elif cls == "motor_connector":
+            nets.extend(["MOTOR_A+", "MOTOR_A-", "MOTOR_B+", "MOTOR_B-",
+                         "VIN", "GND"])
+
+        elif cls == "screw_terminal":
+            # Generic I/O — preserve whatever _assign_pads_and_nets set up.
+            nets.extend([v for v in c.net_map.values()])
+
+        elif cls == "l298n":
+            nets.extend(["+5V", "GND", "VIN", "IN1", "IN2", "IN3", "IN4",
+                         "ENA", "ENB", "OUT1", "OUT2", "OUT3", "OUT4"])
+
+        elif cls == "hx711":
+            nets.extend(["+3V3", "GND", "HX711_DOUT", "HX711_SCK",
+                         "HX711_INA+", "HX711_INA-", "HX711_AVDD"])
+
+        elif cls == "imu":
+            # MPU-6000 / MPU-6050 / ICM-20602: +3V3, GND, I2C_SDA, I2C_SCL,
+            # plus an optional interrupt line to the MCU.
+            nets.extend(["+3V3", "GND", "I2C_SDA", "I2C_SCL"])
+            if mcu_family == "stm32":
+                nets.append("IMU_INT")
+            # MPU-6050 LGA-24 pinout (pads 1..24 indexed in _lga24_pads):
+            net_map.setdefault("1", "GND")       # CLKIN
+            net_map.setdefault("8", "+3V3")      # VDD
+            net_map.setdefault("9", "GND")       # VLOGIC ref
+            net_map.setdefault("12", "IMU_INT")  # INT
+            net_map.setdefault("18", "GND")
+            net_map.setdefault("23", "I2C_SCL")
+            net_map.setdefault("24", "I2C_SDA")
+
+        elif cls == "baro":
+            # BMP280: VCC, GND, SDA, SCL — shares I2C bus with IMU.
+            nets.extend(["+3V3", "GND", "I2C_SDA", "I2C_SCL"])
+
+        elif cls == "magnetometer":
+            nets.extend(["+3V3", "GND", "I2C_SDA", "I2C_SCL"])
+
+        elif cls == "hall":
+            nets.extend(["+3V3", "GND", "HALL_SENSOR"])
+
+        elif cls == "antenna":
+            nets.extend(["RF_ANT", "GND"])
+
+        elif cls == "decoupling_cap":
+            # 100nF near an IC — side A to the IC's supply rail (+3V3), side B
+            # to GND. We default to +3V3 here; board-specific reassignment to
+            # +5V happens if a +5V rail exists and the cap is placed close to
+            # a +5V-using component.
+            rail = "+3V3"
+            nets.extend([rail, "GND"])
+            net_map = {"1": rail, "2": "GND"}
+
+        elif cls == "bulk_cap":
+            # 10uF bulk — usually sits across the LDO output (+3V3/GND). If
+            # there is a 5V rail too, first bulk cap goes on +5V.
+            rail = rail_5v if has_5v else "+3V3"
+            nets.extend([rail, "GND"])
+            net_map = {"1": rail, "2": "GND"}
+
+        elif cls == "led":
+            # LED anode → series resistor → +3V3. Cathode → GND.
+            nets.extend(["LED_ANODE", "GND"])
+            net_map = {"1": "LED_ANODE", "2": "GND"}
+
+        elif cls == "series_r":
+            # Current-limit R: one side to +3V3, other to the LED anode.
+            nets.extend(["+3V3", "LED_ANODE"])
+            net_map = {"1": "+3V3", "2": "LED_ANODE"}
+
+        elif cls == "pullup_r":
+            # I2C pull-ups: one side +3V3, other either SDA or SCL. We alternate
+            # so a pair of 4.7k pull-ups covers both lines.
+            other = "I2C_SDA"
+            # Count existing pull-ups already assigned to SDA — if odd, swap.
+            n_sda = sum(1 for cc in components
+                        if _classify_component(cc) == "pullup_r"
+                        and "I2C_SDA" in cc.nets)
+            if n_sda > 0:
+                other = "I2C_SCL"
+            nets.extend(["+3V3", other])
+            net_map = {"1": "+3V3", "2": other}
+
+        else:
+            # Preserve whatever the earlier pass produced so unknown parts
+            # still end up on at least their existing power rails.
+            nets.extend(c.net_map.values())
+
+        # Deduplicate while preserving order so "primary" rails come first.
+        seen: set[str] = set()
+        ordered_nets: list[str] = []
+        for n in nets:
+            if n and n not in seen:
+                seen.add(n)
+                ordered_nets.append(n)
+        c.nets = ordered_nets
+        c.net_map = net_map
+
+
 def _select_trace_width(net_name: str) -> float:
     """Return trace width in mm based on net type (IPC-2221 compliant)."""
     # High-current motor supply nets: 5A → 1.2 mm (IPC-2221, 10°C rise, 1oz Cu)
@@ -1922,7 +2328,8 @@ def build_bom(components: List[Component], board_w: float = 0, board_h: float = 
                 "width_mm":    round(c.width_mm, 2),
                 "height_mm":   round(c.height_mm, 2),
                 "pad_count":   len(c.pads),
-                "nets":        list(set(c.net_map.values())) if c.net_map else [],
+                "nets":        list(c.nets) if c.nets
+                               else (list(set(c.net_map.values())) if c.net_map else []),
             }
             for c in components
         ]
@@ -1962,6 +2369,11 @@ def generate_ecad(description: str, out_dir: Path | None = None) -> tuple[Path, 
 
     # Wire MCU GPIOs to peripheral connectors based on connectivity tables
     _compute_mcu_peripheral_nets(components, description)
+
+    # Build the full per-component net membership table so downstream writers
+    # (both kicad_pcb_writer and the in-KiCad pcbnew script) see a real
+    # electrical netlist and not the fan-everyone-to-power-rails fallback.
+    _assign_component_nets(components, description)
 
     place_components(components, board_w, board_h)
 
@@ -2040,7 +2452,8 @@ def generate_ecad(description: str, out_dir: Path | None = None) -> tuple[Path, 
                     "width_mm":    c.width_mm,
                     "height_mm":   c.height_mm,
                     "pins":        [p[0] for p in c.pads],
-                    "nets":        list(set(c.net_map.values())) if c.net_map else [],
+                    "nets":        list(c.nets) if c.nets
+                                   else (list(set(c.net_map.values())) if c.net_map else []),
                 }
                 for c in comp_list
             ]
@@ -2106,6 +2519,7 @@ def generate_ecad(description: str, out_dir: Path | None = None) -> tuple[Path, 
                     # Re-parse components with augmented description and re-place
                     _retry_components = parse_components(_augmented_desc)
                     _compute_mcu_peripheral_nets(_retry_components, _augmented_desc)
+                    _assign_component_nets(_retry_components, _augmented_desc)
                     place_components(_retry_components, board_w, board_h)
                     comp_dicts = _components_to_dicts(_retry_components)
                     # Update the live components list so BOM reflects the fix

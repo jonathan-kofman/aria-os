@@ -920,11 +920,15 @@ def _material_rgb(material: str) -> tuple[float, float, float]:
     visually instead of blending into a dark blob.
     """
     table = {
-        "cfrp":           (0.13, 0.13, 0.16),  # carbon fiber — near black
-        "carbon_fiber":   (0.13, 0.13, 0.16),
-        "aramid":         (0.55, 0.50, 0.35),  # OD tan / kevlar
-        "aluminum_6061":  (0.78, 0.79, 0.82),  # silver
-        "aluminum_7075":  (0.72, 0.74, 0.78),
+        "cfrp":           (0.10, 0.10, 0.13),  # carbon fiber — true near-black
+        "carbon_fiber":   (0.10, 0.10, 0.13),
+        # Aramid pushed to bright kevlar-yellow so it visibly differs from
+        # CFRP/aluminum in renders. User feedback: previous tan blended with
+        # everything dark. Real Kevlar weave IS yellow.
+        "aramid":         (0.85, 0.78, 0.32),
+        "kevlar":         (0.85, 0.78, 0.32),
+        "aluminum_6061":  (0.82, 0.83, 0.86),  # brighter silver — pop vs CFRP
+        "aluminum_7075":  (0.76, 0.78, 0.82),
         "aluminum":       (0.78, 0.79, 0.82),
         "steel":          (0.50, 0.52, 0.56),
         "stainless_steel":(0.65, 0.66, 0.68),
