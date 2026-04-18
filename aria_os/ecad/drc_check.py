@@ -25,21 +25,43 @@ from pathlib import Path
 
 
 def _find_kicad_cli() -> str | None:
-    """Locate kicad-cli.exe on PATH or in common Windows install dirs."""
+    """Locate kicad-cli.exe on PATH or in common Windows install dirs.
+    KiCad 10 defaults to AppData/Local install — check there first.
+    """
     found = shutil.which("kicad-cli") or shutil.which("kicad-cli.exe")
     if found:
         return found
-    # Windows fallback: KiCad installers don't always add to PATH
-    for base in (
+    candidates: list[str] = []
+    # Per-user AppData install (KiCad 10 default)
+    local_app = os.environ.get("LOCALAPPDATA") or os.path.expanduser(
+        "~/AppData/Local")
+    candidates.append(os.path.join(local_app, "Programs", "KiCad"))
+    # System-wide installs (older versions / admin installs)
+    candidates += [
         r"C:\Program Files\KiCad",
         r"C:\Program Files (x86)\KiCad",
-    ):
+    ]
+    for base in candidates:
         if not os.path.isdir(base):
             continue
         for ver in sorted(os.listdir(base), reverse=True):
             candidate = os.path.join(base, ver, "bin", "kicad-cli.exe")
             if os.path.isfile(candidate):
                 return candidate
+    return None
+
+
+def kicad_share_dir() -> str | None:
+    """Return KiCad's share/kicad/ root (parent of symbols/, footprints/).
+    Used by the symbol library lookup for real component symbols."""
+    cli = _find_kicad_cli()
+    if cli is None:
+        return None
+    # Walk from .../bin/kicad-cli.exe → .../share/kicad/
+    install_root = os.path.dirname(os.path.dirname(cli))  # strip bin/
+    candidate = os.path.join(install_root, "share", "kicad")
+    if os.path.isdir(candidate):
+        return candidate
     return None
 
 
