@@ -24,7 +24,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import logging
+
 from .. import event_bus
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -1244,6 +1248,12 @@ Spec: {json.dumps(spec, default=str)[:400]}"""
 
         # Map free-text material to MillForge enum
         raw_material = (ctx.geometry_spec.get("material", "") or "").lower()
+        if raw_material and raw_material not in self._MATERIAL_TO_MILLFORGE:
+            logger.warning(
+                "Material %r not in _MATERIAL_TO_MILLFORGE map — defaulting to 'steel'. "
+                "Add it to the map if this material is used frequently.",
+                raw_material,
+            )
         mf_material = self._MATERIAL_TO_MILLFORGE.get(raw_material, "steel")
 
         # Cycle time: prefer CAM result, fallback to FEA or a reasonable default
@@ -1324,17 +1334,17 @@ Spec: {json.dumps(spec, default=str)[:400]}"""
             "estimated_cycle_time_minutes": cycle_time,
             "required_operations": required_ops,
             "tolerance_class": {
-                "freeform_surface": "tight",
-                "precision_assembly": "ultra",
-                "lattice_tpms": "standard",
+                "freeform_surface": "fine",
+                "precision_assembly": "fine",
+                "lattice_tpms": "coarse",
                 "lattice_structural": "medium",
                 "organic_tspline": "medium",
                 "generative_topopt": "medium",
-                "sheet_metal": "standard",
+                "sheet_metal": "coarse",
                 "algorithmic": "medium",
-                "mesh_heavy": "standard",
-                "prismatic": "standard",
-            }.get(ctx.geometry_type, "standard"),
+                "mesh_heavy": "coarse",
+                "prismatic": "medium",
+            }.get(ctx.geometry_type, "medium"),
             "aria_job_id": ctx.job_id,
             "generated_at": ctx.created_at.isoformat(),
             "geometry_hash": geo_hash,
