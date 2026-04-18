@@ -3,17 +3,19 @@
 # strips libGL.so.1 from the runtime image even when it's installed
 # at build time, breaking cadquery / OCP imports.
 #
-# Two-stage build: pull kicad-cli from the official KiCad image
-# (bookworm-based, ABI-compatible with our runtime) so the backend can
-# export Gerbers headlessly. Pinned to 9.0 for reproducible builds.
-
-FROM kicad/kicad:9.0 AS kicad-src
+# kicad-cli installation: switched from multi-stage COPY (kicad/kicad:9.0)
+# to plain `apt install kicad`. The COPY approach failed 3 times in a row
+# chasing transitive deps (libkicommon, libwx_gtk3u_gl, libnss3, …). The
+# apt path adds ~600MB to the image but every dep KiCad needs is captured
+# in one line. Image goes from ~1.5GB to ~2.1GB; Railway hobby tier has
+# no hard cap so this is fine. ldconfig issues from the COPY approach
+# (libTKV3d.so.7 not a symlink) also disappear.
 
 FROM python:3.11-slim-bookworm AS runtime
 
-# System libraries cadquery / OCP / VTK / matplotlib need at runtime.
-# Without these, "import cadquery" fails with libGL.so.1 ENOENT and
-# /api/pipeline/health reports the kernel as unavailable.
+# System libraries cadquery / OCP / VTK / matplotlib / kicad-cli need at
+# runtime. `kicad` itself pulls wxGTK + libsecret + libnss3 + most other
+# transitive deps automatically.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
@@ -33,29 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libfreetype6 \
         ca-certificates \
         curl \
-        libwxgtk3.2-1 \
-        libwxgtk-gl3.2-1 \
-        libngspice0 \
-        libpython3.11 \
-        libsecret-1-0 \
-        libnss3 \
+        kicad \
     && rm -rf /var/lib/apt/lists/*
-
-# Pull kicad-cli from the official KiCad image so the backend can export
-# Gerbers headlessly. Adds ~250MB but avoids 1.2GB full apt install.
-# 3dmodels deleted post-copy (~200MB) since Gerber export doesn't need them.
-#
-# IMPORTANT: copy `libki*` broadly (catches both libkicad_* AND libkicommon*).
-# The narrower libkicad_* pattern missed libkicommon.so.9.0.8 on the first
-# attempt and kicad-cli refused to start: "error while loading shared
-# libraries: libkicommon.so.9.0.8". Same goes for OCCT libs — KiCad ships
-# its own libTKernel/libTKMath/etc. (not just libocct_*); copy libTK* too.
-COPY --from=kicad-src /usr/bin/kicad-cli /usr/bin/kicad-cli
-COPY --from=kicad-src /usr/lib/x86_64-linux-gnu/libki*   /usr/lib/x86_64-linux-gnu/
-COPY --from=kicad-src /usr/lib/x86_64-linux-gnu/libocct* /usr/lib/x86_64-linux-gnu/
-COPY --from=kicad-src /usr/lib/x86_64-linux-gnu/libTK*   /usr/lib/x86_64-linux-gnu/
-COPY --from=kicad-src /usr/share/kicad /usr/share/kicad
-RUN rm -rf /usr/share/kicad/3dmodels && ldconfig
 
 WORKDIR /app
 
