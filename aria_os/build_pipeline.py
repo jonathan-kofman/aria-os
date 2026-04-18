@@ -41,6 +41,8 @@ class BuildResult:
     drawings_success: bool = False
     print_success: bool = False
     cam_success: bool = False
+    sim_success: bool = False        # Genesis flight dynamics
+    circuit_sim_success: bool = False # PySpice analog circuit sim
 
     # Artifact paths (relative to repo root for transport)
     step_path: str | None = None
@@ -50,6 +52,9 @@ class BuildResult:
     print_dir: str | None = None
     cam_dir: str | None = None
     drawings_dir: str | None = None
+    sim_trace_path: str | None = None
+    sim_summary: dict | None = None
+    circuit_sim_summary: dict | None = None
 
     # Preview thumbnails (PNGs + SVGs) for the "what's in the box" UI tile
     preview_artifacts: list[dict] = field(default_factory=list)
@@ -68,7 +73,12 @@ class BuildResult:
                 "drawings":   self.drawings_success,
                 "print":      self.print_success,
                 "cam":        self.cam_success,
+                "sim":        self.sim_success,
+                "circuit_sim": self.circuit_sim_success,
             },
+            "sim_summary": self.sim_summary,
+            "sim_trace_path": self.sim_trace_path,
+            "circuit_sim_summary": self.circuit_sim_summary,
             "step_path": self.step_path,
             "stl_path":  self.stl_path,
             "render_path": self.render_path,
@@ -132,7 +142,55 @@ def run_full_build(*, preset_id: str, params: dict | None = None) -> BuildResult
     result.cam_dir = str(cam_dir) if cam_count > 0 else None
     result.cam_success = cam_count > 0
 
-    # ── Stage 4: Preview manifest ────────────────────────────────────────────
+    # ── Stage 4: Flight dynamics sim (Genesis if installed, else stub) ────────
+    sim_dir = output_dir / "sim"
+    sim_dir.mkdir(parents=True, exist_ok=True)
+    if result.stl_path and Path(result.stl_path).is_file():
+        try:
+            from aria_os.flight_sim import simulate_drone_hover
+            sim_result = simulate_drone_hover(
+                result.stl_path,
+                # Heuristic: 5" race ~400g, 7" military ~700g
+                mass_g=700.0 if "military" in preset_id or "7inch" in preset_id else 400.0,
+                motor_thrust_g=550.0 if "military" in preset_id else 450.0,
+                out_dir=sim_dir,
+            )
+            result.sim_success = bool(sim_result.get("available"))
+            result.sim_trace_path = sim_result.get("trace_path")
+            result.sim_summary = {
+                k: v for k, v in sim_result.items()
+                if k not in ("trajectory",)
+            }
+        except Exception as exc:
+            print(f"[build] flight sim skipped: {type(exc).__name__}: {exc}")
+            result.sim_success = False
+    else:
+        result.sim_success = False
+
+    # ── Stage 5: Circuit / electronic sim per ECAD board ────────────────────
+    # Run PySpice (or analytical stub) on each generated PCB to estimate
+    # power-rail loads + flag overloaded supplies. Lightweight — runs even
+    # without ngspice installed (analytical only).
+    try:
+        from aria_os.circuit_sim import simulate_from_bom
+        # ECAD BOM paths are nested: ecad/{label}/{slug}/*_bom.json
+        ecad_boms = list(output_dir.rglob("ecad/**/*_bom.json"))
+        circuit_results = []
+        for bom in ecad_boms:
+            cs = simulate_from_bom(bom, out_dir=bom.parent)
+            circuit_results.append({
+                "board": bom.parent.name,
+                "engine": cs.get("engine"),
+                "rails_mA": cs.get("rails_mA"),
+                "warnings": cs.get("warnings"),
+            })
+        if circuit_results:
+            result.circuit_sim_success = True
+            result.circuit_sim_summary = {"boards": circuit_results}
+    except Exception as exc:
+        print(f"[build] circuit sim skipped: {type(exc).__name__}: {exc}")
+
+    # ── Stage 6: Preview manifest ────────────────────────────────────────────
     result.preview_artifacts = _build_preview_manifest(output_dir, result)
 
     result.success = (result.mech_success and
