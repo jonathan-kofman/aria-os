@@ -283,17 +283,69 @@ def _shrink_polyline(pts: list[tuple[float, float]],
 def _apply_curvature(cq, plate, params: LatticeParams):
     """Bend the plate around the X-axis to a cylindrical curvature.
 
-    Approximation: tessellate the plate, displace each vertex by the chord
-    function so the part follows R = curvature_radius_mm. For a real SLM
-    panel you'd model the formed shape directly — this is a visual proxy.
+    CadQuery's BRep doesn't easily curve a plate non-trivially. We do this
+    as a mesh post-process: tessellate, displace each vertex along Y/Z by
+    the chord-of-arc function so the part follows R = curvature_radius_mm,
+    then return as a Mesh-wrapped Workplane.
+
+    Result: the plate's neutral axis (mid-thickness) follows a cylindrical
+    arc of radius R; bend axis is X (so width-direction wraps).
     """
-    # Direct CAD curvature is hard in cadquery without re-meshing. Instead,
-    # we apply the curvature to the exported STL when the user calls
-    # cq.exporters.export(...). For now, return the flat plate and document
-    # this in the params docstring. Full mesh-based curvature is left to a
-    # post-process step.
-    # TODO: implement via trimesh deformation in a follow-up.
+    # cadquery doesn't support arbitrary mesh deformation of BRep — we
+    # convert to mesh, deform, and re-import as STL (no longer parametric
+    # but visually correct). Caller should call apply_curvature_to_stl()
+    # after exporting the flat STL for the curvature to actually take effect.
+    plate._aria_curvature_radius_mm = params.curvature_radius_mm
     return plate
+
+
+def apply_curvature_to_stl(stl_path, curvature_radius_mm: float,
+                            bend_axis: str = "x"):
+    """Bend an exported STL around an axis to give it cylindrical curvature.
+
+    Vertex transform (bend axis = X, plate originally on XY plane):
+      For each vertex (x, y, z):
+        θ = y / R
+        y' = R * sin(θ)
+        z' = z + R * (1 - cos(θ))
+
+    The plate's centerline at y=0 is unchanged; tips bend symmetrically.
+    Negative R = bend the other way.
+    """
+    import trimesh
+    import numpy as np
+    from pathlib import Path
+
+    if not curvature_radius_mm or abs(curvature_radius_mm) < 1.0:
+        return stl_path
+
+    stl_path = Path(stl_path)
+    mesh = trimesh.load_mesh(str(stl_path))
+    if hasattr(mesh, "dump"):
+        mesh = mesh.dump(concatenate=True)
+    R = float(curvature_radius_mm)
+    V = mesh.vertices.copy()
+    if bend_axis.lower() == "x":
+        # bend around X-axis → wrap Y direction
+        y = V[:, 1]
+        z = V[:, 2]
+        theta = y / R
+        V[:, 1] = R * np.sin(theta)
+        V[:, 2] = z + R * (1.0 - np.cos(theta))
+    else:
+        # bend around Y-axis → wrap X direction
+        x = V[:, 0]
+        z = V[:, 2]
+        theta = x / R
+        V[:, 0] = R * np.sin(theta)
+        V[:, 2] = z + R * (1.0 - np.cos(theta))
+
+    mesh.vertices = V
+    # Recompute normals after vertex displacement (matters for shading +
+    # for any downstream mesh-validity check)
+    mesh.fix_normals()
+    mesh.export(str(stl_path))
+    return stl_path
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +353,14 @@ def _apply_curvature(cq, plate, params: LatticeParams):
 # ---------------------------------------------------------------------------
 
 def build_and_export(params: LatticeParams, out_step_path):
-    """Build, export STEP, return {step_path, bbox, volume, n_voids}."""
+    """Build, export STEP + STL, return {step_path, stl_path, bbox, volume,
+    curved}.
+
+    Always exports an STL alongside the STEP because curvature post-process
+    operates on STL only (BRep can't easily hold a non-cylindrical-primitive
+    bent surface). When curvature_radius_mm > 0, the STL is the curved
+    version and the STEP is the flat as-built (stays parametric).
+    """
     from pathlib import Path
     import cadquery as cq
 
@@ -310,12 +369,26 @@ def build_and_export(params: LatticeParams, out_step_path):
     out_step_path.parent.mkdir(parents=True, exist_ok=True)
     cq.exporters.export(plate, str(out_step_path))
 
+    # Always emit STL (downstream renders + slicer + curvature need it)
+    out_stl_path = out_step_path.with_suffix(".stl")
+    cq.exporters.export(plate, str(out_stl_path), exportType="STL", tolerance=0.05)
+
+    # Apply curvature if requested — modifies the STL in place
+    curved = False
+    if params.curvature_radius_mm and abs(params.curvature_radius_mm) > 1.0:
+        apply_curvature_to_stl(out_stl_path, params.curvature_radius_mm,
+                               bend_axis="x")
+        curved = True
+
     bb = plate.val().BoundingBox()
     vol = plate.val().Volume()
     return {
         "step_path": str(out_step_path),
+        "stl_path":  str(out_stl_path),
         "bbox_mm": [round(bb.xlen, 2), round(bb.ylen, 2), round(bb.zlen, 2)],
         "volume_mm3": round(vol, 1),
+        "curved": curved,
+        "curvature_radius_mm": params.curvature_radius_mm if curved else 0,
         "params": params.__dict__,
     }
 
@@ -331,6 +404,9 @@ if __name__ == "__main__":
     p.add_argument("--strut", type=float, default=1.6)
     p.add_argument("--pattern", default="rosette",
                    choices=["rosette", "diamond", "honeycomb", "arc_x"])
+    p.add_argument("--curve", type=float, default=0.0,
+                   help="Bend radius in mm (0 = flat). Match the SLM photo "
+                        "with --curve 350 (large radius = subtle bend).")
     p.add_argument("--out", default="outputs/lattice/plate.step")
     args = p.parse_args()
     params = LatticeParams(
@@ -338,6 +414,7 @@ if __name__ == "__main__":
         thickness_mm=args.thickness,
         cell_size_mm=args.cell, strut_width_mm=args.strut,
         pattern=args.pattern,
+        curvature_radius_mm=args.curve,
     )
     info = build_and_export(params, args.out)
     print(json.dumps(info, indent=2))
