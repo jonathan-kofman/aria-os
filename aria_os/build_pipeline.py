@@ -55,6 +55,8 @@ class BuildResult:
     print_dir: str | None = None
     cam_dir: str | None = None
     drawings_dir: str | None = None
+    instructions_path: str | None = None
+    instructions_pdf_path: str | None = None
     sim_trace_path: str | None = None
     sim_summary: dict | None = None
     circuit_sim_summary: dict | None = None
@@ -94,6 +96,8 @@ class BuildResult:
             "print_dir": self.print_dir,
             "cam_dir":   self.cam_dir,
             "drawings_dir": self.drawings_dir,
+            "instructions_path": self.instructions_path,
+            "instructions_pdf_path": self.instructions_pdf_path,
             "preview_artifacts": self.preview_artifacts,
             "structsight_judgment": self.structsight_judgment,
             "millforge_handoff": self.millforge_handoff,
@@ -181,6 +185,31 @@ def run_full_build(*, preset_id: str, params: dict | None = None,
             _stage("mass", "fail")
     else:
         _stage("mass", "skip")
+
+    # ── Stage 1.75: Human-readable assembly instructions ─────────────────
+    # Turn the populated BOM + placer-captured positions into
+    # assembly_instructions.md (and PDF if a renderer is installed) so the
+    # person actually building the drone has a "here's how" doc in the
+    # bundle — not just CAD + drawings.
+    _stage("instructions", "start")
+    if result.bom_path and Path(result.bom_path).is_file():
+        try:
+            from aria_os.assembly_instructions import (
+                generate_assembly_md, generate_assembly_pdf,
+            )
+            md_path = generate_assembly_md(result.bom_path, output_dir)
+            result.instructions_path = str(md_path)
+            pdf_path = generate_assembly_pdf(md_path)
+            if pdf_path is not None:
+                result.instructions_pdf_path = str(pdf_path)
+            _stage("instructions", "done",
+                   instructions_path=result.instructions_path,
+                   pdf=bool(result.instructions_pdf_path))
+        except Exception as exc:
+            print(f"[build] instructions skipped: {type(exc).__name__}: {exc}")
+            _stage("instructions", "fail")
+    else:
+        _stage("instructions", "skip")
 
     # ── Stage 2: Print bundle (slicer-ready STLs + Elegoo config) ────────────
     _stage("print", "start")
