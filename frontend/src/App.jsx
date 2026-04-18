@@ -989,7 +989,9 @@ function QuickBuildsPanel() {
 
   return (
     <Panel title="QUICK BUILDS">
-      <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: "8px" }}>
+      <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: "8px",
+                    maxHeight: "min(60vh, 520px)", overflowY: "auto",
+                    WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }}>
         <div style={{ fontSize: "10px", color: T.text3, marginBottom: "4px" }}>
           One click → full multi-domain build (CAD + ECAD + drawings + print bundle)
         </div>
@@ -1441,7 +1443,9 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
                     paddingRight: "4px" }}>
         <QuickBuildsPanel />
         <Panel title="GENERATE">
-          <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px",
+                        maxHeight: "min(55vh, 480px)", overflowY: "auto",
+                        WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }}>
             <textarea
               value={goal}
               onChange={e => setGoal(e.target.value)}
