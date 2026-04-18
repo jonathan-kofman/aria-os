@@ -44,6 +44,9 @@ class BuildResult:
     sim_success: bool = False        # Genesis flight dynamics
     circuit_sim_success: bool = False # PySpice analog circuit sim
 
+    # Computed totals
+    total_mass_g: float = 0.0        # Sum of every part's STEP-volume × density
+
     # Artifact paths (relative to repo root for transport)
     step_path: str | None = None
     stl_path: str | None = None
@@ -80,6 +83,7 @@ class BuildResult:
                 "sim":        self.sim_success,
                 "circuit_sim": self.circuit_sim_success,
             },
+            "total_mass_g": self.total_mass_g,
             "sim_summary": self.sim_summary,
             "sim_trace_path": self.sim_trace_path,
             "circuit_sim_summary": self.circuit_sim_summary,
@@ -159,6 +163,25 @@ def run_full_build(*, preset_id: str, params: dict | None = None,
     _stage("ecad",     "done" if result.ecad_success     else "skip")
     _stage("drawings", "done" if result.drawings_success else "skip")
 
+    # ── Stage 1.5: per-part mass calculation ──────────────────────────────
+    # Compute mass_g per part from STEP volume × material density and write
+    # the populated values back to the BOM. Unblocks accurate flight sim
+    # TWR, MillForge cost quotes, and slicer print-time estimates that all
+    # used to read mass_g=0.
+    _stage("mass", "start")
+    parts_dir = Path(result.output_dir) / "parts"
+    if result.bom_path and Path(result.bom_path).is_file() and parts_dir.is_dir():
+        try:
+            from aria_os.mass_calc import populate_bom_masses
+            updated_bom = populate_bom_masses(result.bom_path, parts_dir)
+            result.total_mass_g = float(updated_bom.get("total_mass_g", 0.0))
+            _stage("mass", "done", total_mass_g=result.total_mass_g)
+        except Exception as exc:
+            print(f"[build] mass calc skipped: {type(exc).__name__}: {exc}")
+            _stage("mass", "fail")
+    else:
+        _stage("mass", "skip")
+
     # ── Stage 2: Print bundle (slicer-ready STLs + Elegoo config) ────────────
     _stage("print", "start")
     try:
@@ -187,10 +210,14 @@ def run_full_build(*, preset_id: str, params: dict | None = None,
     if result.stl_path and Path(result.stl_path).is_file():
         try:
             from aria_os.flight_sim import simulate_drone_hover
+            # Use real per-part-summed mass from mass_calc when available,
+            # else fall back to preset heuristic.
+            mass_g = result.total_mass_g if result.total_mass_g > 10.0 else (
+                700.0 if "military" in preset_id or "7inch" in preset_id else 400.0
+            )
             sim_result = simulate_drone_hover(
                 result.stl_path,
-                # Heuristic: 5" race ~400g, 7" military ~700g
-                mass_g=700.0 if "military" in preset_id or "7inch" in preset_id else 400.0,
+                mass_g=mass_g,
                 motor_thrust_g=550.0 if "military" in preset_id else 450.0,
                 out_dir=sim_dir,
             )
