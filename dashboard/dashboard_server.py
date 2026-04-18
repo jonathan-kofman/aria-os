@@ -885,6 +885,152 @@ async def get_file(path: str):
     return FileResponse(str(resolved), filename=resolved.name)
 
 
+@app.get("/api/bundle")
+async def download_bundle(path: str):
+    """Stream a directory of artifacts as a ZIP. *path* is the directory
+    relative to outputs/. Used by the UI's 'Download all' button so users
+    don't have to click each STEP/STL/SVG/JSON individually.
+    """
+    import io
+    import zipfile
+    from fastapi.responses import StreamingResponse
+
+    resolved = (REPO_ROOT / path).resolve()
+    allowed = (REPO_ROOT / "outputs").resolve()
+    if not str(resolved).startswith(str(allowed)):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not resolved.is_dir():
+        raise HTTPException(status_code=404, detail="Directory not found")
+
+    # Generator: stream zip bytes so we don't allocate the whole thing in RAM.
+    def iter_zip():
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for fp in resolved.rglob("*"):
+                if not fp.is_file():
+                    continue
+                arc = fp.relative_to(resolved)
+                zf.write(str(fp), arcname=str(arc))
+        buf.seek(0)
+        yield buf.read()
+
+    bundle_name = f"{resolved.name}.zip"
+    return StreamingResponse(
+        iter_zip(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{bundle_name}"'},
+    )
+
+
+# Pre-canned drone build presets — exposed so the frontend can show
+# "Quick Build" launcher buttons (5" FPV, 7" Long Range, Military Recon).
+# Each preset POSTs to /api/run with a synthesized goal that the orchestrator
+# routes to drone_quad / drone_quad_military.
+DRONE_PRESETS = {
+    "5inch_fpv": {
+        "label": "5\" FPV Racer",
+        "description": "5-inch X-frame quadcopter, racing setup",
+        "goal": "drone_quad 5inch FPV racer 220mm diagonal 5\" tri-blade props",
+        "estimated_seconds": 30,
+        "outputs": ["assembly STEP/STL", "22 part STEPs", "BOM", "render"],
+    },
+    "7inch_long_range": {
+        "label": "7\" Long Range",
+        "description": "7-inch X-frame, longer arms for endurance",
+        "goal": "drone_quad 7inch long range 295mm diagonal 7\" tri-blade props",
+        "estimated_seconds": 32,
+        "outputs": ["assembly STEP/STL", "22 part STEPs", "BOM", "render"],
+    },
+    "military_recon": {
+        "label": "Military Recon (7\")",
+        "description": "Armored recon drone — vision pod, fiber tether, GPS, payload rail",
+        "goal": "drone_recon_military_7inch full pipeline",
+        "estimated_seconds": 45,
+        "outputs": ["31-part assembly", "FC + ESC KiCad PCBs", "8 GD&T drawings",
+                    "populated PCB STEPs", "print bundle for Centauri Carbon"],
+    },
+}
+
+
+@app.get("/api/presets")
+async def list_presets():
+    """Return the catalog of pre-canned drone builds for UI launcher tiles."""
+    return {"presets": DRONE_PRESETS}
+
+
+@app.post("/api/preset/{preset_id}")
+async def run_preset(preset_id: str):
+    """Run a pre-canned preset by id. Returns {run_id, preset_id, goal}.
+
+    Drone presets call into drone_quad / drone_quad_military directly rather
+    than the legacy orchestrator, since those modules produce the full
+    multi-domain output (mechanical + ECAD + drawings) in one call.
+    """
+    preset = DRONE_PRESETS.get(preset_id)
+    if preset is None:
+        raise HTTPException(status_code=404, detail=f"Unknown preset: {preset_id}")
+
+    run_id = uuid.uuid4().hex[:12]
+
+    def _run_drone():
+        try:
+            if preset_id == "military_recon":
+                from aria_os.drone_quad_military import run_drone_quad_military
+                result = run_drone_quad_military(name=f"preset_{preset_id}_{run_id[:6]}")
+            elif preset_id == "5inch_fpv":
+                from aria_os.drone_quad import run_drone_quad
+                result = run_drone_quad(name=f"preset_{preset_id}_{run_id[:6]}")
+            elif preset_id == "7inch_long_range":
+                from aria_os.drone_quad import run_drone_quad
+                result = run_drone_quad(
+                    name=f"preset_{preset_id}_{run_id[:6]}",
+                    params={
+                        "frame": {"diagonal_mm": 295.0, "plate_size_mm": 100.0,
+                                  "arm_length_mm": 145.0, "arm_width_mm": 22.0},
+                        "prop":  {"dia_mm": 178.0},
+                        "motor": {"stator_dia_mm": 32.0, "bell_dia_mm": 33.0},
+                    },
+                )
+            else:
+                return {"error": f"preset {preset_id} has no handler"}
+            return {
+                "success": result.success,
+                "step_path": result.step_path,
+                "stl_path":  result.stl_path,
+                "render_path": result.render_path,
+                "bom_path":  result.bom_path,
+                "output_dir": result.output_dir,
+                "elapsed_s": result.elapsed_s,
+            }
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    # Kick off in a background thread; client polls /api/preset/run/{run_id}
+    import threading
+    state = {"status": "running", "preset": preset_id, "started_at": time.time()}
+    _PRESET_RUNS[run_id] = state
+
+    def worker():
+        result = _run_drone()
+        state.update({"status": "done", "result": result, "ended_at": time.time()})
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"run_id": run_id, "preset_id": preset_id, "preset": preset}
+
+
+# In-memory preset run registry. Lost on restart — that's fine for short jobs.
+_PRESET_RUNS: dict[str, dict] = {}
+
+
+@app.get("/api/preset/run/{run_id}")
+async def get_preset_run(run_id: str):
+    """Poll a preset run's status. Returns {status: 'running'|'done', ...}."""
+    state = _PRESET_RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return state
+
+
 @app.post("/api/millforge/token")
 async def set_millforge_token(req: MillForgeTokenRequest):
     """Store a MillForge JWT for use by /api/send-cam-to-millforge."""

@@ -217,6 +217,128 @@ function Sidebar({ active, setActive }) {
 }
 
 // ---------------------------------------------------------------------------
+// QuickBuildsPanel — pre-canned drone builds. One click → 30s → STEP+STL+
+// KiCad PCBs+drawings+slicer-ready prints. The fastest "prompt → manufacturing"
+// path in the app. Fetches /api/presets, polls /api/preset/run/{id} for results.
+// ---------------------------------------------------------------------------
+function QuickBuildsPanel() {
+  const [presets, setPresets] = useState({});
+  const [running, setRunning] = useState(null);   // { run_id, preset_id }
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    fetch("/api/presets")
+      .then(r => r.json())
+      .then(d => setPresets(d.presets || {}))
+      .catch(() => setPresets({}));
+  }, []);
+
+  // Poll the run status when a preset is in flight
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/preset/run/${running.run_id}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        if (d.status === "done") {
+          setResult(d.result);
+          setRunning(null);
+          clearInterval(id);
+        }
+      } catch {}
+    }, 2000);
+    return () => clearInterval(id);
+  }, [running]);
+
+  const launch = async (preset_id) => {
+    setError(null); setResult(null);
+    try {
+      const r = await fetch(`/api/preset/${preset_id}`, { method: "POST" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      setRunning({ run_id: d.run_id, preset_id });
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const downloadBundle = () => {
+    if (!result?.output_dir) return;
+    const rel = result.output_dir.replace(/^.*?outputs[\\/]/, "outputs/").replace(/\\/g, "/");
+    window.location.href = `/api/bundle?path=${encodeURIComponent(rel)}`;
+  };
+
+  return (
+    <Panel title="QUICK BUILDS">
+      <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: "8px" }}>
+        <div style={{ fontSize: "10px", color: T.text3, marginBottom: "4px" }}>
+          One click → full multi-domain build (CAD + ECAD + drawings + print bundle)
+        </div>
+        {Object.entries(presets).map(([id, p]) => {
+          const isRunning = running?.preset_id === id;
+          const disabled = !!running;
+          return (
+            <button key={id} onClick={() => launch(id)} disabled={disabled}
+              style={{
+                padding: "10px 12px", borderRadius: "8px",
+                border: `1px solid ${isRunning ? T.ai : T.border}`,
+                background: isRunning ? `${T.ai}15` : "rgba(255,255,255,0.02)",
+                color: T.text1, cursor: disabled ? "not-allowed" : "pointer",
+                opacity: disabled && !isRunning ? 0.4 : 1,
+                textAlign: "left", display: "flex", flexDirection: "column", gap: "3px",
+                transition: "all 0.15s",
+              }}>
+              <div style={{ fontSize: "13px", fontWeight: 600, color: isRunning ? T.ai : T.text0 }}>
+                {p.label}{isRunning && " — building..."}
+              </div>
+              <div style={{ fontSize: "10px", color: T.text3 }}>{p.description}</div>
+              <div style={{ fontSize: "9px", color: T.text4, marginTop: "2px" }}>
+                ~{p.estimated_seconds}s · {(p.outputs || []).join(" · ")}
+              </div>
+            </button>
+          );
+        })}
+        {error && (
+          <div style={{ fontSize: "11px", color: T.red, padding: "6px 10px",
+                        background: `${T.red}10`, borderRadius: "6px",
+                        border: `1px solid ${T.red}40` }}>
+            Error: {error}
+          </div>
+        )}
+        {result && (
+          <div style={{ marginTop: "4px", padding: "10px", borderRadius: "8px",
+                        background: result.success ? `${T.green}10` : `${T.red}10`,
+                        border: `1px solid ${result.success ? T.green : T.red}40` }}>
+            <div style={{ fontSize: "11px", fontWeight: 600,
+                          color: result.success ? T.green : T.red, marginBottom: "6px" }}>
+              {result.success ? "BUILD COMPLETE" : "BUILD FAILED"}
+              {result.elapsed_s && ` (${Math.round(result.elapsed_s)}s)`}
+            </div>
+            {result.error && (
+              <div style={{ fontSize: "10px", color: T.text2, marginBottom: "4px" }}>
+                {result.error}
+              </div>
+            )}
+            {result.success && (
+              <button onClick={downloadBundle}
+                style={{ width: "100%", padding: "8px", borderRadius: "6px",
+                         border: "none", background: `linear-gradient(135deg, ${T.ai}, ${T.brand})`,
+                         color: "#fff", fontSize: "11px", fontWeight: 700,
+                         cursor: "pointer", letterSpacing: "0.04em" }}>
+                DOWNLOAD ALL ARTIFACTS (ZIP) ↓
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
 // ResponsiveMain — wraps the page content with the right left/bottom inset
 // for the active sidebar layout (left rail on desktop, bottom bar on mobile).
 // ---------------------------------------------------------------------------
@@ -452,15 +574,16 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
         )}
       </div>
 
-      {/* Right: Generate form + log */}
+      {/* Right: Quick Builds + Generate form + log */}
       <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+        <QuickBuildsPanel />
         <Panel title="GENERATE">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
             <textarea
               value={goal}
               onChange={e => setGoal(e.target.value)}
               placeholder={"Describe the part you want to generate...\ne.g. 150mm impeller, 6 backward-curved blades, 30mm bore"}
-              style={{ width: "100%", minHeight: "80px", background: "rgba(0,0,0,0.3)", border: `1px solid ${T.border}`, borderRadius: "8px", padding: "10px 12px", color: T.text1, fontSize: "12px", fontFamily: "inherit", resize: "vertical", outline: "none", lineHeight: 1.5, boxSizing: "border-box" }}
+              style={{ width: "100%", minHeight: "80px", background: "rgba(0,0,0,0.3)", border: `1px solid ${T.border}`, borderRadius: "8px", padding: "10px 12px", color: T.text1, fontSize: vp.isMobile ? "16px" : "12px", fontFamily: "inherit", resize: "vertical", outline: "none", lineHeight: 1.5, boxSizing: "border-box" }}
             />
             <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
               {EXAMPLE_PROMPTS.map((ex, i) => (
