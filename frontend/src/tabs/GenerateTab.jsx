@@ -22,6 +22,7 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
   const [progress, setProgress] = useState(null); // { stages: [...], current_stage, started_at }
   const [result, setResult] = useState(null);
   const [cost, setCost] = useState(null);         // { totals, headline, top_lines, line_count }
+  const [costExpanded, setCostExpanded] = useState(false);
   const [error, setError] = useState(null);
   const loggedPresetStagesRef = useRef(0);
 
@@ -437,8 +438,36 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
                   ))}
                 </div>
                 {cost.line_count > 0 && (
-                  <div style={{ marginTop: "5px", fontSize: "9px", color: T.text4 }}>
-                    {cost.line_count} line item{cost.line_count === 1 ? "" : "s"}
+                  <button onClick={() => setCostExpanded(e => !e)}
+                    style={{ marginTop: "5px", padding: "3px 6px", border: "none",
+                             background: "transparent", color: T.text4,
+                             fontSize: "9px", cursor: "pointer", fontWeight: 600,
+                             letterSpacing: "0.04em", textAlign: "left", width: "100%" }}>
+                    {costExpanded ? "▾" : "▸"} {cost.line_count} line item{cost.line_count === 1 ? "" : "s"}
+                    {!costExpanded && ` (top ${Math.min(cost.line_count, (cost.top_lines || []).length)} visible)`}
+                  </button>
+                )}
+                {costExpanded && Array.isArray(cost.top_lines) && cost.top_lines.length > 0 && (
+                  <div style={{ marginTop: "4px", display: "grid",
+                                gridTemplateColumns: "auto 1fr auto auto",
+                                columnGap: "6px", rowGap: "2px",
+                                fontSize: "9px",
+                                fontFamily: "JetBrains Mono, monospace" }}>
+                    {cost.top_lines.map((l, i) => (
+                      <Fragment key={i}>
+                        <span style={{ color: T.ai, fontWeight: 700 }}>{l.category || ""}</span>
+                        <span style={{ color: T.text2, overflow: "hidden",
+                                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {l.item || ""}
+                        </span>
+                        <span style={{ color: T.text3, textAlign: "right" }}>
+                          ×{l.qty || 1}
+                        </span>
+                        <span style={{ color: T.text1, textAlign: "right" }}>
+                          ${(l.cost_usd || 0).toFixed(2)}
+                        </span>
+                      </Fragment>
+                    ))}
                   </div>
                 )}
               </div>
