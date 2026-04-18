@@ -48,3 +48,47 @@ html {
     min-height: 40px;
   }
 }
+
+/* ── Defensive safety net for views still using legacy inline padding ────
+ * The Validate*, Manufacture*, Ecad*, Runs*, Library* views haven't been
+ * migrated to viewContainer() yet. Until they are, these rules tighten the
+ * fixed 24-28px padding and collapse 4-column stat grids on mobile.
+ *
+ * !important is required because they're fighting React inline styles.
+ * As each view is migrated to useViewport() + viewContainer(), the
+ * matching attribute selector stops applying (because the inline string
+ * changes), so this net naturally shrinks over time without manual cleanup.
+ */
+@media (max-width: 640px) {
+  /* Tighten any remaining "24px 28px" / "28px" page padding */
+  div[style*="padding: \"24px 28px\""],
+  div[style*='padding: "24px 28px"'],
+  div[style*="padding: 24px 28px"],
+  div[style*="padding:24px 28px"],
+  div[style*="padding: \"28px\""],
+  div[style*='padding: "28px"'],
+  div[style*="padding: 28px"],
+  div[style*="padding:28px"] {
+    padding: 12px !important;
+  }
+  /* StatCard 4-column rows fit phone width as 2x2 */
+  div[style*="repeat(4, 1fr)"],
+  div[style*="repeat(4,1fr)"] {
+    grid-template-columns: 1fr 1fr !important;
+  }
+  /* 3-column stat rows go single column */
+  div[style*="repeat(3, 1fr)"],
+  div[style*="repeat(3,1fr)"] {
+    grid-template-columns: 1fr !important;
+  }
+  /* Wide tables (Materials grid is 2fr 1fr 1fr 1fr 1.5fr 1fr) — let the
+     parent scroll horizontally so the table doesn't wrap awkwardly */
+  div[style*="2fr 1fr 1fr 1fr 1.5fr 1fr"] {
+    overflow-x: auto !important;
+    min-width: 600px;
+  }
+  /* All Three.js viewers cap at a reasonable phone height */
+  canvas {
+    max-height: 50vh !important;
+  }
+}

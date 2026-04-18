@@ -70,6 +70,28 @@ export function spacing(vp) {
   };
 }
 
+/** Common view container style — padding + grid + scroll behavior that
+ *  adapts. Pass `cols` ("1fr 380px", "280px 1fr", "1fr 360px", etc.) — on
+ *  mobile it always becomes "1fr" with vertical scrolling.
+ *
+ *  Usage: <div style={viewContainer(vp, "1fr 380px")}> ... </div>
+ */
+export function viewContainer(vp, cols = "1fr 380px") {
+  const S = spacing(vp);
+  const L = layout(vp);
+  return {
+    padding: `${S.pageY} ${S.pageX}`,
+    display: "grid",
+    gridTemplateColumns: vp.isMobile ? "1fr" : cols,
+    gap: S.gap,
+    height: vp.isMobile ? "auto" : "calc(100vh - 56px - 49px)",
+    minHeight: vp.isMobile ? "calc(100vh - 56px - 49px - 64px)" : undefined,
+    overflow: vp.isMobile ? "auto" : "hidden",
+    WebkitOverflowScrolling: "touch",
+  };
+}
+
+
 /** Layout dimensions that adapt to viewport. */
 export function layout(vp) {
   return {

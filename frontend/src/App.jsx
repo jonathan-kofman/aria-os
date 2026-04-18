@@ -1,8 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import * as THREE from "three";
-import { STLLoader } from "three/addons/loaders/STLLoader.js";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { useViewport, layout, spacing } from "./responsive.js";
+import { useViewport, layout, spacing, viewContainer } from "./responsive.js";
+
+// Three.js is heavy (~400KB). Lazy-load only when STLViewer first mounts so
+// the initial page bundle stays small for mobile cellular cold-loads.
+let _threeModulesPromise = null;
+function loadThree() {
+  if (_threeModulesPromise) return _threeModulesPromise;
+  _threeModulesPromise = Promise.all([
+    import("three"),
+    import("three/addons/loaders/STLLoader.js"),
+    import("three/addons/controls/OrbitControls.js"),
+  ]).then(([THREE, { STLLoader }, { OrbitControls }]) => ({ THREE, STLLoader, OrbitControls }));
+  return _threeModulesPromise;
+}
 
 // ---------------------------------------------------------------------------
 // Theme
@@ -85,11 +95,36 @@ function Badge({ label, color }) {
 }
 
 function SubTabs({ tabs, active, setActive }) {
+  const vp = useViewport();
+  const S = spacing(vp);
   return (
-    <div style={{ display: "flex", gap: "4px", padding: "12px 28px", borderBottom: `1px solid ${T.border}`, background: "rgba(0,0,0,0.2)" }}>
+    <div style={{
+      display: "flex",
+      gap: "4px",
+      padding: vp.isMobile ? `8px ${S.pageX}` : `12px ${S.pageX}`,
+      borderBottom: `1px solid ${T.border}`,
+      background: "rgba(0,0,0,0.2)",
+      overflowX: "auto",
+      WebkitOverflowScrolling: "touch",
+      flexWrap: "nowrap",
+      scrollbarWidth: "none",   // Firefox
+      msOverflowStyle: "none",  // IE/Edge legacy
+    }}>
       {tabs.map(t => (
         <button key={t.id} onClick={() => setActive(t.id)}
-          style={{ padding: "6px 14px", borderRadius: "7px", border: `1px solid ${active === t.id ? T.ai : "transparent"}`, background: active === t.id ? `${T.ai}12` : "transparent", color: active === t.id ? T.ai : T.text3, fontSize: "12px", fontWeight: 600, cursor: "pointer", transition: "all 0.15s" }}>
+          style={{
+            padding: vp.isMobile ? "8px 12px" : "6px 14px",
+            borderRadius: "7px",
+            border: `1px solid ${active === t.id ? T.ai : "transparent"}`,
+            background: active === t.id ? `${T.ai}12` : "transparent",
+            color: active === t.id ? T.ai : T.text3,
+            fontSize: vp.isMobile ? "13px" : "12px",
+            fontWeight: 600,
+            cursor: "pointer",
+            transition: "all 0.15s",
+            flexShrink: 0,
+            whiteSpace: "nowrap",
+          }}>
           {t.label}
         </button>
       ))}
@@ -268,60 +303,74 @@ function TopBar({ section, subsection, pipelineStatus }) {
 function STLViewer({ stlUrl }) {
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!mountRef.current || !stlUrl) return;
-    const w = mountRef.current.clientWidth, h = mountRef.current.clientHeight;
+    let cancelled = false;
+    setLoading(true);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setSize(w, h);
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.setClearColor(0x000000, 0);
-    mountRef.current.appendChild(renderer.domElement);
+    loadThree().then(({ THREE, STLLoader, OrbitControls }) => {
+      if (cancelled || !mountRef.current) return;
+      setLoading(false);
+      const w = mountRef.current.clientWidth, h = mountRef.current.clientHeight;
 
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 10000);
-    camera.position.set(0, 0, 200);
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(w, h);
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setClearColor(0x000000, 0);
+      mountRef.current.appendChild(renderer.domElement);
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
-    dir.position.set(100, 100, 100);
-    scene.add(dir);
-    scene.add(new THREE.DirectionalLight(0x88ccff, 0.4).position.set(-100, -50, -100) && dir);
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 10000);
+      camera.position.set(0, 0, 200);
 
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
+      scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+      const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+      dir.position.set(100, 100, 100);
+      scene.add(dir);
 
-    const loader = new STLLoader();
-    loader.load(stlUrl, (geometry) => {
-      geometry.computeBoundingBox();
-      const box = geometry.boundingBox;
-      const center = new THREE.Vector3();
-      box.getCenter(center);
-      geometry.translate(-center.x, -center.y, -center.z);
-      const size = box.getSize(new THREE.Vector3()).length();
-      camera.position.set(0, 0, size * 1.5);
-      controls.update();
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
 
-      const mesh = new THREE.Mesh(
-        geometry,
-        new THREE.MeshPhongMaterial({ color: 0x00d4ff, specular: 0x222222, shininess: 80, side: THREE.DoubleSide })
-      );
-      scene.add(mesh);
+      const loader = new STLLoader();
+      loader.load(stlUrl, (geometry) => {
+        if (cancelled) return;
+        geometry.computeBoundingBox();
+        const box = geometry.boundingBox;
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+        geometry.translate(-center.x, -center.y, -center.z);
+        const size = box.getSize(new THREE.Vector3()).length();
+        camera.position.set(0, 0, size * 1.5);
+        controls.update();
+
+        const mesh = new THREE.Mesh(
+          geometry,
+          new THREE.MeshPhongMaterial({ color: 0x00d4ff, specular: 0x222222, shininess: 80, side: THREE.DoubleSide })
+        );
+        scene.add(mesh);
+      });
+
+      let animId;
+      const animate = () => {
+        if (cancelled) return;
+        animId = requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+      };
+      animate();
+      sceneRef.current = { renderer, animId };
+    }).catch(() => {
+      if (!cancelled) setLoading(false);
     });
 
-    let animId;
-    const animate = () => {
-      animId = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
-    };
-    animate();
-    sceneRef.current = { renderer, animId };
-
     return () => {
-      cancelAnimationFrame(animId);
-      renderer.dispose();
+      cancelled = true;
+      if (sceneRef.current) {
+        cancelAnimationFrame(sceneRef.current.animId);
+        sceneRef.current.renderer.dispose();
+      }
       if (mountRef.current) mountRef.current.innerHTML = "";
     };
   }, [stlUrl]);
@@ -332,6 +381,11 @@ function STLViewer({ stlUrl }) {
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "12px" }}>
           <div style={{ fontSize: "32px", opacity: 0.2 }}>◈</div>
           <div style={{ fontSize: "12px", color: T.text4 }}>No part selected</div>
+        </div>
+      )}
+      {stlUrl && loading && (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "12px" }}>
+          <div style={{ fontSize: "11px", color: T.text3 }}>Loading 3D viewer...</div>
         </div>
       )}
     </div>
@@ -604,9 +658,16 @@ function GenerateAssembly({ pipelineStatus, logLines, onGenerate }) {
 
   const allLog = [...logLines, ...localLog];
   const isRunning = pipelineStatus === "running" || status === "running";
+  const _vp_assembly = useViewport();
+  const _S_assembly = spacing(_vp_assembly);
 
   return (
-    <div style={{ padding: "20px 28px", display: "flex", flexDirection: "column", gap: "16px", height: "calc(100vh - 56px - 49px)", overflow: "hidden" }}>
+    <div style={{ padding: `${_S_assembly.pageY} ${_S_assembly.pageX}`,
+                  display: "flex", flexDirection: "column", gap: _S_assembly.gap,
+                  height: _vp_assembly.isMobile ? "auto" : "calc(100vh - 56px - 49px)",
+                  minHeight: _vp_assembly.isMobile ? "calc(100vh - 56px - 49px - 64px)" : undefined,
+                  overflow: _vp_assembly.isMobile ? "auto" : "hidden",
+                  WebkitOverflowScrolling: "touch" }}>
       <Panel title="ASSEMBLY PARTS">
         <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "8px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr 40px", gap: "8px", padding: "6px 0", fontSize: "9px", color: T.text3, fontWeight: 700, letterSpacing: "0.1em" }}>
@@ -676,9 +737,10 @@ function LibraryParts({ parts }) {
     !search || (p.part_name || p.id || "").toLowerCase().includes(search.toLowerCase()) ||
     (p.goal || "").toLowerCase().includes(search.toLowerCase())
   );
+  const _vp_libparts = useViewport();
 
   return (
-    <div style={{ padding: "20px 28px", display: "grid", gridTemplateColumns: "280px 1fr", gap: "16px", height: "calc(100vh - 56px - 49px)", overflow: "hidden" }}>
+    <div style={viewContainer(_vp_libparts, "280px 1fr")}>
       <Panel title={`PARTS — ${parts.length} TOTAL`} style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.border}` }}>
           <input
@@ -1434,9 +1496,10 @@ function GenerateTerrain({ pipelineStatus, logLines, onGenerate }) {
       setStatus("idle");
     }
   };
+  const _vp_terrain = useViewport();
 
   return (
-    <div style={{ padding: "20px 28px", display: "grid", gridTemplateColumns: "1fr 360px", gap: "16px", height: "calc(100vh - 56px - 49px)", overflow: "hidden" }}>
+    <div style={viewContainer(_vp_terrain, "1fr 360px")}>
       <Panel title="TERRAIN PREVIEW" style={{ flex: 1, minHeight: 0 }}>
         <div style={{ height: "calc(100% - 41px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "16px" }}>
           <svg viewBox="0 0 400 200" style={{ width: "80%", opacity: 0.4 }}>
@@ -1547,9 +1610,10 @@ function GenerateScan({ pipelineStatus, logLines }) {
       setStatus("done");
     }, 2000);
   };
+  const _vp_scan = useViewport();
 
   return (
-    <div style={{ padding: "20px 28px", display: "grid", gridTemplateColumns: "1fr 360px", gap: "16px", height: "calc(100vh - 56px - 49px)", overflow: "hidden" }}>
+    <div style={viewContainer(_vp_scan, "1fr 360px")}>
       <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
         <Panel title="SCAN VIEWER" style={{ flex: 1, minHeight: 0 }}>
           <div style={{ height: "calc(100% - 41px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "12px" }}>
@@ -1663,8 +1727,10 @@ function GenerateRefine({ parts, pipelineStatus, logLines }) {
     }
   };
 
+  const _vp_refine = useViewport();
+
   return (
-    <div style={{ padding: "20px 28px", display: "grid", gridTemplateColumns: "280px 1fr", gap: "16px", height: "calc(100vh - 56px - 49px)", overflow: "hidden" }}>
+    <div style={viewContainer(_vp_refine, "280px 1fr")}>
       <Panel title="SELECT PART" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ flex: 1, overflowY: "auto" }}>
           {parts.length === 0 ? (
@@ -1844,15 +1910,23 @@ const VISUAL_MOCK_RUNS = [
 
 function ValidateVisual() {
   const [selected, setSelected] = useState(VISUAL_MOCK_RUNS[0]);
+  const vp_visual = useViewport();
+  const S_visual = spacing(vp_visual);
   return (
-    <div style={{ padding: "24px 28px" }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px", marginBottom: "20px" }}>
+    <div style={{ padding: `${S_visual.pageY} ${S_visual.pageX}` }}>
+      <div style={{ display: "grid",
+                    gridTemplateColumns: vp_visual.isMobile ? "1fr 1fr"
+                                       : vp_visual.isTablet ? "repeat(2, 1fr)"
+                                       : "repeat(4, 1fr)",
+                    gap: "12px", marginBottom: "20px" }}>
         <StatCard label="RUNS VERIFIED" value={VISUAL_MOCK_RUNS.length} sub="visual checks run" color={T.ai} spark={[1,1,2,2,2,3,3,3]} />
         <StatCard label="PASSED" value={VISUAL_MOCK_RUNS.filter(r => r.overall === "PASS").length} sub="pass visual check" color={T.green} spark={[0,0,1,1,2,2,2,VISUAL_MOCK_RUNS.filter(r => r.overall === "PASS").length]} />
         <StatCard label="FAILED" value={VISUAL_MOCK_RUNS.filter(r => r.overall === "FAIL").length} sub="need refinement" color={T.red} spark={[0,0,1,1,0,0,1,VISUAL_MOCK_RUNS.filter(r => r.overall === "FAIL").length]} />
         <StatCard label="AVG CONFIDENCE" value={`${Math.round(VISUAL_MOCK_RUNS.reduce((s,r) => s + r.confidence, 0) / VISUAL_MOCK_RUNS.length * 100)}%`} sub="vision API score" color={T.brand} spark={[60,65,70,75,80,82,85,Math.round(VISUAL_MOCK_RUNS.reduce((s,r) => s + r.confidence, 0) / VISUAL_MOCK_RUNS.length * 100)]} />
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: "16px" }}>
+      <div style={{ display: "grid",
+                    gridTemplateColumns: vp_visual.isMobile ? "1fr" : "280px 1fr",
+                    gap: "16px" }}>
         <Panel title="RUN HISTORY">
           <div>
             {VISUAL_MOCK_RUNS.map((r, i) => (
