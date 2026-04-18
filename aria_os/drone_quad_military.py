@@ -743,13 +743,37 @@ def _run_ecad_for_drone(cfg: dict, ecad_dir: Path) -> dict:
         sub.mkdir(parents=True, exist_ok=True)
         try:
             script_path, bom_path = generate_ecad(spec, out_dir=sub)
-            # generate_ecad also writes validation.json into the same dir
             val_path = sub / "validation.json"
+
+            # Generate the actual .kicad_pcb file (s-expression format) so
+            # the user gets a fabricable PCB they can open in KiCad directly,
+            # not just a Python script they have to run inside pcbnew.
+            kicad_pcb_path = None
+            gerber_info = None
+            if bom_path and Path(bom_path).is_file():
+                try:
+                    from aria_os.ecad.kicad_pcb_writer import (
+                        write_kicad_pcb, export_gerbers,
+                    )
+                    kicad_pcb_path = write_kicad_pcb(
+                        bom_path, sub / f"{label}.kicad_pcb",
+                        board_name=label,
+                    )
+                    # Try Gerber export if kicad-cli is installed (no-op
+                    # otherwise — gerbers can be generated later).
+                    gerber_info = export_gerbers(kicad_pcb_path,
+                                                 sub / "gerbers")
+                except Exception as exc:
+                    print(f"[ecad] kicad_pcb writer failed for {label}: "
+                          f"{type(exc).__name__}: {exc}")
+
             artifacts[label] = {
                 "spec": spec,
                 "script_path": str(script_path) if script_path else None,
                 "bom_path": str(bom_path) if bom_path else None,
                 "validation_path": str(val_path) if val_path.is_file() else None,
+                "kicad_pcb_path": str(kicad_pcb_path) if kicad_pcb_path else None,
+                "gerbers": gerber_info,
             }
         except Exception as exc:
             artifacts[label] = {"error": f"{type(exc).__name__}: {exc}",
