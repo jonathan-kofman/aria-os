@@ -39,6 +39,7 @@ class BuildResult:
     mech_success: bool = False
     ecad_success: bool = False
     drawings_success: bool = False
+    diy_fab_success: bool = False
     print_success: bool = False
     cam_success: bool = False
     sim_success: bool = False        # Genesis flight dynamics
@@ -76,6 +77,11 @@ class BuildResult:
     # report which boards have fab-ready Gerbers.
     ecad: dict = field(default_factory=dict)
 
+    # Per-board DIY fab artifacts (CNC isolation G-code + printed substrate STL
+    # + copper-tape SVG + solder-paste stencil STL) for in-house PCB fab on a
+    # 3D printer + CNC instead of a PCB house.
+    diy_fab: dict = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "preset_id": self.preset_id,
@@ -88,6 +94,7 @@ class BuildResult:
                 "mechanical": self.mech_success,
                 "ecad":       self.ecad_success,
                 "drawings":   self.drawings_success,
+                "diy_fab":    self.diy_fab_success,
                 "print":      self.print_success,
                 "cam":        self.cam_success,
                 "sim":        self.sim_success,
@@ -113,6 +120,7 @@ class BuildResult:
             "structsight_judgment": self.structsight_judgment,
             "millforge_handoff": self.millforge_handoff,
             "ecad": self.ecad,
+            "diy_fab": self.diy_fab,
         }
 
 
@@ -193,6 +201,44 @@ def run_full_build(*, preset_id: str, params: dict | None = None,
 
     _stage("ecad",     "done" if result.ecad_success     else "skip")
     _stage("drawings", "done" if result.drawings_success else "skip")
+
+    # ── Stage 1.4: DIY fab (home-made PCBs from .kicad_pcb) ──────────────
+    # Turn each board's .kicad_pcb into:
+    #   • CNC isolation G-code   (mill copper-clad FR4/FR1 on the CNC)
+    #   • printed substrate STL  (print channels, inlay copper-foil tape)
+    #   • copper-tape cut SVG    (vinyl-cut tape to match channels)
+    #   • solder-paste stencil STL
+    # so the user can fab boards in-house without a PCB house.
+    # Non-blocking: skip silently if no .kicad_pcb files were produced.
+    _stage("diy_fab", "start")
+    diy_any_ok = False
+    if isinstance(result.ecad, dict) and result.ecad:
+        try:
+            from aria_os.ecad.diy_fab import run_diy_fab
+            for board_name, v in result.ecad.items():
+                pcb_path = v.get("kicad_pcb_path") if isinstance(v, dict) else None
+                if not pcb_path or not Path(pcb_path).is_file():
+                    continue
+                try:
+                    board_out = Path(result.output_dir) / "ecad" / board_name
+                    board_out.mkdir(parents=True, exist_ok=True)
+                    r = run_diy_fab(pcb_path, board_out, route="both")
+                    result.diy_fab[board_name] = {
+                        "out_dir": r.get("out_dir"),
+                        "paths": r.get("paths", {}),
+                        "n_traces": r.get("n_traces", 0),
+                        "board_size_mm": r.get("board_size_mm"),
+                    }
+                    diy_any_ok = True
+                except Exception as exc:
+                    result.diy_fab[board_name] = {
+                        "error": f"{type(exc).__name__}: {exc}"}
+        except Exception as exc:
+            print(f"[build] diy_fab import failed: {type(exc).__name__}: {exc}")
+    result.diy_fab_success = diy_any_ok
+    _stage("diy_fab", "done" if diy_any_ok else "skip",
+           n_boards=sum(1 for v in result.diy_fab.values()
+                        if isinstance(v, dict) and "error" not in v))
 
     # ── Stage 1.5: per-part mass calculation ──────────────────────────────
     # Compute mass_g per part from STEP volume × material density and write
@@ -524,6 +570,20 @@ def _build_preview_manifest(output_dir: Path, result: BuildResult) -> list[dict]
                 "path": str(png),
                 "rel_path": _rel(png),
             })
+    # DIY fab artifacts — copper-tape SVG is the visually-interesting preview;
+    # G-code and STLs are downloadable but not thumbnailable.
+    if isinstance(result.diy_fab, dict):
+        for board, info in result.diy_fab.items():
+            if not isinstance(info, dict):
+                continue
+            svg = (info.get("paths") or {}).get("copper_tape_svg")
+            if svg and Path(svg).is_file():
+                items.append({
+                    "label": f"{board} copper tape",
+                    "type": "svg",
+                    "path": svg,
+                    "rel_path": _rel(Path(svg)),
+                })
     return items
 
 

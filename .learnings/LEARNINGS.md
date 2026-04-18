@@ -327,6 +327,26 @@ For ARIA-OS tool names, the canonical set is `_VALID_TOOLS` in orchestrator.py. 
 
 **Example failure**: `return "fusion"` vs `_VALID_TOOLS` containing `"fusion360"` — no exception raised, routing silently falls through to no-op fallback. The bug existed across 10+ runs without surfacing because the fallback chain produced geometry anyway (via CadQuery), just not via the intended Fusion path.
 
+## 2026-04-18 — Service worker cache-first on HTML shell masks deploys
+
+`cache-first` strategy caches the app shell on first load. Subsequent deploys serve the old shell from the cache — users never see new code until the SW expires or is manually cleared.
+
+Fix: switch HTML shell route to `network-first` and bump the `VERSION` constant in the SW. On network-first the SW fetches fresh HTML on every navigation; static assets (JS/CSS with content hashes) remain cache-first. Always bump VERSION when changing SW strategy so old workers are replaced immediately.
+
+Affects: `aria_os/static/sw.js` or equivalent service worker registration file.
+
+## 2026-04-18 — `flex: 1` on panel inside `overflowY: auto` column breaks scrolling
+
+A Panel with `flex: 1` inside a flex column that has `overflowY: auto` will grow to consume all available height and prevent the column from scrolling — the column has "infinite" height from its perspective.
+
+Fix: use fixed or `maxHeight`-constrained heights on each Panel (`maxHeight: '40vh'` or a px value), with `overflowY: auto` on each Panel independently. The outer column should NOT have `overflowY: auto` if panels manage their own scroll.
+
+Corollary: `maxHeight: 60vh` on a Panel that is already inside a scrolling column creates a double-scroll — outer column scrolls AND inner panel scrolls. Pick one scroll owner per content area.
+
+## 2026-04-18 — Background-agent scope creep if file paths not constrained
+
+When spawning a background sub-agent for maintenance tasks (learnings, session logs), if the prompt does not list explicit allowed file paths, the agent may refactor source files or create new modules it deems related. Always include an explicit constraint: "only write to these files: <paths>. Do not touch source files."
+
 ### 2026-04-10: render_kicad_board placeholder
 
 When cairosvg and Inkscape are both unavailable, the old code returned True from a dark placeholder PNG, blocking the matplotlib BOM layout renderer. Fix: return False so the caller's matplotlib fallback runs. The matplotlib BOM layout is far more useful than a blank placeholder.

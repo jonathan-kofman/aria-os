@@ -209,7 +209,13 @@ The false positive concern was: if the default is stale (e.g., `params.get("od_m
 - **Fix**: All `return "fusion"` → `return "fusion360"` in tool_router.py. Also fixed `_build_rationale` in multi_cad_router.py which had the same string check.
 - **Rule**: Verify return string values match ALL downstream checks. Search for the string in orchestrator, rationale builder, and output format selector before settling on a canonical name.
 
-## [2026-04-15] aria_os/__init__.py top-level imports crash package on Railway
+## [2026-04-18] Service worker HTML shell served stale after deploy
+- **Symptom**: After deploying commit `b113eba`, users saw the old UI. Hard refresh fixed it; normal navigation did not.
+- **Root cause**: SW was set to `cache-first` for all routes including the HTML shell. The new SW code was never fetched because the cached shell loaded the old SW registration.
+- **Fix**: Changed HTML shell route to `network-first` in the SW fetch handler and bumped `VERSION` constant. JS/CSS bundle routes remain cache-first (content-hashed filenames).
+- **Rule**: HTML shell must always be network-first. Only hash-named static assets should be cache-first.
+
+## [2026-04-18] aria_os/__init__.py top-level imports crash package on Railway
 - **Symptom**: `import aria_os` raised ImportError chain on Railway cold start when optional deps (grasshopper_generator, blender_generator, rhino3dm) are absent.
 - **Root cause**: `__init__.py` imported directly from `aria_os.orchestrator` at module load time. orchestrator imported from generators which imported optional heavy deps unconditionally. One missing package brought down the whole package import.
 - **Fix**: Changed `__init__.py` to lazy imports — nothing is imported at module load. Sub-modules import their own deps; missing optional deps are caught locally with try/except.
