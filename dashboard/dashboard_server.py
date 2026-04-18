@@ -1118,6 +1118,53 @@ async def _build_graph_on_startup():
         print(f"[graph] startup hook failed: {type(exc).__name__}: {exc}")
 
 
+@app.get("/api/cost/session")
+async def cost_session():
+    """Return the LLM cost tracker's running totals for this server process.
+
+    Lets the UI surface "$0.04 spent on this run" instead of the user
+    having to wonder if they're burning Anthropic credits silently. Cost
+    is per-server-process — restart resets to $0.
+    """
+    try:
+        from aria_os.cost_tracker import get_session_summary
+        return get_session_summary()
+    except Exception as exc:
+        return {
+            "n_calls": 0, "total_cost_usd": 0.0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+@app.post("/api/cost/reset")
+async def cost_reset():
+    """Reset the session cost tracker. Useful for "start a fresh budget"."""
+    try:
+        from aria_os.cost_tracker import reset_session
+        reset_session()
+        return {"ok": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"{type(exc).__name__}: {exc}")
+
+
+@app.get("/api/cost/build/{run_id}")
+async def cost_for_build(run_id: str):
+    """Return the cost_breakdown.json for a completed preset run."""
+    state = _PRESET_RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if state.get("status") != "done":
+        return {"status": state.get("status"), "ready": False}
+    result = state.get("result") or {}
+    return {
+        "status": "done",
+        "ready": True,
+        "total_cost_usd": result.get("total_cost_usd", 0.0),
+        "cost_breakdown_path": result.get("cost_breakdown_path"),
+    }
+
+
 @app.get("/api/preset/run/{run_id}/preview")
 async def get_preset_preview(run_id: str):
     """Return the 'what's in the box' thumbnail manifest for a completed run.

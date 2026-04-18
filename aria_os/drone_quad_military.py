@@ -771,6 +771,9 @@ def _run_ecad_for_drone(cfg: dict, ecad_dir: Path) -> dict:
             # not just a Python script they have to run inside pcbnew.
             kicad_pcb_path = None
             gerber_info = None
+            gerber_dir = None
+            n_gerber_files = 0
+            gerber_zip_path = None
             if bom_path and Path(bom_path).is_file():
                 try:
                     from aria_os.ecad.kicad_pcb_writer import (
@@ -784,6 +787,17 @@ def _run_ecad_for_drone(cfg: dict, ecad_dir: Path) -> dict:
                     # otherwise — gerbers can be generated later).
                     gerber_info = export_gerbers(kicad_pcb_path,
                                                  sub / "gerbers")
+                    if isinstance(gerber_info, dict) and gerber_info.get("available"):
+                        gerber_dir = gerber_info.get("gerber_dir")
+                        n_gerber_files = int(gerber_info.get("n_files") or 0)
+                        # Pack all Gerber/drill files into a single zip so
+                        # JLCPCB / OSHPark / Aisler can ingest it directly
+                        # from the bundle. No-op if no files were produced.
+                        if gerber_dir and n_gerber_files > 0:
+                            gerber_zip_path = _zip_gerbers(
+                                Path(gerber_dir),
+                                sub / f"{label}_gerbers.zip",
+                            )
                 except Exception as exc:
                     print(f"[ecad] kicad_pcb writer failed for {label}: "
                           f"{type(exc).__name__}: {exc}")
@@ -795,11 +809,40 @@ def _run_ecad_for_drone(cfg: dict, ecad_dir: Path) -> dict:
                 "validation_path": str(val_path) if val_path.is_file() else None,
                 "kicad_pcb_path": str(kicad_pcb_path) if kicad_pcb_path else None,
                 "gerbers": gerber_info,
+                "gerber_dir": gerber_dir,
+                "n_gerber_files": n_gerber_files,
+                "gerber_zip_path": str(gerber_zip_path) if gerber_zip_path else None,
             }
         except Exception as exc:
             artifacts[label] = {"error": f"{type(exc).__name__}: {exc}",
                                 "spec": spec}
     return artifacts
+
+
+def _zip_gerbers(gerber_dir: Path, zip_path: Path) -> Path | None:
+    """Zip every Gerber (.gbr/.gbrjob) and drill (.drl) file in `gerber_dir`
+    into `zip_path` for one-click fab submission.
+
+    Returns the zip path on success, None on failure. Failures are logged
+    but non-fatal — the unzipped gerbers remain available.
+    """
+    import zipfile
+    try:
+        gerber_exts = {".gbr", ".gbrjob", ".drl", ".gm1", ".gko", ".gtl",
+                       ".gbl", ".gts", ".gbs", ".gto", ".gbo"}
+        files = [p for p in gerber_dir.iterdir()
+                 if p.is_file() and p.suffix.lower() in gerber_exts]
+        if not files:
+            return None
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in files:
+                zf.write(f, arcname=f.name)
+        return zip_path
+    except Exception as exc:
+        print(f"[ecad] gerber zip failed for {gerber_dir}: "
+              f"{type(exc).__name__}: {exc}")
+        return None
 
 
 def _run_drawings_for_drone(parts_dir: Path, drawings_dir: Path) -> dict:
