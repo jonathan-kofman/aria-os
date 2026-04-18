@@ -1077,10 +1077,7 @@ function QuickBuildsPanel() {
         {result && (
           <div style={{ marginTop: "4px", padding: "10px", borderRadius: "8px",
                         background: result.success ? `${T.green}10` : `${T.red}10`,
-                        border: `1px solid ${result.success ? T.green : T.red}40`,
-                        maxHeight: "60vh", overflowY: "auto",
-                        WebkitOverflowScrolling: "touch",
-                        overscrollBehavior: "contain" }}>
+                        border: `1px solid ${result.success ? T.green : T.red}40` }}>
             <div style={{ fontSize: "11px", fontWeight: 600,
                           color: result.success ? T.green : T.red, marginBottom: "6px" }}>
               {result.success ? "BUILD COMPLETE" : "BUILD FAILED"}
@@ -1421,8 +1418,13 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
         )}
       </div>
 
-      {/* Right: Quick Builds + Generate form + log */}
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+      {/* Right: Quick Builds + Generate form + log.
+          overflowY:auto so the entire stack is scrollable — otherwise tall
+          QuickBuilds results push the Generate form + log out of view. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px",
+                    minHeight: 0, overflowY: "auto",
+                    WebkitOverflowScrolling: "touch",
+                    paddingRight: "4px" }}>
         <QuickBuildsPanel />
         <Panel title="GENERATE">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -1456,8 +1458,8 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
           </div>
         </Panel>
 
-        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: 0 }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: "200px" }}>
+          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", minHeight: "160px", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {logLines.length === 0 ? (
               <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
             ) : (
@@ -1539,7 +1541,9 @@ function GenerateImage({ pipelineStatus, logLines }) {
         </div>
       </Panel>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px",
+                    minHeight: 0, overflowY: "auto",
+                    WebkitOverflowScrolling: "touch", paddingRight: "4px" }}>
         <Panel title="GENERATE FROM IMAGE">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
             <div style={{ padding: "8px 12px", borderRadius: "8px", background: `${T.amber}10`, border: `1px solid ${T.amber}30`, fontSize: "11px", color: T.amber, display: "flex", alignItems: "flex-start", gap: "8px" }}>
@@ -1583,8 +1587,8 @@ function GenerateImage({ pipelineStatus, logLines }) {
           </div>
         </Panel>
 
-        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: 0 }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: "200px" }}>
+          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", minHeight: "160px", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {allLog.length === 0 ? (
               <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
             ) : (
@@ -1636,7 +1640,7 @@ function GenerateAssembly({ pipelineStatus, logLines, onGenerate }) {
                   display: "flex", flexDirection: "column", gap: _S_assembly.gap,
                   height: _vp_assembly.isMobile ? "auto" : "calc(100vh - 56px - 49px)",
                   minHeight: _vp_assembly.isMobile ? "calc(100vh - 56px - 49px - 64px)" : undefined,
-                  overflow: _vp_assembly.isMobile ? "auto" : "hidden",
+                  overflowY: "auto",
                   WebkitOverflowScrolling: "touch" }}>
       <Panel title="ASSEMBLY PARTS">
         <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "8px" }}>
@@ -2500,7 +2504,9 @@ function GenerateTerrain({ pipelineStatus, logLines, onGenerate }) {
         </div>
       </Panel>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px",
+                    minHeight: 0, overflowY: "auto",
+                    WebkitOverflowScrolling: "touch", paddingRight: "4px" }}>
         <Panel title="TERRAIN PARAMETERS">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
             <div>
@@ -2538,8 +2544,8 @@ function GenerateTerrain({ pipelineStatus, logLines, onGenerate }) {
             </button>
           </div>
         </Panel>
-        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: 0 }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: "200px" }}>
+          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", minHeight: "160px", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {[...logLines, ...localLog].length === 0
               ? <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
               : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
@@ -2715,7 +2721,9 @@ function GenerateRefine({ parts, pipelineStatus, logLines }) {
         </div>
       </Panel>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px",
+                    minHeight: 0, overflowY: "auto",
+                    WebkitOverflowScrolling: "touch", paddingRight: "4px" }}>
         <Panel title="REFINEMENT">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
             {selectedPart && (
@@ -2747,8 +2755,8 @@ function GenerateRefine({ parts, pipelineStatus, logLines }) {
             </button>
           </div>
         </Panel>
-        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: 0 }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: "200px" }}>
+          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", minHeight: "160px", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {[...logLines, ...localLog].length === 0
               ? <div style={{ color: T.text4, fontStyle: "italic" }}>Select a part and describe the modification.</div>
               : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
