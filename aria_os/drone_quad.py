@@ -916,12 +916,14 @@ def _color_for(material: str):
 
 
 def _render_assembly(stl_path: Path, out_png: Path, title: str) -> None:
-    """Render assembly as 3-panel image: top + iso + front views, with shaded
-    silhouettes (filled polygons via matplotlib Poly3DCollection) so that
-    fillets, taper, and other surface curvature is actually visible.
+    """Render assembly: 3-panel multi-view (top + iso + front) with multi-light
+    shading + silhouette edges + depth fog so each face reads distinctly.
 
-    The previous wireframe iso buried fine details (fillets, hex shapes)
-    in line clutter at full-assembly scale.
+    Improvements over the single-light shaded version:
+      - 3 lights per view (key + fill + rim) instead of 1 → no flat blobs
+      - Silhouette outline edges drawn over fills (engineering-drawing crisp)
+      - Depth-based fog (further triangles fade) so layered parts separate
+      - Top view uses Z as the depth-fog axis (distinguishes plate stack)
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -935,43 +937,91 @@ def _render_assembly(stl_path: Path, out_png: Path, title: str) -> None:
         mesh = mesh.dump(concatenate=True)
     V = mesh.vertices
     F = mesh.faces
-    N = mesh.face_normals  # shape (NF, 3)
+    N = mesh.face_normals
 
-    # Project triangles to a 2D view + shade by angle to a fixed light direction
+    # Three lights per view — key (strong, oblique), fill (weak, opposite),
+    # rim (weak, behind). Sum of dot products gives per-face brightness.
+    def shade_with_lights(normals, lights):
+        s = np.zeros(len(normals))
+        for d, intensity in lights:
+            d = np.array(d, dtype=float); d /= np.linalg.norm(d)
+            s += np.clip(normals @ d, 0, 1) * intensity
+        ambient = 0.20
+        return np.clip(s + ambient, 0.0, 1.0)
+
     def project_and_shade(view: str):
-        if view == "top":     # XY plane (look down +Z)
+        if view == "top":
             P2 = V[:, [0, 1]]
-            depth = -V[:, 2]               # smaller = front
-            light_dir = np.array([0, 0, 1.0])
-        elif view == "front": # XZ plane (look from +Y)
+            depth = V[:, 2]                   # higher Z = closer to camera
+            lights = [
+                ((0, 0, 1.0), 0.55),          # key (top down)
+                ((1, 1, 0.5), 0.30),          # fill (NE oblique)
+                ((-1, -1, 0.3), 0.15),        # rim (SW back)
+            ]
+        elif view == "front":
             P2 = V[:, [0, 2]]
             depth = -V[:, 1]
-            light_dir = np.array([0, 1.0, 0.5])
-        else:                 # iso
+            lights = [
+                ((0.3, 1.0, 0.5), 0.55),
+                ((-0.5, 0.5, 1.0), 0.30),
+                ((-0.5, -1.0, 0.0), 0.15),
+            ]
+        else:                                  # iso
             u = (V[:, 0] - V[:, 1]) / math.sqrt(2.0)
             v = (V[:, 0] + V[:, 1]) / math.sqrt(6.0) + V[:, 2] * math.sqrt(2.0 / 3.0)
             P2 = np.stack([u, v], axis=-1)
             depth = -(V[:, 0] + V[:, 1] + V[:, 2])
-            light_dir = np.array([0.5, 0.5, 1.0])
-            light_dir = light_dir / np.linalg.norm(light_dir)
-        # Per-triangle: average depth + shade
+            lights = [
+                ((0.5, 0.5, 1.0), 0.50),
+                ((-0.7, 0.5, 0.4), 0.30),
+                ((0.4, -0.4, 0.3), 0.20),
+            ]
         tri_depth = depth[F].mean(axis=1)
-        # Shade: cosine of angle between face normal and light dir, clamp
-        shade = np.clip((N @ light_dir) * 0.6 + 0.4, 0.15, 1.0)
-        # Sort back-to-front so painter's algorithm renders correctly
+        shade = shade_with_lights(N, lights)
+        # Painter's algo: back-to-front order
         order = np.argsort(tri_depth)
-        polys = P2[F[order]]      # (NF, 3, 2)
-        gray = shade[order]       # (NF,)
-        return polys, gray
+        polys = P2[F[order]]
+        s_ord = shade[order]
+        d_ord = tri_depth[order]
+        # Depth fog 0..1 (1 = nearest, fades to 0.7 at back)
+        d_min, d_max = d_ord.min(), d_ord.max()
+        d_norm = (d_ord - d_min) / max(d_max - d_min, 1e-6)
+        fog = 0.7 + 0.3 * d_norm
+        s_ord = s_ord * fog
+        return polys, s_ord, d_norm
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 6), dpi=140)
+    def silhouette_edges(view_polys, max_edges=6000):
+        """Sample edges between adjacent triangles where shade discontinuity
+        is largest — gives a silhouette / crease overlay. Cheap heuristic
+        without proper neighbor lookup: just sample triangle outline edges
+        with low opacity."""
+        # Sample a subset of triangle outlines for the edge overlay
+        n = len(view_polys)
+        sample = view_polys if n < max_edges else view_polys[
+            np.linspace(0, n - 1, max_edges, dtype=int)
+        ]
+        segs = []
+        for tri in sample:
+            segs.append([tri[0], tri[1]])
+            segs.append([tri[1], tri[2]])
+            segs.append([tri[2], tri[0]])
+        return segs
+
+    fig, axes = plt.subplots(1, 3, figsize=(17, 6), dpi=150)
     for ax, view in zip(axes, ("top", "iso", "front")):
-        polys, gray = project_and_shade(view)
-        # RGB color from grayscale shade, slight blue tint
-        colors = np.stack([gray * 0.45, gray * 0.55, gray * 0.75], axis=-1)
+        polys, shade, d_norm = project_and_shade(view)
+        # Color: blue-steel shade, brighter near = lighter
+        colors = np.stack([shade * 0.50, shade * 0.62, shade * 0.85,
+                           np.ones_like(shade)], axis=-1)
         pc = PolyCollection(polys, facecolors=colors, edgecolors="none",
-                            linewidths=0, antialiased=False)
+                            linewidths=0, antialiased=True)
         ax.add_collection(pc)
+        # Edge overlay — thin dark lines for crispness
+        edges = silhouette_edges(polys)
+        if edges:
+            lc = LineCollection(edges, linewidths=0.15,
+                                colors="#0a1420", alpha=0.30, antialiased=True)
+            ax.add_collection(lc)
         ax.autoscale()
         ax.set_aspect("equal")
         ax.set_xticks([]); ax.set_yticks([])
@@ -980,11 +1030,10 @@ def _render_assembly(stl_path: Path, out_png: Path, title: str) -> None:
             "iso":   "Isometric",
             "front": "Front (XZ) — looking back",
         }[view], fontsize=11, color="#1f4068")
-        # Subtle grid background
-        ax.set_facecolor("#0a0e15")
+        ax.set_facecolor("#f4f6f9")    # light bg = parts pop
     fig.suptitle(f"{title}", fontsize=13, color="#0d1117", y=0.99)
     fig.tight_layout()
-    fig.savefig(str(out_png), dpi=140, bbox_inches="tight", facecolor="white")
+    fig.savefig(str(out_png), dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
