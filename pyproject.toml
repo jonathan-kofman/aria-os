@@ -31,6 +31,9 @@ llm = [
 all = [
     "aria-os[llm]",
 ]
+dev = [
+    "pytest>=8.0",
+]
 
 [project.scripts]
 aria = "run_aria_os:main"
