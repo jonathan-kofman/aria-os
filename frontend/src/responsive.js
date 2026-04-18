@@ -84,9 +84,11 @@ export function viewContainer(vp, cols = "1fr 380px") {
     display: "grid",
     gridTemplateColumns: vp.isMobile ? "1fr" : cols,
     gap: S.gap,
-    height: vp.isMobile ? "auto" : "calc(100vh - 56px - 49px)",
-    minHeight: vp.isMobile ? "calc(100vh - 56px - 49px - 64px)" : undefined,
-    overflow: vp.isMobile ? "auto" : "hidden",
+    // Fill the main scroll column (below TopBar + SubTabs), not raw 100vh — avoids double-counting chrome and broken scroll.
+    height: vp.isMobile ? "auto" : "100%",
+    minHeight: 0,
+    maxHeight: vp.isMobile ? "none" : "100%",
+    overflow: vp.isMobile ? "visible" : "hidden",
     WebkitOverflowScrolling: "touch",
   };
 }
