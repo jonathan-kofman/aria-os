@@ -1107,9 +1107,12 @@ def _cq_l_bracket(params: dict[str, Any]) -> str:
     hole = float(params.get("hole_dia_mm", params.get("bolt_dia_mm", 6.0)))
     n = max(0, int(params.get("n_bolts", 4)))
 
-    # Hole positions: half on base plate, half on vertical leg
-    n_base = max(1, n // 2)
-    n_vert = max(1, n - n_base)
+    # Hole positions: split N between base plate and vertical leg.
+    # IMPORTANT: do NOT force a minimum of 1 per plate — that produced 2 holes
+    # total for n=0 or n=1 (contract validator: "hole count: got 2, expected N").
+    # For odd N, give the extra hole to the base plate.
+    n_base = n // 2 + (n % 2)   # ceil(n/2)
+    n_vert = n - n_base          # floor(n/2)
     margin = min(w * 0.15, 10.0)
 
     base_pts = [(round(-w/2 + margin + (w - 2*margin) * i / max(n_base-1, 1), 2), 0.0) for i in range(n_base)]
