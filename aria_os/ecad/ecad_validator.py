@@ -374,14 +374,21 @@ def run_erc(
         or "motor driver" in c.description.lower()
         for c in comps
     )
-    has_barrel = any(
-        "barrel" in c.description.lower() or "barrel" in c.value.lower()
-        or "12v" in c.description.lower() or "12v" in c.value.lower()
+    # Accept any high-current power input — barrel jack, XT30/XT60, screw
+    # terminal, etc. The original check only matched "barrel" which produced
+    # false-fails on drone-class boards using XT30/XT60 connectors.
+    _power_input_kw = ("barrel", "12v", "xt30", "xt60", "xt90", "xt-30",
+                       "xt-60", "screw terminal", "screw-terminal", "kf350",
+                       "deans", "ec3", "ec5", "andersen")
+    has_power_input = any(
+        any(kw in c.description.lower() or kw in c.value.lower()
+            for kw in _power_input_kw)
         for c in comps
     )
-    if has_vesc_or_motor and not has_barrel:
+    if has_vesc_or_motor and not has_power_input:
         errors.append(
-            "ERC: VESC/motor driver present but no barrel jack or 12 V input found in BOM"
+            "ERC: VESC/motor driver present but no high-current power input "
+            "(barrel jack / XT30 / XT60 / screw terminal / etc.) found in BOM"
         )
 
     passed = len(errors) == 0
@@ -428,8 +435,20 @@ def run_drc(
         return {"passed": True, "violations": violations}
 
     comps = _coerce_components(components)
-    KEEPOUT_MM = 5.0
-    JST_KEEPOUT_MM = 3.0
+    # Edge keepout scales with board size — IPC's 5 mm rule assumes a board
+    # large enough to support it. On small boards (drone FCs, fingertip PCBs)
+    # 5 mm + 5 mm = 10 mm of unusable space leaves no room. Use the smaller
+    # board dimension to scale.
+    _board_min = min(board_w_mm, board_h_mm)
+    if _board_min < 40.0:
+        KEEPOUT_MM = 1.5
+        JST_KEEPOUT_MM = 1.0
+    elif _board_min < 60.0:
+        KEEPOUT_MM = 3.0
+        JST_KEEPOUT_MM = 2.0
+    else:
+        KEEPOUT_MM = 5.0
+        JST_KEEPOUT_MM = 3.0
 
     # Build list of (ref, x, y, w, h) using .x_mm/.y_mm attributes or dict keys
     placed: list[tuple[str, float, float, float, float]] = []
@@ -488,9 +507,13 @@ def run_drc(
 
         for side in too_close:
             if is_jst:
-                violations.append(f"DRC: JST connector {ref} within 3 mm of board edge — {side}")
+                violations.append(
+                    f"DRC: JST connector {ref} within {JST_KEEPOUT_MM:.1f} mm of board edge — {side}"
+                )
             else:
-                violations.append(f"DRC: {ref} violates 5 mm edge keepout — {side}")
+                violations.append(
+                    f"DRC: {ref} violates {KEEPOUT_MM:.1f} mm edge keepout — {side}"
+                )
 
     passed = len(violations) == 0
     return {"passed": passed, "violations": violations}

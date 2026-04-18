@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>ARIA-OS Viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d1117; color: #cdd9e5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 13px; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  #toolbar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: #161b22; border-bottom: 1px solid #21262d; flex-shrink: 0; }
+  #toolbar h1 { font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 0.04em; margin-right: 8px; }
+  #file-input { display: none; }
+  label[for=file-input] { cursor: pointer; background: #21262d; border: 1px solid #30363d; color: #cdd9e5; padding: 4px 12px; border-radius: 6px; font-size: 12px; }
+  label[for=file-input]:hover { background: #2d333b; }
+  #fname { color: #58a6ff; font-size: 12px; font-family: monospace; }
+  #stats { margin-left: auto; font-size: 11px; color: #484f58; font-family: monospace; }
+  #hint { font-size: 11px; color: #484f58; }
+  #canvas-wrap { flex: 1; position: relative; }
+  canvas { display: block; width: 100% !important; height: 100% !important; }
+  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #484f58; font-size: 13px; pointer-events: none; }
+  #controls-hint { position: absolute; bottom: 12px; right: 14px; font-size: 10px; color: #30363d; line-height: 1.8; text-align: right; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <h1>ARIA-OS</h1>
+  <label for="file-input">Open STL</label>
+  <input type="file" id="file-input" accept=".stl">
+  <span id="fname"></span>
+  <span id="stats"></span>
+  <span id="hint">drag &amp; drop STL anywhere</span>
+</div>
+<div id="canvas-wrap">
+  <div id="loading">Drop an STL file or click Open STL</div>
+  <div id="controls-hint">Left drag — rotate<br>Right drag — pan<br>Scroll — zoom<br>Double-click — reset</div>
+</div>
+
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const wrap = document.getElementById('canvas-wrap');
+const loading = document.getElementById('loading');
+const fname = document.getElementById('fname');
+const stats = document.getElementById('stats');
+
+// Scene
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+wrap.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1117);
+scene.fog = new THREE.Fog(0x0d1117, 800, 2000);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
+camera.position.set(60, 45, 80);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.screenSpacePanning = false;
+
+// Lighting
+const ambientLight = new THREE.AmbientLight(0x8899aa, 0.6);
+scene.add(ambientLight);
+
+const sunLight = new THREE.DirectionalLight(0xffffff, 2.5);
+sunLight.position.set(80, 120, 60);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(2048, 2048);
+scene.add(sunLight);
+
+const fillLight = new THREE.DirectionalLight(0x4488ff, 0.8);
+fillLight.position.set(-60, 30, -40);
+scene.add(fillLight);
+
+const rimLight = new THREE.DirectionalLight(0xffffff, 0.5);
+rimLight.position.set(0, -40, -80);
+scene.add(rimLight);
+
+// Grid
+const grid = new THREE.GridHelper(300, 30, 0x21262d, 0x21262d);
+grid.position.y = 0;
+scene.add(grid);
+
+// Resize
+function resize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(wrap);
+resize();
+
+// Render loop
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+
+// Current mesh
+let mesh = null;
+function clearMesh() { if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); mesh = null; } }
+
+function loadGeometry(geo, name) {
+  clearMesh();
+  geo.computeVertexNormals();
+  geo.center();
+
+  // Auto-orient Z-up terrain (STL: X=easting, Y=northing, Z=elevation)
+  // Three.js is Y-up, so northing (Y) becomes height → model stands as a wall.
+  // Detect: model is much taller (Y) than deep (Z) and large enough to be terrain.
+  geo.computeBoundingBox();
+  const tmpSize = new THREE.Vector3();
+  geo.boundingBox.getSize(tmpSize);
+  if (tmpSize.y > 15 * tmpSize.z && tmpSize.y > 1000 && tmpSize.x > 200) {
+    geo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
+    geo.computeVertexNormals();
+  }
+
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x4f8ef7,
+    metalness: 0.15,
+    roughness: 0.45,
+    envMapIntensity: 0.8,
+  });
+
+  mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+
+  // Sit on grid
+  const box = new THREE.Box3().setFromObject(mesh);
+  mesh.position.y = -box.min.y;
+  scene.add(mesh);
+
+  // Fit camera
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const dist = maxDim * 2.2;
+  camera.position.set(dist * 0.7, dist * 0.55, dist);
+  controls.target.set(0, size.y / 2, 0);
+  controls.update();
+
+  // Scale fog, clipping, and grid to model size
+  scene.fog.near = dist * 0.8;
+  scene.fog.far = dist * 5.0;
+  camera.far = Math.max(10000, dist * 8);
+  camera.updateProjectionMatrix();
+  grid.scale.setScalar(Math.max(1, maxDim * 4 / 300));
+
+  // Stats
+  const verts = geo.attributes.position.count;
+  const faces = geo.index ? geo.index.count / 3 : verts / 3;
+  const sz = [size.x.toFixed(1), size.y.toFixed(1), size.z.toFixed(1)];
+  stats.textContent = `${sz[0]} × ${sz[1]} × ${sz[2]} mm  |  ${Math.round(faces).toLocaleString()} faces  |  ${Math.round(verts).toLocaleString()} verts`;
+  fname.textContent = name;
+  loading.style.display = 'none';
+}
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const loader = new STLLoader();
+    try {
+      const geo = loader.parse(e.target.result);
+      loadGeometry(geo, file.name);
+    } catch(err) {
+      loading.textContent = 'Failed to parse STL: ' + err.message;
+      loading.style.display = 'flex';
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// File input
+document.getElementById('file-input').addEventListener('change', e => {
+  if (e.target.files[0]) loadFile(e.target.files[0]);
+});
+
+// Drag and drop
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f && f.name.toLowerCase().endsWith('.stl')) loadFile(f);
+});
+
+// Double-click to reset
+renderer.domElement.addEventListener('dblclick', () => {
+  if (!mesh) return;
+  const box = new THREE.Box3().setFromObject(mesh);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const dist = maxDim * 2.2;
+  camera.position.set(dist * 0.7, dist * 0.55, dist);
+  controls.target.set(0, size.y / 2, 0);
+  controls.update();
+  scene.fog.near = dist * 0.8;
+  scene.fog.far = dist * 5.0;
+  camera.far = Math.max(10000, dist * 8);
+  camera.updateProjectionMatrix();
+});
+
+// Auto-load if ?stl= param provided (when served via HTTP)
+const urlStl = new URLSearchParams(location.search).get('stl');
+if (urlStl) {
+  loading.textContent = 'Loading ' + urlStl + '...';
+  fetch(urlStl)
+    .then(r => r.arrayBuffer())
+    .then(buf => {
+      const loader = new STLLoader();
+      loadGeometry(loader.parse(buf), urlStl.split('/').pop());
+    })
+    .catch(() => { loading.textContent = 'Could not fetch ' + urlStl; });
+}
+</script>
+</body>
+</html>

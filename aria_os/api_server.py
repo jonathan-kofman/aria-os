@@ -109,6 +109,20 @@ class GenerateResponse(BaseModel):
     error: Optional[str] = None
 
 
+class AskRequest(BaseModel):
+    question: str
+    level: str = "intermediate"
+    context: Optional[dict] = None
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("question must not be empty")
+        return stripped
+
+
 # ---------------------------------------------------------------------------
 # Backend availability helpers
 # ---------------------------------------------------------------------------
@@ -281,3 +295,53 @@ def generate(req: GenerateRequest) -> GenerateResponse:
         }
         _append_run(entry)
         raise HTTPException(status_code=500, detail=error)
+
+
+# ---------------------------------------------------------------------------
+# Teaching / Q&A endpoint
+# ---------------------------------------------------------------------------
+
+# Persistent engine for multi-turn conversation across API calls
+_qa_engine: Any = None
+
+
+def _get_qa_engine(level: str = "intermediate") -> Any:
+    """Get or create a persistent TeachingEngine for Q&A."""
+    global _qa_engine
+    if _qa_engine is None:
+        try:
+            from .teaching.engine import TeachingEngine, DifficultyLevel
+            _level_map = {
+                "beginner": DifficultyLevel.BEGINNER,
+                "intermediate": DifficultyLevel.INTERMEDIATE,
+                "expert": DifficultyLevel.EXPERT,
+            }
+            _qa_engine = TeachingEngine(
+                difficulty=_level_map.get(level, DifficultyLevel.INTERMEDIATE)
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Teaching engine init failed: {exc}")
+    return _qa_engine
+
+
+@app.post("/api/ask")
+def ask_question(req: AskRequest) -> dict:
+    """
+    Ask the ARIA manufacturing assistant a question.
+
+    - **question**: any manufacturing, design, or engineering question
+    - **level**: difficulty level (beginner, intermediate, expert)
+    - **context**: optional dict with current part context (goal, spec, material, etc.)
+    """
+    engine = _get_qa_engine(req.level)
+
+    # Inject any context provided by the frontend
+    if req.context:
+        engine.update_context_dict(req.context)
+
+    answer = engine.ask(req.question)
+    return {
+        "answer": answer,
+        "conversation_length": len(engine.conversation),
+        "teachings_count": len(engine.teachings),
+    }

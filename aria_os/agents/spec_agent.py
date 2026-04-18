@@ -62,6 +62,40 @@ class SpecAgent(BaseAgent):
         except Exception:
             regex_spec = {}
 
+        # Teach: what we extracted from the description
+        if regex_spec:
+            dims = {k: v for k, v in regex_spec.items() if k.endswith("_mm") and v is not None}
+            counts = {k: v for k, v in regex_spec.items() if k.startswith("n_") and v is not None}
+            if dims:
+                dim_str = ", ".join(f"{k.replace('_mm', '')}={v}mm" for k, v in dims.items())
+                self.explain(
+                    "spec",
+                    f"Extracted dimensions from your description: {dim_str}",
+                    reasoning="These come from pattern matching on your input text. "
+                    "Explicit dimensions always take priority over defaults or LLM guesses.",
+                    related_param=next(iter(dims)),
+                    tags=["geometry"],
+                )
+            if counts:
+                count_str = ", ".join(f"{k}={v}" for k, v in counts.items())
+                self.explain(
+                    "spec",
+                    f"Detected feature counts: {count_str}",
+                    reasoning="Count parameters drive the template's loop geometry "
+                    "(bolt patterns, blade arrays, fin arrays).",
+                    tags=["geometry"],
+                )
+            pt = regex_spec.get("part_type")
+            if pt:
+                self.explain_beginner(
+                    "spec",
+                    f"Identified part type as '{pt}' — this selects which parametric template to use",
+                    reasoning=f"Different part types have different required parameters and "
+                    f"manufacturing considerations. A '{pt}' has specific design rules.",
+                    related_param="part_type",
+                    tags=["routing"],
+                )
+
         # Try CEM resolution
         try:
             from ..cem_generator import resolve_and_compute
@@ -70,9 +104,20 @@ class SpecAgent(BaseAgent):
             if cem_result:
                 state.cem_params.update(cem_result)
                 # Inject CEM params into spec without overwriting user values
+                injected_cem = []
                 for k, v in cem_result.items():
                     if k != "part_family" and k not in state.spec:
                         state.spec[k] = v
+                        injected_cem.append(f"{k}={v}")
+                if injected_cem:
+                    self.explain(
+                        "spec",
+                        f"Physics model injected parameters: {', '.join(injected_cem)}",
+                        reasoning="The CEM (Characteristic Equation Method) uses physics models "
+                        "to derive geometry from load cases and material properties. "
+                        "These values ensure the part meets structural requirements.",
+                        tags=["physics", "safety"],
+                    )
         except Exception:
             pass
 

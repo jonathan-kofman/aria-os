@@ -669,9 +669,16 @@ def verify_stl(stl_path: str | Path, goal: str = "", render_png: bool = True) ->
         try:
             from aria_os.visual_verifier import _render_views
             OUT_DIR.mkdir(parents=True, exist_ok=True)
-            pngs = _render_views(str(path), goal or path.stem, OUT_DIR)
-            render_path = pngs[2] if len(pngs) >= 3 else (pngs[0] if pngs else None)
-            print(f"[verify] STL renders: {[Path(p).name for p in pngs]}")
+            # _render_views returns (paths, view_labels) — unpack, don't treat as list
+            result = _render_views(str(path), goal or path.stem, OUT_DIR)
+            if isinstance(result, tuple) and len(result) == 2:
+                pngs, _view_labels = result
+            else:
+                pngs = result  # pre-tuple API fallback
+            if not isinstance(pngs, (list, tuple)):
+                pngs = [pngs]
+            render_path = str(pngs[2]) if len(pngs) >= 3 else (str(pngs[0]) if pngs else None)
+            print(f"[verify] STL renders: {[Path(str(p)).name for p in pngs]}")
         except Exception as e:
             warnings.append(f"PNG render failed: {e}")
 

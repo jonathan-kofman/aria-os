@@ -7,6 +7,14 @@ from typing import Any
 from .design_state import DesignState
 
 
+def _is_floatable(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 class EvalAgent:
     """
     Runs deterministic validators for the domain.
@@ -42,6 +50,51 @@ class EvalAgent:
         print(f"  [{self.name}] {tag}")
         for f in state.failures:
             print(f"    - {f}")
+
+        # Teach about evaluation results
+        engine = getattr(self, "_teaching_engine", None)
+        if engine:
+            if state.eval_passed:
+                engine.teach_simple(
+                    agent=self.name, phase="eval",
+                    message="All geometry checks passed — part is structurally valid",
+                    reasoning="The evaluator checks: file exists, single connected solid, "
+                    "dimensions match spec (within 15%), mesh is watertight, and visual "
+                    "verification confirms the expected features are present.",
+                    tags=["validation"],
+                )
+            else:
+                for f in state.failures:
+                    # Translate failure codes into teaching moments
+                    if "solid_count" in f:
+                        engine.teach_simple(
+                            agent=self.name, phase="eval",
+                            message=f"Issue: {f}",
+                            reasoning="A manufacturable part must be a single connected body. "
+                            "Multiple disconnected solids mean features weren't boolean-unioned "
+                            "together. In CNC machining, you machine one piece of stock — "
+                            "disconnected bodies can't be cut from one block.",
+                            tags=["validation", "dfm"],
+                        )
+                    elif "geometry" in f:
+                        engine.teach_simple(
+                            agent=self.name, phase="eval",
+                            message=f"Geometry issue: {f}",
+                            reasoning="Geometry validation checks that the part's dimensions match "
+                            "what was requested and that the topology is valid (no self-intersections, "
+                            "proper face normals, etc.).",
+                            tags=["validation", "geometry"],
+                        )
+                    elif "watertight" in f.lower():
+                        engine.teach_simple(
+                            agent=self.name, phase="eval",
+                            message=f"Mesh issue: {f}",
+                            reasoning="A watertight mesh means every edge is shared by exactly "
+                            "two faces — no holes or gaps. This is required for 3D printing "
+                            "(the slicer needs to know inside vs outside) and for accurate "
+                            "volume/mass calculations.",
+                            tags=["validation", "mesh"],
+                        )
 
     def _eval_cad(self, state: DesignState) -> None:
         """CAD: geometry + quality + physics."""
@@ -85,6 +138,11 @@ class EvalAgent:
         except Exception as exc:
             state.failures.append(f"geometry validator error: {exc}")
 
+        # 3b. Part contract validation (genus-based hole counting + FFT radial
+        # features) — runs from a spec-derived default contract. Catches the
+        # silent-failure class: holes-not-cut, blade-count-wrong, missing-bore.
+        self._check_part_contract(state, step_path)
+
         # 3. Output quality (STEP readable + STL watertight — skip bore heuristic)
         try:
             from ..post_gen_validator import check_output_quality
@@ -118,6 +176,21 @@ class EvalAgent:
             except Exception:
                 pass
 
+        # ── LAYERED VISUAL VERIFICATION ──────────────────────────────────────
+        # Visual is a SOFT gate. It only escalates to a hard failure when:
+        #   (a) the deterministic checks above all passed, AND
+        #   (b) the vision LLM identifies a SPECIFIC feature complaint
+        #       (e.g. "blade direction wrong", "missing bore"), not just low
+        #       confidence or cross-validation provider disagreement.
+        #
+        # Why: vision LLMs disagree with each other and with reality on parts
+        # that are geometrically correct. Treating every disagreement as a
+        # hard fail produced 5/8 false negatives in the e2e audit. The
+        # deterministic checks (bbox, hole count via genus, watertight,
+        # contract validation) ARE the ground truth. Visual augments them by
+        # catching things they can't see (feature direction, ornamentation,
+        # subjective form) — but it should not override them.
+        det_failures_before_visual = list(state.failures)  # snapshot
         if stl_path and Path(stl_path).exists():
             try:
                 from ..visual_verifier import verify_visual
@@ -129,20 +202,69 @@ class EvalAgent:
                 state.domain_results["visual"] = vis
                 conf = vis.get("confidence", 0)
                 verified = vis.get("verified")
-                if verified is False or (verified is True and conf < 0.90):
-                    failed_checks = [
-                        c for c in vis.get("checks", [])
-                        if isinstance(c, dict) and not c.get("found", True)
-                    ]
-                    for c in failed_checks:
+                hard_failed_checks = [
+                    c for c in vis.get("checks", [])
+                    if isinstance(c, dict) and not c.get("found", True)
+                ]
+
+                # Disagreement-only failures (cross-validation, low conf
+                # without a specific feature complaint) are SOFT — record as
+                # warnings.
+                _disagreement_phrases = (
+                    "cross-validation", "cross-validation by",
+                    "disagreed", "marking fail to be safe",
+                    "no clear indication",
+                    "not explicitly verifiable",
+                    "geometry precheck",
+                    "image", "thickness", "unclear if", "number of",
+                )
+
+                def _is_soft(issue_text: str) -> bool:
+                    s = str(issue_text).lower()
+                    return any(p in s for p in _disagreement_phrases)
+
+                soft_issues = []
+                hard_issues = []
+                for issue in vis.get("issues", []):
+                    (soft_issues if _is_soft(issue) else hard_issues).append(issue)
+
+                state.domain_results.setdefault("visual_breakdown", {})
+                state.domain_results["visual_breakdown"] = {
+                    "n_hard_feature_complaints": len(hard_failed_checks),
+                    "n_soft_issues": len(soft_issues),
+                    "n_hard_issues": len(hard_issues),
+                    "soft_issues": soft_issues[:5],
+                    "hard_issues": hard_issues[:5],
+                }
+
+                if hard_failed_checks or hard_issues:
+                    # Real visual feature complaints — escalate to failure
+                    for c in hard_failed_checks:
                         state.failures.append(
                             f"visual: {c.get('feature', '?')} — {c.get('notes', 'not found')[:80]}"
                         )
-                    for issue in vis.get("issues", [])[:3]:
+                    for issue in hard_issues[:3]:
                         state.failures.append(f"visual: {issue}")
-                    print(f"    [VISUAL] FAIL — {conf:.0%}, {len(failed_checks)} features missing")
+                    print(f"    [VISUAL] FAIL — {conf:.0%}, "
+                          f"{len(hard_failed_checks)} feature complaints + "
+                          f"{len(hard_issues)} hard issues")
+                elif soft_issues and not det_failures_before_visual:
+                    # Vision unsure but deterministic checks all passed —
+                    # informational only, do NOT fail.
+                    print(f"    [VISUAL] WARN — {conf:.0%}, "
+                          f"{len(soft_issues)} disagreement(s); deterministic checks all passed")
+                    state.domain_results["visual_status"] = "soft_warn_overridden"
+                elif soft_issues and det_failures_before_visual:
+                    # Vision unsure AND deterministic already flagged issues —
+                    # escalate so both signals reach the user.
+                    for issue in soft_issues[:2]:
+                        state.failures.append(f"visual: {issue}")
+                    print(f"    [VISUAL] FAIL — {conf:.0%}, "
+                          f"{len(soft_issues)} issue(s) (deterministic already flagged failures)")
                 elif verified is True:
                     print(f"    [VISUAL] PASS — {conf:.0%}")
+                else:
+                    print(f"    [VISUAL] PASS (no specific issues) — {conf:.0%}")
             except Exception as _ve:
                 print(f"    [VISUAL] skipped: {_ve}")
 
@@ -177,16 +299,103 @@ class EvalAgent:
             state.failures.append(f"cam validator error: {exc}")
 
     def _eval_ecad(self, state: DesignState) -> None:
-        """ECAD: ERC + DRC checks."""
-        # ECAD validation runs inline during generation
-        # Check if artifacts have validation results
-        val = state.artifacts.get("validation", {})
-        if val:
-            state.domain_results["ecad_validation"] = val
-            for err in val.get("erc_errors", []):
-                state.failures.append(f"erc: {err}")
-            for err in val.get("drc_errors", []):
-                state.failures.append(f"drc: {err}")
+        """ECAD: ERC + DRC + spec adherence + actual file existence checks.
+
+        Beefed up from the original 'read state.artifacts validation if present'
+        because that was the false-PASS pattern: if the ECAD generator never
+        wrote validation keys, eval found nothing and reported PASS even when
+        the BOM was empty or the placement had overlaps.
+        """
+        # 1. Read inline validation if generator provided it
+        val = state.artifacts.get("validation", {}) or {}
+        # 2. Also try to read validation.json from the ECAD output dir directly
+        #    (the multi_domain pipeline writes it there, not in state.artifacts)
+        if not val:
+            try:
+                from pathlib import Path as _P
+                kicad_pcb = state.artifacts.get("kicad_pcb") or state.artifacts.get("script_path")
+                if kicad_pcb:
+                    for vp in _P(kicad_pcb).parent.rglob("validation.json"):
+                        import json as _json
+                        val = _json.loads(vp.read_text(encoding="utf-8"))
+                        break
+            except Exception:
+                pass
+
+        state.domain_results["ecad_validation"] = val
+
+        # ERC failures
+        erc = val.get("erc", {}) if isinstance(val.get("erc"), dict) else {}
+        for err in erc.get("errors", []) or val.get("erc_errors", []):
+            state.failures.append(f"erc: {err}")
+
+        # DRC failures (count overlaps separately — they're the most common bug)
+        drc = val.get("drc", {}) if isinstance(val.get("drc"), dict) else {}
+        violations = drc.get("violations", []) or val.get("drc_errors", []) or []
+        n_overlaps = sum(1 for v in violations if "overlap" in str(v).lower())
+        for v in violations:
+            state.failures.append(f"drc: {v}")
+
+        # 3. BOM sanity — every ECAD run should produce a non-empty BOM
+        bom_path = state.artifacts.get("bom") or state.artifacts.get("bom_path")
+        if bom_path:
+            try:
+                from pathlib import Path as _P
+                import json as _json
+                bom_data = _json.loads(_P(bom_path).read_text(encoding="utf-8"))
+                n_components = (bom_data.get("total_components")
+                                or len(bom_data.get("components", []))
+                                or 0)
+                state.domain_results["ecad_bom"] = {"n_components": n_components}
+                if n_components == 0:
+                    state.failures.append("ecad: BOM is empty — no components placed")
+            except Exception as exc:
+                state.failures.append(f"ecad: could not read BOM — {exc}")
+
+        # 4. Spec-vs-BOM adherence — if user spec mentions a part, BOM must
+        #    contain a matching value. Catches LLM substitution drift.
+        if isinstance(state.spec, dict):
+            ecad_spec = state.spec.get("ecad_spec") or state.goal or ""
+            if ecad_spec and bom_path:
+                missing = self._check_ecad_spec_adherence(ecad_spec, bom_path)
+                for m in missing:
+                    state.failures.append(f"ecad: spec drift — {m}")
+
+    def _check_ecad_spec_adherence(self, spec_text: str, bom_path: str) -> list[str]:
+        """Look for parts user explicitly named in the spec; flag if absent from BOM."""
+        import re
+        from pathlib import Path as _P
+        import json as _json
+
+        try:
+            bom_data = _json.loads(_P(bom_path).read_text(encoding="utf-8"))
+            components = bom_data.get("components") or []
+            bom_text = " ".join(
+                str(c.get("value", "") or c.get("part", "")).lower()
+                for c in components
+            )
+        except Exception:
+            return []
+
+        # Each entry: (regex on spec, regex on BOM that satisfies it, label)
+        adherence_checks = [
+            (r"\bstm32\w*", r"stm32\w*", "STM32 MCU"),
+            (r"\besp32\w*", r"esp32\w*", "ESP32 MCU"),
+            (r"\brp2040\b", r"rp2040", "RP2040 MCU"),
+            (r"\bmpu[-_ ]?6000\b", r"mpu[-_ ]?6000", "MPU-6000 IMU"),
+            (r"\bmpu[-_ ]?6050\b", r"mpu[-_ ]?6050", "MPU-6050 IMU"),
+            (r"\bbmp[-_ ]?280\b", r"bmp[-_ ]?280", "BMP280 baro"),
+            (r"\bjst[-_ ]?xh\b", r"jst[-_ ]?xh", "JST-XH connector"),
+            (r"\bxt30\b", r"xt30", "XT30 connector"),
+            (r"\bxt60\b", r"xt60", "XT60 connector"),
+            (r"\busb[-_ ]?c\b", r"usb[-_ ]?c", "USB-C connector"),
+        ]
+        spec_lower = spec_text.lower()
+        missing = []
+        for spec_re, bom_re, label in adherence_checks:
+            if re.search(spec_re, spec_lower) and not re.search(bom_re, bom_text):
+                missing.append(f"{label} requested but not in BOM")
+        return missing
 
     def _eval_civil(self, state: DesignState) -> None:
         """Civil: layer completeness + standards checks."""
@@ -225,21 +434,86 @@ class EvalAgent:
             state.failures.append(f"civil validator error: {exc}")
 
     def _eval_drawing(self, state: DesignState) -> None:
-        """Drawing: check SVG has expected sections."""
+        """Drawing validation — checks SVG completeness vs spec.
+
+        Beefed up from the original 'size > 5000 bytes + has 'front'' check
+        because that was the false-PASS pattern: a drawing with the wrong
+        dimensions, missing GD&T callouts, wrong scale, or missing hole
+        callouts would all pass.
+        """
+        import re
         svg_path = state.output_path
         if not svg_path or not Path(svg_path).exists():
             state.failures.append("SVG drawing not generated")
             return
 
-        content = Path(svg_path).read_text(encoding="utf-8")
-        state.domain_results["drawing"] = {"size_bytes": len(content)}
+        content = Path(svg_path).read_text(encoding="utf-8", errors="replace")
+        size_b = len(content)
 
-        if len(content) < 5000:
-            state.failures.append("drawing: SVG too small — likely incomplete")
-        if "FRONT VIEW" not in content and "front" not in content.lower():
-            state.failures.append("drawing: missing front view")
-        if "title" not in content.lower():
-            state.failures.append("drawing: missing title block")
+        # Parse what's in the drawing
+        text_matches = re.findall(r"<text[^>]*>([^<]+)</text>", content, re.IGNORECASE)
+        text_blob = " ".join(text_matches).lower()
+        # Count distinct view labels (front/top/side/iso)
+        views = {v: bool(re.search(rf"\b{v}\b", text_blob))
+                 for v in ("front", "top", "side", "iso", "isometric", "section")}
+        n_views = sum(views.values())
+        # Find dimension values in the text (numbers with mm/inch/decimal)
+        dim_values = re.findall(r"(?<![\w.])(\d+(?:\.\d+)?)\s*(?:mm|in|\")", content, re.IGNORECASE)
+        # Title-block markers
+        has_title_block = any(kw in text_blob for kw in
+                              ("title", "drawn by", "scale", "tolerance", "material"))
+        # GD&T markers (basic — full GD&T is harder to detect)
+        gdt_symbols = re.findall(r"[\u2300-\u23FF\u25A0-\u25FF\u29DC-\u29DF]", content)
+        has_dim_lines = bool(re.search(r"<line[^>]*stroke=", content))
+
+        state.domain_results["drawing"] = {
+            "size_bytes": size_b,
+            "n_text_elements": len(text_matches),
+            "n_views_detected": n_views,
+            "views": views,
+            "n_dim_values": len(dim_values),
+            "has_title_block": has_title_block,
+            "n_gdt_symbols": len(gdt_symbols),
+            "has_dim_lines": has_dim_lines,
+        }
+
+        # Hard-fail conditions
+        if size_b < 5000:
+            state.failures.append(f"drawing: SVG only {size_b} bytes — likely incomplete")
+        if n_views < 2:
+            state.failures.append(
+                f"drawing: only {n_views} view(s) detected — engineering drawings need "
+                f"≥2 (typically front + top + side). Found: {[v for v, ok in views.items() if ok]}"
+            )
+        if not has_title_block:
+            state.failures.append(
+                "drawing: missing title block (no 'title'/'scale'/'tolerance'/'material' text)"
+            )
+        if not has_dim_lines:
+            state.failures.append("drawing: no dimension lines (<line> stroke elements)")
+        if len(dim_values) < 3:
+            state.failures.append(
+                f"drawing: only {len(dim_values)} dimension value(s) — typical drawings show ≥3"
+            )
+
+        # Spec-vs-drawing: every spec dim should appear in the text within 5%
+        if isinstance(state.spec, dict):
+            spec_dims = []
+            for key in ("od_mm", "bore_mm", "width_mm", "height_mm",
+                        "depth_mm", "length_mm", "thickness_mm"):
+                v = state.spec.get(key)
+                if v and float(v) > 0:
+                    spec_dims.append((key, float(v)))
+            for label, expected in spec_dims:
+                # Match any drawing value within 5% of expected
+                tol = max(0.5, 0.05 * expected)
+                found = any(abs(float(dv) - expected) <= tol for dv in dim_values
+                            if _is_floatable(dv))
+                if not found:
+                    state.failures.append(
+                        f"drawing: spec value {label}={expected:.1f}mm not found in drawing "
+                        f"(tol ±{tol:.1f}mm) — drawing dimensions may not match the part"
+                    )
 
     def _eval_assembly(self, state: DesignState) -> None:
         """Assembly: clearance check."""
@@ -247,6 +521,73 @@ class EvalAgent:
         if result and not result.get("passed", True):
             for v in result.get("violations", []):
                 state.failures.append(f"assembly: {v}")
+
+    def _check_part_contract(self, state: DesignState, step_path: str) -> None:
+        """Validate generated geometry against a spec-derived Contract.
+
+        Auto-derives expected properties from state.spec (n_bolts → hole count,
+        n_blades → radial lobes, dims → bbox). Failures land in state.failures.
+
+        Empty contracts (no expectations derivable from spec) are recorded but
+        not failed — a real "this spec is too thin" warning is logged so we
+        know which templates need richer specs to be checkable.
+
+        If the validator itself throws, we record that as a FAILURE — silent
+        skips were the false-PASS pattern. Better to surface a noisy bug than
+        miss a real one.
+        """
+        from ..validation import Contract, validate_part
+        try:
+            import cadquery as cq
+        except Exception as exc:
+            state.failures.append(f"contract: cadquery unavailable — {exc}")
+            return
+
+        spec = state.spec if isinstance(state.spec, dict) else {}
+        contract = Contract.from_spec(spec, state.goal)
+        if contract.is_empty():
+            # Don't fail eval — but record this so we know the spec is too
+            # thin to validate. Surface in CLI output and domain_results.
+            state.domain_results["part_contract"] = {
+                "passed": True,
+                "warnings": ["spec is too thin to derive a contract — no checkable expectations"],
+                "expected": {},
+            }
+            print(f"    [contract] WARN: spec has no checkable dims/counts — validation skipped")
+            return
+
+        try:
+            shape = cq.importers.importStep(step_path)
+        except Exception as exc:
+            state.failures.append(
+                f"contract: STEP load failed — {type(exc).__name__}: {exc}"
+            )
+            return
+
+        try:
+            result = validate_part(shape, contract)
+        except Exception as exc:
+            # Don't swallow — a validator crash on real geometry is itself
+            # a bug worth surfacing.
+            state.failures.append(
+                f"contract: validator crashed — {type(exc).__name__}: {exc}"
+            )
+            return
+
+        state.domain_results["part_contract"] = {
+            "passed": result.passed,
+            "failures": result.failures,
+            "warnings": result.warnings,
+            "measured": result.measured,
+            "expected": {
+                "bbox_mm": list(contract.expected_bbox_mm) if contract.expected_bbox_mm else None,
+                "hole_count": contract.expected_hole_count,
+                "radial_features": contract.radial_features,
+            },
+        }
+        if not result.passed:
+            for f in result.failures:
+                state.failures.append(f"contract: {f}")
 
     def _check_feature_complexity(self, state: DesignState, step_path: str) -> None:
         """

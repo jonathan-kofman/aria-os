@@ -1113,7 +1113,12 @@ def _cq_l_bracket(params: dict[str, Any]) -> str:
     margin = min(w * 0.15, 10.0)
 
     base_pts = [(round(-w/2 + margin + (w - 2*margin) * i / max(n_base-1, 1), 2), 0.0) for i in range(n_base)]
-    vert_pts = [(round(-w/2 + margin + (w - 2*margin) * i / max(n_vert-1, 1), 2), round(leg_h * 0.5, 2)) for i in range(n_vert)]
+    # Vertical leg holes: position at 0 in local frame (= center of leg face).
+    # The leg box is centered at origin, so local Y on the <Y face corresponds
+    # to world Z, with local Y=0 at the leg's vertical center. Using
+    # leg_h*0.5 here previously placed holes at the top edge, creating
+    # open-top slots rather than through-holes.
+    vert_pts = [(round(-w/2 + margin + (w - 2*margin) * i / max(n_vert-1, 1), 2), 0.0) for i in range(n_vert)]
 
     return f"""
 import cadquery as cq
@@ -1124,33 +1129,31 @@ T = {t}
 LEG_H = {leg_h} # vertical leg height
 HOLE_DIA = {hole}
 
-# Base plate (horizontal leg)
+# Base plate (horizontal leg) — cut holes BEFORE union so face selection is unambiguous
 base = cq.Workplane("XY").box(W, H, T)
-
-# Vertical leg — starts at the back edge of base, goes up
-vert = (cq.Workplane("XY")
-    .workplane(offset=T/2)
-    .center(0, -H/2 + T/2)
-    .box(W, T, LEG_H)
-    .translate((0, 0, LEG_H/2)))
-
-result = base.union(vert)
-
-# Holes in base plate — cut through top face (Z-axis)
 base_holes = {repr(base_pts)}
 if base_holes:
-    result = (result
+    base = (base
         .faces(">Z").workplane()
         .pushPoints(base_holes)
         .hole(HOLE_DIA))
 
-# Holes in vertical leg — cut through back face (Y-axis, most negative Y face)
+# Vertical leg — cut holes in local frame BEFORE translating/unioning.
+# Using the separate solid avoids ambiguous face selection after boolean union
+# (base and leg share the Y=-H/2 plane, so .faces("<Y") on the union is ambiguous).
+vert = cq.Workplane("XY").box(W, T, LEG_H)  # centered at origin, will be translated
 vert_hole_pts = {repr(vert_pts)}
 if vert_hole_pts:
-    result = (result
+    # In the local frame, the leg's thickness axis is Y; "front" face is at Y=-T/2
+    vert = (vert
         .faces("<Y").workplane()
-        .pushPoints(vert_hole_pts)
+        .pushPoints([(x, z) for (x, z) in vert_hole_pts])
         .hole(HOLE_DIA))
+
+# Position the leg at the back edge of the base, standing upright
+vert = vert.translate((0, -H/2 + T/2, LEG_H/2 + T/2))
+
+result = base.union(vert)
 
 bb = result.val().BoundingBox()
 print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
@@ -3211,11 +3214,6 @@ if _tooth_solids:
             pass
 else:
     result = blank
-
-if STEP_PATH:
-    import cadquery as _cq_e; _cq_e.exporters.export(result, STEP_PATH)
-if STL_PATH:
-    import cadquery as _cq_e2; _cq_e2.exporters.export(result, STL_PATH)
 
 bb = result.val().BoundingBox()
 print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")

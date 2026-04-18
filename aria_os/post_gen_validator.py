@@ -383,7 +383,7 @@ def check_and_repair_stl(stl_path: str) -> dict[str, Any]:
         result["watertight_after"] = True
         return result
 
-    # Attempt repair
+    # Attempt repair — trimesh first (cheap), then MeshLib (heavier but stronger)
     result["repair_attempted"] = True
     try:
         trimesh.repair.fill_holes(mesh)
@@ -393,9 +393,30 @@ def check_and_repair_stl(stl_path: str) -> dict[str, Any]:
         if mesh.is_watertight:
             mesh.export(str(p))
             result["repaired"] = True
+            return result
     except Exception as exc:
-        result["error"] = f"Repair failed: {exc}"
+        result["error"] = f"trimesh repair failed: {exc}"
         result["watertight_after"] = False
+
+    # Trimesh couldn't fix it. Fall back to MeshLib if available — its
+    # self-intersection / degeneracy fixes are stronger than trimesh's.
+    try:
+        from manufacturing_core.knowledge.mesh_qa import (
+            is_available as _ml_available,
+            repair_mesh as _ml_repair,
+        )
+        if _ml_available():
+            ml_report = _ml_repair(stl_path, output_path=stl_path)
+            if ml_report.output_watertight:
+                result["watertight_after"] = True
+                result["repaired"] = True
+                result["meshlib_used"] = True
+                result["meshlib_holes_filled"] = ml_report.holes_filled
+                result["meshlib_self_intersections_fixed"] = ml_report.self_intersections_fixed
+            elif ml_report.error:
+                result["meshlib_error"] = ml_report.error
+    except Exception as exc:
+        result["meshlib_error"] = f"meshlib fallback raised: {exc}"
 
     return result
 

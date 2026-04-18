@@ -482,14 +482,24 @@ def extract_spec(description: str) -> dict[str, Any]:
 
     # --- 2D WxH box notation (e.g. "200x200mm" square plate, "100x60mm" rectangle) ---
     # Only runs when the 3D pattern didn't already fire
-    if "width_mm" not in spec or "depth_mm" not in spec:
+    if "width_mm" not in spec or "depth_mm" not in spec or "height_mm" not in spec:
         _box2_m = re.search(
             r"(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX×]\s*(\d+(?:\.\d+)?)\s*mm(?!\s*[xX×])",
             text, re.I,
         )
         if _box2_m:
-            spec.setdefault("width_mm",  float(_box2_m.group(1)))
-            spec.setdefault("depth_mm",  float(_box2_m.group(2)))
+            box_w = float(_box2_m.group(1))
+            box_h = float(_box2_m.group(2))
+            spec.setdefault("width_mm", box_w)
+            # If depth_mm was already set explicitly via prose ("20mm deep base"),
+            # the 2D pattern's second value is more naturally the height. This
+            # prevents losing dimensions like "120x80mm with 20mm deep base"
+            # where 80 should become height (80mm tall leg), not silently
+            # dropped because depth was already 20.
+            if "depth_mm" in spec and spec["depth_mm"] != box_h:
+                spec.setdefault("height_mm", box_h)
+            else:
+                spec.setdefault("depth_mm", box_h)
 
     # --- Radius → diameter (only when OD not yet found) ---
     if "od_mm" not in spec and "diameter_mm" not in spec:
@@ -508,18 +518,35 @@ def extract_spec(description: str) -> dict[str, Any]:
         spec.setdefault("n_bolts", int(_bolt_combo.group(1)))
         spec.setdefault("bolt_dia_mm", float(_bolt_combo.group(2)))
 
+    # Word-boundary anchored — `\b(\d+)` prevents matching "10" inside "M10"
     n_bolts = _find_int([
-        r"(\d+)\s*[xX]\s*[mM]\d+\s+bolt",
-        r"(\d+)\s+[mM]\d+\s+bolt",                 # "4 M8 bolt"
-        r"(\d+)\s+bolt[s\s]",
-        r"(\d+)-bolt",
+        r"\b(\d+)\s*[xX]\s*[mM]\d+\s+bolt",
+        r"\b(\d+)\s+[mM]\d+\s+bolt",                 # "4 M8 bolt"
+        r"\b(\d+)\s+[mM]\d+\s+holes?\b",            # "4 M10 holes" (size suffix)
+        r"\b(\d+)\s+bolt[s\s]",
+        r"\b(\d+)-bolt",
         r"bolt[s]?\s*[=:]\s*(\d+)",
-        r"(\d+)\s+holes?\b",                        # "4 holes"
-        r"(\d+)\s*[xX]\s+\w+\s+\w*\s*holes?\b",   # "3x planet pin holes"
-        r"(\d+)\s*[xX]\s+\w+\s+holes?\b",          # "3x mounting holes"
+        r"\b(\d+)\s+holes?\b",                        # "4 holes" — \b prevents "M10 holes" → 10
+        r"\b(\d+)\s*[xX]\s+\w+\s+\w*\s*holes?\b",   # "3x planet pin holes"
+        r"\b(\d+)\s*[xX]\s+\w+\s+holes?\b",          # "3x mounting holes"
     ])
     if n_bolts and "n_bolts" not in spec:
         spec["n_bolts"] = n_bolts
+
+    # Sum-of-groups pattern: "4 M10 holes ... 2 M8 holes" → n_bolts=6
+    # Cautious — only sum when groups have DISTINCT thread sizes (the common
+    # L-bracket pattern of "4 M10 + 2 M8"). Without this guard the previous
+    # version over-counted "8 holes total, 4 on the base, 4 on the side"
+    # (would have summed to 16).
+    _sized_hole_groups = re.findall(
+        r"\b(\d+)\s+[mM](\d+(?:\.\d+)?)\s+(?:bolt\s+)?holes?\b", text, re.I
+    )
+    if len(_sized_hole_groups) > 1:
+        sizes = [s for _, s in _sized_hole_groups]
+        # Only sum when every size is unique — guarantees groups don't overlap
+        # in the same fastener category.
+        if len(set(sizes)) == len(sizes):
+            spec["n_bolts"] = sum(int(c) for c, _ in _sized_hole_groups)
 
     # "bolt circle 100mm radius" — value IS already a radius
     _bc_rad = re.search(r"bolt\s+circle\s+(\d+(?:\.\d+)?)\s*mm\s+radius\b", text, re.I)

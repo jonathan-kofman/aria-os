@@ -74,13 +74,63 @@ def reconstruct(
                        f"[Reconstruct] Generated: {result_bbox['x']}x{result_bbox['y']}x{result_bbox['z']}mm",
                        {"bbox": result_bbox})
 
+    # Phase 14: deviation map — compare reconstructed STL against original scan
+    deviation = _compute_deviation(cleaned_mesh_path, stl_path)
+
     return {
         "script_path": str(script_path),
         "step_path": step_path if Path(step_path).exists() else "",
         "stl_path": stl_path if Path(stl_path).exists() else "",
         "bbox": result_bbox,
         "error": error,
+        "deviation": deviation,
     }
+
+
+def _compute_deviation(original_mesh_path: str, reconstructed_stl_path: str) -> dict | None:
+    """
+    Measure how well the parametric reconstruction matches the original scan.
+
+    Uses MeshLib via manufacturing_core.knowledge.mesh_qa when available.
+    Falls back silently if meshlib isn't installed.
+    """
+    try:
+        if not Path(reconstructed_stl_path).is_file():
+            return None
+        from manufacturing_core.knowledge.mesh_qa import (
+            is_available as _ml_available,
+            deviation_map as _ml_deviation,
+        )
+        if not _ml_available():
+            return None
+        report = _ml_deviation(original_mesh_path, reconstructed_stl_path)
+        if report.error:
+            event_bus.emit("scan", f"[Reconstruct] deviation skipped: {report.error}")
+            return None
+        event_bus.emit(
+            "scan",
+            f"[Reconstruct] Deviation vs scan: max={report.max_deviation_mm:.2f}mm "
+            f"mean={report.mean_deviation_mm:.2f}mm rms={report.rms_deviation_mm:.2f}mm "
+            f"({report.n_outliers}/{report.n_vertices_compared} outliers)",
+            {
+                "max_mm": report.max_deviation_mm,
+                "mean_mm": report.mean_deviation_mm,
+                "rms_mm": report.rms_deviation_mm,
+                "n_vertices": report.n_vertices_compared,
+                "n_outliers": report.n_outliers,
+            },
+        )
+        return {
+            "max_deviation_mm": round(report.max_deviation_mm, 3),
+            "mean_deviation_mm": round(report.mean_deviation_mm, 3),
+            "rms_deviation_mm": round(report.rms_deviation_mm, 3),
+            "n_vertices_compared": report.n_vertices_compared,
+            "n_outliers": report.n_outliers,
+            "outlier_threshold_mm": round(report.outlier_threshold_mm, 3),
+        }
+    except Exception as exc:
+        event_bus.emit("scan", f"[Reconstruct] deviation failed: {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------

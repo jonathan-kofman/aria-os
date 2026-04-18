@@ -767,25 +767,65 @@ def parse_components(description: str) -> List[Component]:
             width_mm=3.5, height_mm=6.5,
             description="3.3 V LDO regulator",
         ))
-    if re.search(r"\bbattery\b|\blipo\b", lower):
+    if re.search(r"\bbattery\b|\blipo\b|\bxt30\b|\bxt60\b|\bjst\b", lower):
+        # Detect requested connector variant — default JST-PH, upgrade to XH/XT if spec says so
+        is_xh  = bool(re.search(r"\bjst[-_ ]?xh\b|\bxh[-_ ]?connector\b", lower))
+        is_xt30 = bool(re.search(r"\bxt30\b", lower))
+        is_xt60 = bool(re.search(r"\bxt60\b", lower))
+
+        if is_xt60:
+            val, fp, w, h, desc = (
+                "XT60-2P",
+                "Connector_Amass:Amass_XT60-M_1x02_P7.20mm_Horizontal",
+                15.0, 8.0,
+                "XT60 LiPo battery connector (high-current, drone FC)",
+            )
+        elif is_xt30:
+            val, fp, w, h, desc = (
+                "XT30-2P",
+                "Connector_Amass:Amass_XT30-M_1x02_P4.50mm_Horizontal",
+                10.5, 6.5,
+                "XT30 LiPo battery connector",
+            )
+        elif is_xh:
+            val, fp, w, h, desc = (
+                "JST-XH-2P",
+                "Connector_JST:JST_XH_B2B-XH-A_1x02_P2.50mm_Vertical",
+                7.5, 6.5,
+                "LiPo battery connector (JST-XH 2-pin)",
+            )
+        else:
+            val, fp, w, h, desc = (
+                "JST-PH-2P",
+                "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal",
+                6.0, 5.5,
+                "LiPo battery connector (JST-PH 2-pin)",
+            )
         components.append(Component(
             ref=next_ref("J"),
-            value="JST-PH-2P",
-            footprint="Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal",
-            width_mm=6.0, height_mm=5.5,
-            description="LiPo battery connector (JST-PH 2-pin)",
+            value=val, footprint=fp,
+            width_mm=w, height_mm=h,
+            description=desc,
         ))
-        components.append(Component(
-            ref=next_ref("U"),
-            value="TP4056",
-            footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
-            width_mm=4.0, height_mm=5.0,
-            description="LiPo BMS / charger IC",
-        ))
+        # Only add charger IC if this is a low-current battery (JST-PH/XH).
+        # Drone FCs with XT30/XT60 don't charge via the FC — skip TP4056.
+        if not (is_xt30 or is_xt60):
+            components.append(Component(
+                ref=next_ref("U"),
+                value="TP4056",
+                footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+                width_mm=4.0, height_mm=5.0,
+                description="LiPo BMS / charger IC",
+            ))
 
-    # ── Ensure STM32/ESP32 always have a 3.3V LDO if not already added ────────
-    has_mcu = re.search(r"\bstm32\b|\besp32\b|\barduino\b", lower)
-    if has_mcu and not any("ams1117" in c.value.lower() for c in components):
+    # ── Ensure STM32/ESP32/RP2040 always have a 3.3V LDO if not already added ──
+    # Match variants: stm32f405, esp32s3, esp32-c3, rp2040, atmega328, etc.
+    has_mcu = re.search(r"\bstm32\w*|\besp32\w*|\barduino\b|\brp2040\b|\batmega\w*", lower)
+    if has_mcu and not any(
+        kw in c.value.lower() or kw in c.description.lower()
+        for c in components
+        for kw in ("ams1117", "ap2112", "me6211", "ldo", "3.3", "regulator")
+    ):
         components.append(Component(
             ref=next_ref("U"),
             value="AMS1117-3.3",
@@ -862,13 +902,77 @@ def parse_components(description: str) -> List[Component]:
             width_mm=5.0, height_mm=5.0,
             description="Hall effect sensor",
         ))
-    if re.search(r"\bimu\b|\bmpu6050\b", lower):
+    # MPU-6000 / 6050 / 9250 / ICM-20602 / BMI270 / LSM6DS3 — all IMUs
+    _imu_value = None
+    if re.search(r"\bmpu[-_ ]?6000\b", lower):
+        _imu_value = "MPU-6000"
+    elif re.search(r"\bmpu[-_ ]?9250\b", lower):
+        _imu_value = "MPU-9250"
+    elif re.search(r"\bicm[-_ ]?20602\b", lower):
+        _imu_value = "ICM-20602"
+    elif re.search(r"\bbmi[-_ ]?270\b", lower):
+        _imu_value = "BMI270"
+    elif re.search(r"\blsm6ds3\b", lower):
+        _imu_value = "LSM6DS3"
+    elif re.search(r"\bmpu[-_ ]?6050\b|\bimu\b|\b6[-_ ]?axis\b", lower):
+        _imu_value = "MPU-6050"
+    if _imu_value:
         components.append(Component(
             ref=next_ref("U"),
-            value="MPU-6050",
+            value=_imu_value,
             footprint="Package_LGA:LGA-24_4x4mm_P0.5mm",
             width_mm=4.0, height_mm=4.0,
-            description="MPU-6050 6-axis IMU",
+            description=f"{_imu_value} 6-axis IMU",
+        ))
+
+    # Barometer — BMP280 / BMP180 / MS5611
+    _baro_value = None
+    if re.search(r"\bbmp[-_ ]?280\b", lower):
+        _baro_value = "BMP280"
+    elif re.search(r"\bbmp[-_ ]?180\b", lower):
+        _baro_value = "BMP180"
+    elif re.search(r"\bms5611\b", lower):
+        _baro_value = "MS5611"
+    elif re.search(r"\bbarometer\b|\baltimeter\b", lower):
+        _baro_value = "BMP280"
+    if _baro_value:
+        components.append(Component(
+            ref=next_ref("U"),
+            value=_baro_value,
+            footprint="Package_LGA:LGA-8_2x2.5mm_P0.65mm",
+            width_mm=2.5, height_mm=2.0,
+            description=f"{_baro_value} barometric pressure sensor",
+        ))
+
+    # Magnetometer — HMC5883 / QMC5883
+    if re.search(r"\bhmc5883\b|\bqmc5883\b|\bmagnetometer\b|\bcompass\b", lower):
+        mag_value = "QMC5883L" if "qmc" in lower else "HMC5883L"
+        components.append(Component(
+            ref=next_ref("U"),
+            value=mag_value,
+            footprint="Package_LGA:LGA-16_3x3mm_P0.5mm",
+            width_mm=3.0, height_mm=3.0,
+            description=f"{mag_value} 3-axis magnetometer",
+        ))
+
+    # GPS module (M8N / M9N / NEO-6M / NEO-M8N)
+    if re.search(r"\bgps\b|\bneo[-_ ]?6m\b|\bneo[-_ ]?m8n\b|\bublox\b", lower):
+        components.append(Component(
+            ref=next_ref("J"),
+            value="JST-GH-6P-GPS",
+            footprint="Connector_JST:JST_GH_SM06B-GHS-TB_1x06-1MP_P1.25mm_Vertical",
+            width_mm=8.0, height_mm=4.5,
+            description="GPS module connector (UART + power, JST-GH 6-pin)",
+        ))
+
+    # ESC / PWM motor output header (drone FC)
+    if re.search(r"\besc\b|\bpwm[-_ ]?out(put)?\b|\b4[-_ ]?in[-_ ]?1\b|\bbrushless\b", lower):
+        components.append(Component(
+            ref=next_ref("J"),
+            value="PWM-8P-ESC",
+            footprint="Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+            width_mm=20.5, height_mm=2.54,
+            description="ESC/PWM motor output header (4x signal + GND)",
         ))
 
     # ── Motor drivers ─────────────────────────────────────────────────────────
@@ -984,8 +1088,37 @@ def _llm_enrich_components(
     missing parts or pin connectivity improvements.
 
     Falls back gracefully to the regex-only list on any error.
+
+    Cached: same (description + initial component list) → same enrichment
+    decision. Cold call hits the LLM API; warm call returns instantly. Cache
+    file lives in outputs/.cache/ecad_llm/.
     """
     component_summary = ", ".join(f"{c.ref}={c.value}" for c in components)
+
+    # ── Cache lookup ────────────────────────────────────────────────────────
+    import hashlib
+    import json as _json
+    try:
+        from aria_os.caching import _cache_root
+        cache_dir = _cache_root() / "ecad_llm"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_key = hashlib.sha256(
+            f"{description}|{component_summary}".encode()
+        ).hexdigest()[:16]
+        cache_path = cache_dir / f"{cache_key}.json"
+        if cache_path.is_file():
+            try:
+                cached = _json.loads(cache_path.read_text(encoding="utf-8"))
+                # Reconstruct components from cached refs (we cache the FINAL
+                # list as ref + value + footprint + width/height + description)
+                reconstructed = [Component(**c) for c in cached.get("components", [])]
+                if reconstructed:
+                    print(f"[ECAD] LLM enrichment: cache hit ({len(reconstructed)} components)")
+                    return reconstructed
+            except Exception:
+                pass  # cache corrupted — re-enrich
+    except Exception:
+        cache_path = None  # cache disabled — proceed without caching
 
     # Try Ollama first (local, fast)
     try:
@@ -1042,6 +1175,20 @@ def _llm_enrich_components(
     except Exception:
         pass
 
+    # ── Cache write ─────────────────────────────────────────────────────────
+    if cache_path is not None:
+        try:
+            cache_path.write_text(_json.dumps({
+                "components": [
+                    {"ref": c.ref, "value": c.value, "footprint": c.footprint,
+                     "width_mm": c.width_mm, "height_mm": c.height_mm,
+                     "description": c.description}
+                    for c in components
+                ]
+            }, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
     return components
 
 
@@ -1086,8 +1233,17 @@ def place_components(components: List[Component], board_w: float, board_h: float
     Guarantees at least 5 mm clearance between every pair of components and
     keeps everything inside the board margins.
     """
-    MARGIN   = 5.0          # board-edge keepout
-    MIN_GAP  = 5.0          # minimum clearance between components
+    # Small boards (drone FCs, fingertip PCBs) need tighter margins to fit components.
+    _board_min = min(board_w, board_h)
+    if _board_min < 40.0:
+        MARGIN  = 2.0
+        MIN_GAP = 1.5
+    elif _board_min < 60.0:
+        MARGIN  = 3.0
+        MIN_GAP = 3.0
+    else:
+        MARGIN  = 5.0
+        MIN_GAP = 5.0
     placed: List[Component] = []
 
     # ── Classify components into functional groups ───────────────────────
@@ -1186,9 +1342,51 @@ def place_components(components: List[Component], board_w: float, board_h: float
                     return
             radius += step
 
-        # Last resort: place at clamped position even if overlapping
-        comp.x_mm = best_x
-        comp.y_mm = best_y
+        # Dense grid sweep across entire usable board before accepting overlap.
+        # Picks the position with the *largest* clearance to every placed neighbor,
+        # falling back to the position with the smallest overlap area if all
+        # candidate cells collide.
+        gx = MARGIN
+        best_pos = (best_x, best_y)
+        best_overlap_area = float("inf")
+        grid_step = max(0.5, MIN_GAP * 0.5)
+        while gx <= max_x:
+            gy = MARGIN
+            while gy <= max_y:
+                comp.x_mm = gx
+                comp.y_mm = gy
+                if not _has_overlap(comp, placed, MIN_GAP):
+                    placed.append(comp)
+                    return
+                # Track overlap area so last resort is the least-bad option
+                area = 0.0
+                for o in placed:
+                    ox = max(0.0, min(comp.x_mm + comp.width_mm, o.x_mm + o.width_mm)
+                             - max(comp.x_mm, o.x_mm))
+                    oy = max(0.0, min(comp.y_mm + comp.height_mm, o.y_mm + o.height_mm)
+                             - max(comp.y_mm, o.y_mm))
+                    area += ox * oy
+                if area < best_overlap_area:
+                    best_overlap_area = area
+                    best_pos = (gx, gy)
+                gy += grid_step
+            gx += grid_step
+
+        # Retry grid sweep with zero clearance — tight packing beats overlap.
+        gx = MARGIN
+        while gx <= max_x:
+            gy = MARGIN
+            while gy <= max_y:
+                comp.x_mm = gx
+                comp.y_mm = gy
+                if not _has_overlap(comp, placed, 0.0):
+                    placed.append(comp)
+                    return
+                gy += grid_step
+            gx += grid_step
+
+        # True last resort: minimum-overlap position.
+        comp.x_mm, comp.y_mm = best_pos
         placed.append(comp)
 
     # ── 1. MCU / main IC — centred on board ──────────────────────────────

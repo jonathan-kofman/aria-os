@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARIA-OS — Feature Gallery</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #080b0f;
+    color: #c9d1d9;
+    font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────────── */
+  header {
+    background: linear-gradient(180deg, #0d1117 0%, #0a0e14 100%);
+    border-bottom: 1px solid #21262d;
+    padding: 0 32px;
+    height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    backdrop-filter: blur(8px);
+  }
+  .header-left { display: flex; align-items: center; gap: 20px; }
+  .logo {
+    font-size: 17px;
+    font-weight: 700;
+    color: #f0f6fc;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .logo span { color: #388bfd; }
+  .header-subtitle {
+    color: #484f58;
+    font-size: 12px;
+    font-weight: 500;
+    padding-left: 20px;
+    border-left: 1px solid #21262d;
+  }
+  .header-right { display: flex; align-items: center; gap: 10px; }
+  .badge {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    border-radius: 20px;
+    text-transform: uppercase;
+  }
+  .badge-green { background: #0d2e1a; color: #3fb950; border: 1px solid #1f5c2e; }
+  .badge-blue  { background: #0d1f33; color: #58a6ff; border: 1px solid #1f3f6f; }
+
+  /* ── Hero strip ──────────────────────────────────────────────────────── */
+  .hero {
+    background: linear-gradient(135deg, #0d1117 0%, #0f1924 50%, #0d1117 100%);
+    border-bottom: 1px solid #21262d;
+    padding: 28px 32px 24px;
+    display: flex;
+    align-items: flex-start;
+    gap: 40px;
+  }
+  .hero-title {
+    font-size: 26px;
+    font-weight: 700;
+    color: #f0f6fc;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+  }
+  .hero-desc {
+    margin-top: 8px;
+    font-size: 13px;
+    color: #7d8590;
+    max-width: 580px;
+    line-height: 1.6;
+  }
+  .hero-stats {
+    display: flex;
+    gap: 32px;
+    margin-top: 16px;
+  }
+  .stat-item { text-align: center; }
+  .stat-num {
+    display: block;
+    font-size: 22px;
+    font-weight: 700;
+    color: #388bfd;
+    line-height: 1;
+  }
+  .stat-label {
+    display: block;
+    font-size: 10px;
+    color: #484f58;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-top: 4px;
+  }
+
+  /* ── Grid ────────────────────────────────────────────────────────────── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    padding: 28px 32px;
+    max-width: 1440px;
+    margin: 0 auto;
+  }
+  @media (max-width: 1200px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 720px)  { .grid { grid-template-columns: 1fr; } }
+
+  /* ── Card ────────────────────────────────────────────────────────────── */
+  .card {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 10px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
+  }
+  .card:hover {
+    border-color: #388bfd55;
+    box-shadow: 0 0 0 1px #388bfd22, 0 8px 32px rgba(0,0,0,0.5);
+    transform: translateY(-2px);
+  }
+
+  /* ── Preview area ────────────────────────────────────────────────────── */
+  .preview {
+    width: 100%;
+    height: 260px;
+    background: #010409;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-bottom: 1px solid #21262d;
+  }
+  .preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+  .preview.multi {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: #21262d;
+  }
+  .preview.multi img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .preview.drawing {
+    background: #f5f5f0;
+  }
+  .preview.drawing img {
+    object-fit: contain;
+    padding: 6px;
+    width: 100%;
+    height: 100%;
+  }
+  .preview.code-preview {
+    background: #010409;
+    align-items: flex-start;
+    justify-content: flex-start;
+    padding: 14px 16px;
+    overflow-y: auto;
+    flex-direction: column;
+  }
+  .preview.code-preview pre {
+    font-family: 'Cascadia Code', 'JetBrains Mono', 'Consolas', monospace;
+    font-size: 11.5px;
+    color: #8b949e;
+    white-space: pre-wrap;
+    line-height: 1.7;
+    width: 100%;
+  }
+  .kw   { color: #79c0ff; }
+  .val  { color: #a5d6ff; }
+  .num  { color: #e3b341; }
+  .ok   { color: #3fb950; }
+  .warn { color: #d29922; }
+  .sep  { color: #30363d; }
+  .dim  { color: #58a6ff; }
+  .op   { color: #ffa657; }
+  .cm   { color: #484f58; font-style: italic; }
+
+  /* ── Card body ───────────────────────────────────────────────────────── */
+  .card-body {
+    padding: 14px 16px 16px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .card-tags { display: flex; gap: 5px; flex-wrap: wrap; }
+  .tag {
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    padding: 2px 7px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+  }
+  .tag-cad      { color: #58a6ff; border-color: #1f3a5f; background: #0d1f33; }
+  .tag-draw     { color: #bc8cff; border-color: #3a1f5f; background: #1a0d33; }
+  .tag-ecad     { color: #56d364; border-color: #1f5f22; background: #0d2210; }
+  .tag-civil    { color: #ffa657; border-color: #5f3a1f; background: #2e1a0a; }
+  .tag-scan     { color: #f0883e; border-color: #5f2e10; background: #2e1500; }
+  .tag-img      { color: #d2a8ff; border-color: #4a1f7a; background: #1f0d3a; }
+  .tag-terrain  { color: #39d353; border-color: #1a5c1a; background: #0a2a0a; }
+  .tag-lattice  { color: #79c0ff; border-color: #1f3f6f; background: #0a1f3f; }
+  .tag-verify   { color: #e3b341; border-color: #5f4a10; background: #2a200a; }
+  .tag-cam      { color: #ff7b72; border-color: #5f2020; background: #2a0d0d; }
+  .tag-mat      { color: #8b949e; border-color: #30363d; background: #161b22; }
+  .tag-assembly { color: #79c0ff; border-color: #1f4f6f; background: #0a2030; }
+  .status-pass  { font-size: 9.5px; font-weight: 700; color: #3fb950; background: #0d2e1a; border: 1px solid #1f5c2e; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.06em; }
+  .status-gen   { font-size: 9.5px; font-weight: 700; color: #388bfd; background: #0d1f33; border: 1px solid #1f3f6f; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.06em; }
+
+  .card-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: #f0f6fc;
+    letter-spacing: -0.01em;
+  }
+  .card-desc {
+    font-size: 12px;
+    color: #7d8590;
+    flex: 1;
+    line-height: 1.6;
+  }
+  .card-specs {
+    font-size: 11px;
+    color: #484f58;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    padding: 6px 8px;
+    background: #010409;
+    border: 1px solid #21262d;
+    border-radius: 5px;
+    letter-spacing: 0.02em;
+  }
+  .card-specs strong { color: #8b949e; }
+
+  .card-action {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .btn {
+    display: inline-block;
+    padding: 6px 13px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    border: 1px solid #30363d;
+    background: #161b22;
+    color: #8b949e;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: #21262d; color: #c9d1d9; border-color: #484f58; }
+  .btn-primary { background: #15304d; border-color: #1f4a75; color: #58a6ff; }
+  .btn-primary:hover { background: #1a3f66; color: #79c0ff; border-color: #2d6db0; }
+  .btn-green { background: #0d2e1a; border-color: #1f5c2e; color: #3fb950; }
+  .btn-green:hover { background: #112e1a; color: #56d364; border-color: #2e7a42; }
+
+  /* ── Material table ──────────────────────────────────────────────────── */
+  .mat-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .mat-table th {
+    color: #484f58;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 9.5px;
+    padding: 4px 6px;
+    text-align: left;
+    border-bottom: 1px solid #21262d;
+  }
+  .mat-table td { padding: 4px 6px; color: #7d8590; border-bottom: 1px solid #161b22; }
+  .mat-table tr:last-child td { border-bottom: none; }
+  .mat-table .recommend { color: #3fb950; font-weight: 700; }
+  .mat-table .accept    { color: #58a6ff; font-weight: 600; }
+  .mat-table .marginal  { color: #484f58; }
+  .mat-table .num       { color: #e3b341; font-family: monospace; }
+
+  /* ── Card entrance animation ──────────────────────────────────────────── */
+  @keyframes cardIn {
+    from { opacity: 0; transform: translateY(22px); }
+    to   { opacity: 1; transform: none; }
+  }
+  .card {
+    opacity: 0;
+    transform: translateY(22px);
+    transition: none;
+  }
+  .card.in-view {
+    animation: cardIn 0.5s cubic-bezier(0.22,1,0.36,1) forwards;
+    animation-delay: calc(var(--row-delay, 0) * 1ms);
+  }
+
+  /* ── Hero background dot-grid ─────────────────────────────────────────── */
+  .hero { position: relative; overflow: hidden; }
+  .hero::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(circle, #1c2430 1px, transparent 1px);
+    background-size: 26px 26px;
+    opacity: 0.7;
+    pointer-events: none;
+  }
+  .hero > * { position: relative; z-index: 1; }
+
+  /* ── Pipeline flow strip ──────────────────────────────────────────────── */
+  .pipeline-flow {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+  .pf-node {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 3px 9px;
+    border-radius: 20px;
+    background: #161b22;
+    border: 1px solid #21262d;
+    color: #484f58;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .pf-node.active { color: #58a6ff; border-color: #1f4070; background: #0a1929; }
+  .pf-node.done   { color: #3fb950; border-color: #1a4d2a; background: #081a0e; }
+  .pf-arrow { color: #30363d; font-size: 11px; }
+
+  /* ── Hero accent line ─────────────────────────────────────────────────── */
+  .hero-eyebrow {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #388bfd;
+    margin-bottom: 8px;
+  }
+
+  /* ── Stat hover pulse ─────────────────────────────────────────────────── */
+  .stat-num { display: block; }
+  .stat-item:hover .stat-num { color: #58a6ff; transition: color 0.2s; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <div class="logo">ARIA<span>-OS</span></div>
+    <div class="header-subtitle">Autonomous Reasoning &amp; Integrated Architecture — Engineering Pipeline</div>
+  </div>
+  <div class="header-right">
+    <span class="badge badge-green">12 Capabilities</span>
+    <span class="badge badge-blue">v2.0 · 2026</span>
+  </div>
+</header>
+
+<div class="hero">
+  <div>
+    <div class="hero-eyebrow">Autonomous Engineering Pipeline</div>
+    <div class="hero-title">Feature Gallery</div>
+    <div class="hero-desc">One output per pipeline capability — natural language goal in, validated engineering artifact out. CAD, ECAD, civil, terrain, lattice, assembly, CAM, and verification in a single autonomous loop.</div>
+    <div class="pipeline-flow">
+      <span class="pf-node done">NL Goal</span>
+      <span class="pf-arrow">→</span>
+      <span class="pf-node done">Spec Extract</span>
+      <span class="pf-arrow">→</span>
+      <span class="pf-node done">CAD / ECAD</span>
+      <span class="pf-arrow">→</span>
+      <span class="pf-node done">Visual Verify</span>
+      <span class="pf-arrow">→</span>
+      <span class="pf-node done">DFM · Quote · CAM</span>
+      <span class="pf-arrow">→</span>
+      <span class="pf-node active">STEP · STL · DXF · Gerber</span>
+    </div>
+    <div class="hero-stats">
+      <div class="stat-item"><span class="stat-num" data-target="80" data-suffix="+">80+</span><span class="stat-label">CQ Templates</span></div>
+      <div class="stat-item"><span class="stat-num" data-target="6">6</span><span class="stat-label">Vision Models</span></div>
+      <div class="stat-item"><span class="stat-num" data-target="158">158</span><span class="stat-label">Tests Passing</span></div>
+      <div class="stat-item"><span class="stat-num" data-target="12">12</span><span class="stat-label">Pipeline Stages</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- 1. CAD Generation -->
+  <div class="card" style="--i:0">
+    <div class="preview multi">
+      <img src="outputs/screenshots/gl_iso_nozzle.png" alt="Rocket nozzle — de Laval bell">
+      <img src="outputs/gallery_renders/gl_heat_sink.png" alt="Aluminium heat sink — deep fins">
+      <img src="outputs/gallery_renders/gl_l_bracket.png" alt="Steel L-bracket — M6 bolt holes">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-cad">CAD</span></div>
+        <span class="status-gen">VALIDATED</span>
+      </div>
+      <div class="card-title">CAD Generation</div>
+      <div class="card-desc">Natural language → parametric CadQuery code → STEP/STL. 80+ templates with LLM fallback. Agent refinement loop with geometry validation and bbox precheck.</div>
+      <div class="card-specs"><strong>80+ templates</strong> · CadQuery + OCC kernel · STEP + STL output · ±0.1mm tolerance</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="viewer.html?stl=outputs/cad/stl/nozzle_template_test.stl" target="_blank">View 3D — nozzle</a>
+        <a class="btn" href="viewer.html?stl=outputs/cad/stl/llm_heat_sink_deep_fins_aluminium.stl" target="_blank">heat sink</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Engineering Drawing -->
+  <div class="card" style="--i:1">
+    <div class="preview drawing">
+      <img src="outputs/gallery_renders/eng_drawing_turbopump.png" alt="Engineering drawing — turbopump housing">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-draw">Drawing</span></div>
+        <span class="status-gen">AUTO-GEN</span>
+      </div>
+      <div class="card-title">Engineering Drawing</div>
+      <div class="card-desc">STEP → multi-view SVG drawings with title block, orthographic projections, GD&amp;T annotations, dimensional tolerances, and surface finish callouts.</div>
+      <div class="card-specs"><strong>Turbopump housing</strong> · Ø160 × 180mm · AL 6061-T6 · Rev A · DWG TP-HOUSING-001</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="outputs/drawings/turbopump_v7.svg" target="_blank">Open full SVG</a>
+        <a class="btn" href="outputs/drawings/aria_brake_drum.svg" target="_blank">brake drum</a>
+        <a class="btn" href="outputs/drawings/nozzle_v5.svg" target="_blank">nozzle</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. ECAD / PCB -->
+  <div class="card" style="--i:2">
+    <div class="preview">
+      <img src="outputs/gallery_renders/ecad_motor_driver_fixed.png" alt="Motor driver PCB — KiCad layout">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-ecad">ECAD</span></div>
+        <span class="status-pass">ERC PASS</span>
+      </div>
+      <div class="card-title">PCB Generation</div>
+      <div class="card-desc">LLM-generated KiCad netlist → component placement → copper trace routing → ERC/DRC validation → BOM → SPICE simulation. Production-ready Gerbers exportable.</div>
+      <div class="card-specs"><strong>Motor driver</strong> · 60×40mm · 7 components · 19 nets · L298N + AMS1117-3.3</div>
+      <div class="card-action">
+        <a class="btn btn-primary btn-green" href="outputs/ecad/motor_driver_pcb_60x40mm_with_l298n_motor_driver/motor_driver_pcb_60x40mm_with_l298n_motor_driver.kicad_pcb" target="_blank">Open in KiCad</a>
+        <a class="btn" href="outputs/verify/verify_ecad_motor_driver_pcb_60x40mm_with_l298n_moto.svg" target="_blank">PCBnew SVG</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Civil / AutoCAD Plan -->
+  <div class="card" style="--i:3">
+    <div class="preview">
+      <img src="outputs/gallery_renders/civil_site_plan.png" alt="Civil site plan — national infrastructure DXF">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-civil">Civil / DXF</span></div>
+        <span class="status-gen">LAYERED</span>
+      </div>
+      <div class="card-title">Civil Site Plan</div>
+      <div class="card-desc">LLM-generated AutoCAD DXF for civil infrastructure — road geometry, storm/sanitary drainage, utility corridors, grading, survey boundary, parking and site features.</div>
+      <div class="card-specs"><strong>National site plan</strong> · 70+ layers · SCALE 1″=10′ · roads + drainage + utilities</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="outputs/cad/dxf/national_site.dxf" target="_blank">Open in AutoCAD</a>
+        <a class="btn" href="outputs/cad/dxf/national_drainage.dxf" target="_blank">drainage DXF</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. Scan-to-CAD -->
+  <div class="card" style="--i:4">
+    <div class="preview">
+      <img src="outputs/gallery_renders/scan_cad.png" alt="Scan-to-CAD — reconstructed turbopump housing">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-scan">Scan-to-CAD</span></div>
+        <span class="status-pass">RECONSTRUCTED</span>
+      </div>
+      <div class="card-title">Scan-to-CAD</div>
+      <div class="card-desc">Point cloud / voxel scan → marching cubes surface extraction → mesh cleaning and decimation → STEP reconstruction. Catalog deduplication via geometry hash.</div>
+      <div class="card-specs"><strong>Turbopump housing</strong> · hash 75741f1d · 2,490 reconstructed faces · watertight</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="viewer.html?stl=outputs/cad/reconstructed/75741f1d/75741f1d.stl" target="_blank">View 3D — reconstructed</a>
+        <a class="btn" href="viewer.html?stl=outputs/scan_catalog/turbopump_v7/cleaned.stl" target="_blank">scan mesh</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. Image-to-CAD -->
+  <div class="card" style="--i:5">
+    <div class="preview">
+      <img src="outputs/gallery_renders/gl_sloper.png" alt="Image-to-CAD — asymmetric climbing sloper hold">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-img">Image-to-CAD</span></div>
+        <span class="status-gen">VISION</span>
+      </div>
+      <div class="card-title">Image-to-CAD</div>
+      <div class="card-desc">Photo → vision LLM extracts shape classification, principal dimensions, surface features, asymmetry → parametric CadQuery generation. Organic forms from reference imagery.</div>
+      <div class="card-specs"><strong>Asymmetric sloper hold</strong> · 138×96×51mm · freeform loft · T-nut mount</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="viewer.html?stl=outputs/cad/stl/llm_asymmetric_freeform_climbing_sloper_hold.stl" target="_blank">View 3D</a>
+        <a class="btn" href="viewer.html?stl=outputs/cad/stl/llm_competition_climbing_crimp_hold_asymmetr.stl" target="_blank">crimp hold</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 7. Terrain -->
+  <div class="card" style="--i:6">
+    <div class="preview">
+      <img src="outputs/gallery_renders/terrain.png" alt="Terrain — 3km mountain mesh, topographic map">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-terrain">Terrain</span></div>
+        <span class="status-gen">131K FACES</span>
+      </div>
+      <div class="card-title">Terrain Generation</div>
+      <div class="card-desc">Diamond-Square fractal heightmap → 257×257 elevation grid → STL mesh + DXF contour lines. Configurable peak height, scale, roughness. Topographic map with 25m contours.</div>
+      <div class="card-specs"><strong>Mountain terrain</strong> · 3km × 3km · 150m peak · 131,072 faces · DXF contours</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="viewer.html?stl=outputs/terrain/mountain_terrain_3km_x_3km_with_150m_pea_mesh.stl" target="_blank">View 3D — mountain</a>
+        <a class="btn" href="viewer.html?stl=outputs/terrain/rolling_hills_1km_x_1km_50m_peak_mesh.stl" target="_blank">rolling hills</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 8. Lattice / SDF -->
+  <div class="card" style="--i:7">
+    <div class="preview">
+      <img src="outputs/gallery_renders/gl_octet.png" alt="Octet-truss lattice — SDF voxel generation">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-lattice">Lattice / SDF</span></div>
+        <span class="status-gen">SDF-BASED</span>
+      </div>
+      <div class="card-title">Lattice Structures</div>
+      <div class="card-desc">Signed Distance Field volumetric lattice — gyroid, honeycomb, octet-truss, arc-weave. Marching cubes isosurface extraction → watertight STL. Density and cell size configurable.</div>
+      <div class="card-specs"><strong>Octet-truss</strong> · SDF marching cubes · watertight · configurable density</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="viewer.html?stl=outputs/cad/sdf/twisted_gyroid_cylinder/twisted_gyroid_cylinder.stl" target="_blank">View 3D — gyroid</a>
+        <a class="btn" href="viewer.html?stl=outputs/cad/stl/lattice_test_honeycomb.stl" target="_blank">honeycomb</a>
+        <a class="btn" href="viewer.html?stl=outputs/cad/stl/lattice_test_octet.stl" target="_blank">octet</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 9. Visual Verification -->
+  <div class="card" style="--i:8">
+    <div class="preview">
+      <img src="outputs/gallery_renders/verify_report.png" alt="Visual verification report — PASS 0.92">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-verify">Verification</span></div>
+        <span class="status-pass">PASS · 0.92</span>
+      </div>
+      <div class="card-title">Visual Verification</div>
+      <div class="card-desc">3 orthographic GL renders → vision LLM cascade (Gemini → Groq → Ollama → Claude) → structured report: geometry precheck, per-feature checklist with confidence bars, provider audit trail.</div>
+      <div class="card-specs"><strong>Provider chain</strong> · Gemini 2.5-flash (PRIMARY) → Groq cross-val · 7/7 features pass · bbox OK</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="outputs/gallery_renders/verify_report.png" target="_blank">Full report</a>
+        <a class="btn" href="outputs/gallery_renders/verify_involute_gear_fixed_24_teeth_top.png" target="_blank">Gear verify</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 10. CAM Toolpath -->
+  <div class="card" style="--i:9">
+    <div class="preview">
+      <img src="outputs/gallery_renders/cam_toolpath_visual.png" alt="CAM toolpath visualization — brake drum 3 operations">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-cam">CAM</span></div>
+        <span class="status-gen">G-CODE READY</span>
+      </div>
+      <div class="card-title">CAM Toolpath</div>
+      <div class="card-desc">STEP → tool selection, operation sequencing, feeds &amp; speeds, WCS setup sheet. 3D adaptive roughing, parallel finish, contour passes. G-code output for 3-axis VMC, lathe, or 5-axis.</div>
+      <div class="card-specs"><strong>Brake drum</strong> · Op1 Adaptive EM-12 · Op2 Finish EM-3 · Op3 Contour BN-6 · 47 min cycle</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="outputs/cam/aria_brake_drum/setup_sheet.md" target="_blank">Setup sheet</a>
+        <a class="btn" href="outputs/cam/llm_nozzle_bell_small_rocket_engine/llm_nozzle_bell_small_rocket_engine_cam_summary.json" target="_blank">Nozzle CAM JSON</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 11. Material Study -->
+  <div class="card" style="--i:10">
+    <div class="preview code-preview" style="padding:12px 14px;">
+      <pre style="margin-bottom:8px;font-size:11px;"><span class="sep">── Material Study ────────────────────────────────────</span>
+<span class="kw">Load case</span>  Pressure vessel  <span class="dim">P=1.0 MPa  Ø200mm</span>
+<span class="kw">Criterion</span>  Min weight passing SF &gt; 2.0×</pre>
+      <table class="mat-table">
+        <thead>
+          <tr><th>Material</th><th>SF</th><th>Mass</th><th>Cost/kg</th><th>Result</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>ABS Plastic</td><td class="num">3.5×</td><td>1498g</td><td>$0.12</td><td class="recommend">✓ RECOMMENDED</td></tr>
+          <tr><td>PLA Plastic</td><td class="num">4.4×</td><td>1786g</td><td>$0.08</td><td class="accept">ACCEPTABLE</td></tr>
+          <tr><td>Nylon PA6</td><td class="num">6.1×</td><td>1642g</td><td>$0.15</td><td class="marginal">MARGINAL</td></tr>
+          <tr><td>7075-T6 Al</td><td class="num">43.7×</td><td>4046g</td><td>$1.20</td><td class="marginal">OVERKILL</td></tr>
+          <tr><td>Ti-6Al-4V</td><td class="num">76.5×</td><td>6379g</td><td>$8.50</td><td class="marginal">OVERKILL</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-mat">Material</span></div>
+        <span class="status-gen">5 RANKED</span>
+      </div>
+      <div class="card-title">Material Study</div>
+      <div class="card-desc">Physics-based material selection — safety factor against load case, weight, machinability score, cost index. Selects lightest material that passes minimum safety factor.</div>
+      <div class="card-specs"><strong>Brake drum</strong> · P=1.0 MPa · SF &gt; 2.0× · 5 candidates ranked · ABS recommended</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="outputs/material_studies/2026-04-09_material_study_all.json" target="_blank">Full study JSON</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 12. Assembly -->
+  <div class="card" style="--i:11">
+    <div class="preview">
+      <img src="outputs/gallery_renders/assembly_v7.png" alt="Assembly — turbopump housing v7">
+    </div>
+    <div class="card-body">
+      <div class="card-header">
+        <div class="card-tags"><span class="tag tag-assembly">Assembly</span></div>
+        <span class="status-pass">MATED</span>
+      </div>
+      <div class="card-title">Assembly Generation</div>
+      <div class="card-desc">Multi-component assemblies from natural language. Sub-component decomposition, full pipeline per part, mating constraint validation, interference check, BOM generation, exploded view export.</div>
+      <div class="card-specs"><strong>Turbopump assembly</strong> · Housing + Impeller + 4× M8 bolts · exploded view · BOM: 3 items</div>
+      <div class="card-action">
+        <a class="btn btn-primary" href="viewer.html?stl=outputs/cad/stl/turbopump_v7.stl" target="_blank">View 3D — housing</a>
+        <a class="btn" href="viewer.html?stl=outputs/cad/stl/impeller_v3.stl" target="_blank">impeller</a>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<footer style="text-align:center;padding:24px;color:#30363d;font-size:11px;border-top:1px solid #21262d;margin-top:8px;">
+  ARIA-OS · Autonomous Reasoning &amp; Integrated Architecture · Generated outputs, validated geometry · 2026
+</footer>
+
+<script>
+// ── Animated stat counters ────────────────────────────────────────────────
+(function() {
+  function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function animateCounter(el) {
+    const target = parseInt(el.dataset.target, 10);
+    const suffix = el.dataset.suffix || '';
+    const duration = 1000;
+    const start = performance.now();
+    (function tick(now) {
+      const t = Math.min((now - start) / duration, 1);
+      el.textContent = Math.round(easeOut(t) * target) + suffix;
+      if (t < 1) requestAnimationFrame(tick);
+    })(start);
+  }
+
+  const statObs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) { animateCounter(e.target); statObs.unobserve(e.target); }
+    });
+  }, { threshold: 0.5 });
+
+  document.querySelectorAll('.stat-num[data-target]').forEach(el => statObs.observe(el));
+})();
+
+// ── Card scroll-triggered entrance ───────────────────────────────────────
+(function() {
+  const cards = Array.from(document.querySelectorAll('.card'));
+  let delay = 0;
+  const cardObs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting && !e.target.classList.contains('in-view')) {
+        e.target.style.setProperty('--row-delay', delay);
+        e.target.classList.add('in-view');
+        delay += 65;
+        setTimeout(() => { delay = Math.max(0, delay - 65); }, 400);
+        cardObs.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.08 });
+  cards.forEach(c => cardObs.observe(c));
+})();
+</script>
+
+</body>
+</html>

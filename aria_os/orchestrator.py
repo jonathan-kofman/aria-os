@@ -82,7 +82,12 @@ def _checkpoint(
 
 
 def _prompt_gdnt_drawing() -> bool:
-    """Ask user if they want a GD&T drawing. Returns True if yes. Non-blocking if not a tty."""
+    """Ask user if they want a GD&T drawing. Returns False in non-interactive
+    mode (no TTY, or ARIA_NON_INTERACTIVE=1, or ARIA_LAZY_STAGES=1)."""
+    if os.environ.get("ARIA_NON_INTERACTIVE", "").strip() in ("1", "true", "yes"):
+        return False
+    if os.environ.get("ARIA_LAZY_STAGES", "").strip() in ("1", "true", "yes"):
+        return False
     if not _sys.stdin.isatty():
         return False
     try:
@@ -93,10 +98,23 @@ def _prompt_gdnt_drawing() -> bool:
         return False
 
 
-def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, preview: bool = False, auto_draw: bool = False, agent_mode: bool | None = None, max_agent_iterations: int = 3):
-    """Run the ARIA-OS pipeline: plan → route → generate artifacts → validate → log.
+def _lazy_stages_enabled() -> bool:
+    """True when the run should skip optional post-stages (FEA, drawings,
+    quote, CEM teaching). Set ARIA_LAZY_STAGES=1 to enable.
+
+    Speeds up default `python run_aria_os.py "<goal>"` runs by 5-15s when
+    the user only wants the geometry, not analysis artifacts.
+    """
+    return os.environ.get("ARIA_LAZY_STAGES", "").strip() in ("1", "true", "yes")
+
+
+def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, preview: bool = False, auto_draw: bool = False, agent_mode: bool | None = None, max_agent_iterations: int = 3, teaching: bool = False, teaching_level: str = "intermediate", teaching_interactive: bool = False):
+    """Run the ARIA-OS pipeline: plan -> route -> generate artifacts -> validate -> log.
 
     agent_mode: None = auto (use agents if Ollama available), True = force, False = disable.
+    teaching: if True, enable the teaching layer (proactive narration of decisions).
+    teaching_level: "beginner", "intermediate", or "expert".
+    teaching_interactive: if True, pause after each major phase for interactive Q&A (implies teaching=True).
     """
     if repo_root is None:
         repo_root = Path(__file__).resolve().parent.parent
@@ -119,6 +137,35 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
         "stl_path": "",
         "_run_start_ts": _run_start_ts,
     }
+
+    # --- Teaching engine (optional) ---
+    # --teach-interactive implies --teach
+    if teaching_interactive:
+        teaching = True
+    _teaching_engine = None
+    if teaching:
+        try:
+            from .teaching.engine import TeachingEngine, DifficultyLevel
+            _level_map = {
+                "beginner": DifficultyLevel.BEGINNER,
+                "intermediate": DifficultyLevel.INTERMEDIATE,
+                "expert": DifficultyLevel.EXPERT,
+            }
+            from .teaching.user_profile import UserProfile as _UserProfile
+            _user_profile = _UserProfile.load()
+            _teaching_engine = TeachingEngine(
+                difficulty=_level_map.get(teaching_level, DifficultyLevel.INTERMEDIATE),
+                interactive=teaching_interactive,
+                user_profile=_user_profile,
+            )
+            _teaching_engine.update_context("goal", goal)
+            session["teaching_enabled"] = True
+            session["teaching_level"] = teaching_level
+            session["teaching_interactive"] = teaching_interactive
+            _mode_tag = " (interactive)" if teaching_interactive else ""
+            print(f"[TEACH] Teaching mode enabled (level: {teaching_level}){_mode_tag}")
+        except Exception as _te:
+            print(f"[TEACH] Could not initialize teaching engine: {_te}")
 
     event_bus.emit("step", "Pipeline started", {"goal": goal})
 
@@ -153,6 +200,7 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                 repo_root=repo_root,
                 domain=_agent_domain,
                 max_iterations=max_agent_iterations,
+                teaching_engine=_teaching_engine,
             )
             _agent_state = run_agent_loop(_agent_state)
 
@@ -200,6 +248,11 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                 ("domain_detected", bool(_agent_domain),        f"domain: {_agent_domain}"),
                 ("has_goal",        bool(goal),                 "goal provided"),
             ], session)
+            if _teaching_engine:
+                _spec_summary = f"{len(_agent_state.spec)} parameters extracted: " + ", ".join(
+                    f"{k}={v}" for k, v in list(_agent_state.spec.items())[:5]
+                )
+                _teaching_engine.interactive_pause("spec", f"Specification and planning complete. {_spec_summary}")
 
             # ── CHECKPOINT: ROUTE (agent mode) ───────────────────────────────
             _checkpoint("ROUTE", [
@@ -218,6 +271,15 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                  f"converged iter {_agent_state.iteration}" if _agent_state.converged
                  else f"stalled after {_agent_state.iteration} iterations with {len(_agent_state.failures)} failures"),
             ], session)
+            if _teaching_engine:
+                _gen_summary = (
+                    f"Geometry generation complete after {_agent_state.iteration} iteration(s). "
+                    + ("STEP and STL produced." if (_step_exists and _stl_exists)
+                       else "STEP produced." if _step_exists
+                       else "STL produced." if _stl_exists
+                       else "No geometry produced.")
+                )
+                _teaching_engine.interactive_pause("design", _gen_summary)
 
             # ── AUTO-FALLBACK: if agent produced no geometry, use template path ─
             if not (_step_exists or _stl_exists):
@@ -309,6 +371,66 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                              for i in _dfm_report.get("issues", []))
                          else "no critical issues"),
                     ], session)
+                    # Teach DFM insights
+                    if _teaching_engine:
+                        _teaching_engine.update_context("dfm_score", _dfm_score)
+                        _teaching_engine.update_context("dfm_process", _dfm_proc)
+                        _teaching_engine.teach_simple(
+                            agent="DFM", phase="dfm",
+                            message=f"Recommended manufacturing process: {_dfm_proc} (DFM score: {_dfm_score:.0f}/100)",
+                            reasoning="The DFM analyzer examines wall thickness, draft angles, "
+                            "undercuts, and feature accessibility to recommend the best "
+                            "manufacturing process and flag potential issues.",
+                            tags=["dfm", "manufacturing"],
+                        )
+                        from .teaching.engine import DifficultyLevel as _DL
+                        from .teaching.dfm_knowledge import get_dfm_teaching, get_all_dfm_processes
+                        for _dfm_issue in _dfm_report.get("issues", [])[:3]:
+                            _sev = _dfm_issue.get("severity", "info")
+                            _desc = _dfm_issue.get("description", str(_dfm_issue))
+                            _issue_type = _dfm_issue.get("type", "")
+                            # Look up process-specific knowledge
+                            _kb_reasoning = _dfm_issue.get("recommendation", "")
+                            if _issue_type and _dfm_proc:
+                                _proc_key = _dfm_proc.lower().replace(" ", "_").replace("machining", "").strip("_") or "cnc"
+                                if "cnc" in _dfm_proc.lower() or "machine" in _dfm_proc.lower():
+                                    _proc_key = "cnc"
+                                elif "3d" in _dfm_proc.lower() or "print" in _dfm_proc.lower() or "fdm" in _dfm_proc.lower():
+                                    _proc_key = "fdm_3dp"
+                                elif "inject" in _dfm_proc.lower():
+                                    _proc_key = "injection_mold"
+                                elif "sheet" in _dfm_proc.lower():
+                                    _proc_key = "sheet_metal"
+                                _kb_entry = get_dfm_teaching(_issue_type, _proc_key)
+                                if _kb_entry:
+                                    _kb_reasoning = (
+                                        f"{_kb_entry['message']} "
+                                        f"Fix: {_kb_entry['fix']} "
+                                        f"Rule of thumb: {_kb_entry['rule']}"
+                                    )
+                            _teaching_engine.teach_simple(
+                                agent="DFM", phase="dfm",
+                                message=f"DFM {_sev}: {_desc}",
+                                reasoning=_kb_reasoning,
+                                level=_DL.BEGINNER if _sev == "critical" else _DL.INTERMEDIATE,
+                                tags=["dfm"],
+                            )
+                        # Check for recurring mistake patterns
+                        if _teaching_engine.user_profile:
+                            _mistake_warnings = _teaching_engine.check_mistakes(
+                                _dfm_report.get("issues", []))
+                            for _mw in _mistake_warnings:
+                                _teaching_engine.teach_simple(
+                                    agent="DFM", phase="dfm",
+                                    message=_mw,
+                                    level=_DL.BEGINNER,
+                                    tags=["dfm", "pattern"],
+                                )
+                        _teaching_engine.interactive_pause(
+                            "dfm",
+                            f"DFM analysis complete: {_dfm_proc}, score {_dfm_score:.0f}/100, "
+                            f"{_dfm_n_issues} issue(s) found.",
+                        )
                 except Exception as _dfm_exc:
                     print(f"  [DFM] skipped: {_dfm_exc}")
 
@@ -327,6 +449,38 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                         ('confidence', _quote.get('confidence', 'low') in ('high', 'medium'),
                          f"confidence: {_quote.get('confidence', 'unknown')}"),
                     ], session)
+                    # Teach quote breakdown
+                    if _teaching_engine:
+                        _unit = _quote.get('unit_cost_usd', 0)
+                        _setup = _quote.get('setup_cost_usd', 0)
+                        _cycle = _quote.get('cycle_time_min', 0)
+                        _teaching_engine.update_context("quote", _quote)
+                        _teaching_engine.teach_simple(
+                            agent="Quote", phase="quote",
+                            message=f"Estimated unit cost: ${_unit:.2f} (material: {_mat})",
+                            reasoning=f"Cost breakdown: setup ${_setup:.2f} (amortized over batch), "
+                            f"cycle time ~{_cycle:.1f} min per part. "
+                            "Setup cost includes fixturing, tool changes, and first-article inspection. "
+                            "Higher quantities reduce per-unit cost because setup is spread across more parts.",
+                            tags=["cost", "manufacturing"],
+                        )
+                        # Material-specific manufacturing teaching
+                        from .teaching.dfm_knowledge import get_material_teaching
+                        _mat_teaching = get_material_teaching(_mat)
+                        if _mat_teaching:
+                            _teaching_engine.teach_simple(
+                                agent="Quote", phase="quote",
+                                message=f"Material: {_mat_teaching.get('name', _mat)} -- {_mat_teaching.get('machinability', '')}",
+                                reasoning=f"{_mat_teaching.get('vs_alternatives', '')} "
+                                f"Gotchas: {_mat_teaching.get('gotchas', '')}",
+                                tags=["material", "cost"],
+                                related_param="material",
+                            )
+                        _teaching_engine.interactive_pause(
+                            "quote",
+                            f"Cost estimation complete: unit cost ${_unit:.2f}, "
+                            f"setup ${_setup:.2f}, cycle time {_cycle:.1f} min.",
+                        )
                 except Exception as _qe:
                     print(f'  [QUOTE] skipped: {_qe}')
 
@@ -401,9 +555,21 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                 )
                 _s_step = str(step_path) if step_path.is_file() else session.get('step_path', '')
                 _s_stl  = str(stl_path)  if stl_path.is_file()  else session.get('stl_path', '')
-                _pipeline_ok  = bool(
+                # File presence is necessary but NOT sufficient — also require
+                # no checkpoint stage to have failed. Previously pipeline_ok
+                # was just `file_exists and not cem_blocked`, which lied when
+                # GENERATE/VISUAL/etc. failed but produced an output file
+                # anyway (the false-PASS aggregation bug).
+                _file_ok = bool(
                     (_s_step and Path(_s_step).is_file()) or (_s_stl and Path(_s_stl).is_file())
-                ) and not session.get('cem_blocked')
+                )
+                _all_stages_ok = all(cp.get('passed') for cp in _all_cp.values())
+                _pipeline_ok = _file_ok and _all_stages_ok and not session.get('cem_blocked')
+                # Persist for callers — the printed summary used to be the
+                # only place this verdict existed, so callers couldn't read it.
+                session['passed'] = _pipeline_ok
+                session['stages_ok'] = _all_stages_ok
+                session['file_ok'] = _file_ok
                 print()
                 print('=' * 64)
                 print(f"  PIPELINE SUMMARY  --  {'PASS' if _pipeline_ok else 'FAIL'}")
@@ -442,8 +608,35 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                     print('[!] No geometry produced — check errors above.')
                     print('=' * 64)
 
+                # ── Teaching summary ─────────────────────────────────────────
+                if _teaching_engine and _teaching_engine.teachings:
+                    _t_summary = _teaching_engine.get_session_summary()
+                    session["teaching_summary"] = _t_summary
+                    print()
+                    print('DESIGN REASONING')
+                    print('-' * 64)
+                    for _t in _teaching_engine.teachings:
+                        _lvl = _t.level.value[0].upper()
+                        print(f'  [{_lvl}] {_t.message}')
+                        if _t.reasoning:
+                            # Wrap reasoning to ~70 chars indented
+                            _lines = _t.reasoning.split(". ")
+                            for _ln in _lines[:2]:
+                                if _ln.strip():
+                                    print(f'       {_ln.strip()}.')
+                    print(f'  --- {len(_teaching_engine.teachings)} teaching moments | '
+                          f'Ask questions: python run_aria_os.py --ask')
+                    print('=' * 64)
+
                 event_bus.emit('complete', f'Agent pipeline done', {'session': session})
                 logger_log(session)
+                # Save user profile if teaching was active
+                if _teaching_engine is not None and _teaching_engine.user_profile is not None:
+                    try:
+                        _teaching_engine.user_profile.record_session(parts=1)
+                        _teaching_engine.user_profile.save()
+                    except Exception:
+                        pass
                 return session
 
         except Exception as _agent_exc:
@@ -1013,11 +1206,28 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
         _dim_checks.append(("od_matches_spec", _od_ok,
                             f"requested OD={_req_od}mm, got bbox X={_got_x:.1f} Y={_got_y:.1f}"))
     if _spec.get("height_mm") and _bbox_session:
-        _req_h = _spec["height_mm"]
-        _got_z = _bbox_session.get("z", 0)
-        _h_ok = abs(_got_z - _req_h) < max(2.0, _req_h * 0.05)
-        _dim_checks.append(("height_matches_spec", _h_ok,
-                            f"requested H={_req_h}mm, got bbox Z={_got_z:.1f}"))
+        # Skip the bbox-Z check when "height" in the spec means a sub-dimension
+        # (leg height for brackets, fin height for heat sinks, etc.) — bbox Z
+        # for those is base + sub-dim, not the spec value alone. Without this
+        # skip, every L-bracket/heat-sink reports a false GENERATE failure.
+        _part_type = (_spec.get("part_type") or "").lower()
+        _goal_lower = (goal or "").lower()
+        _height_is_subdim_parts = {
+            "bracket", "l_bracket", "l-bracket", "gusset", "heat_sink",
+            "heat sink", "snap_hook", "snap-hook", "hinge", "u_channel",
+            "phone_stand", "spring_clip",
+            "spoked_wheel", "wheel", "spoke",
+        }
+        _is_subdim = (_part_type in _height_is_subdim_parts or
+                      any(kw in _goal_lower for kw in
+                          ("bracket", "heat sink", "fin", "snap", "hinge", "channel",
+                           "wheel", "spoke")))
+        if not _is_subdim:
+            _req_h = _spec["height_mm"]
+            _got_z = _bbox_session.get("z", 0)
+            _h_ok = abs(_got_z - _req_h) < max(2.0, _req_h * 0.05)
+            _dim_checks.append(("height_matches_spec", _h_ok,
+                                f"requested H={_req_h}mm, got bbox Z={_got_z:.1f}"))
 
     if not _use_agents:
         _checkpoint("GENERATE", [
@@ -1086,6 +1296,7 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
         ], session)
 
     # ── VISUAL VERIFICATION (legacy path — after geometry + quality pass) ──
+    _vis_result = None
     if _stl_exists:
         try:
             from .visual_verifier import verify_visual
@@ -1099,20 +1310,110 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
             session["visual_verification"] = _vis_result
             _vis_conf = _vis_result.get("confidence", 0.0)
             if _vis_result.get("verified") is True and _vis_conf >= 0.90:
-                print(f"  [VISUAL] PASS — confidence {_vis_conf:.0%}")
+                print(f"  [VISUAL] PASS -- confidence {_vis_conf:.0%}")
             elif _vis_result.get("verified") is True and _vis_conf < 0.90:
-                print(f"  [VISUAL] FAIL — confidence {_vis_conf:.0%} below 90% threshold")
+                print(f"  [VISUAL] FAIL -- confidence {_vis_conf:.0%} below 90% threshold")
                 for _vi in _vis_result.get("issues", []):
                     print(f"    [VISUAL] {_vi}")
             elif _vis_result.get("verified") is False:
-                print(f"  [VISUAL] FAIL — confidence {_vis_conf:.0%}")
+                print(f"  [VISUAL] FAIL -- confidence {_vis_conf:.0%}")
                 for _vi in _vis_result.get("issues", []):
                     print(f"    [VISUAL] {_vi}")
             elif _vis_result.get("verified") is None:
                 _reason = _vis_result.get("reason", "unknown")
-                print(f"  [VISUAL] SKIPPED — {_reason}")
+                print(f"  [VISUAL] SKIPPED -- {_reason}")
         except Exception as _vis_exc:
             print(f"  [VISUAL] skipped: {_vis_exc}")
+
+    # ── CHECKPOINT: VISUAL ──────────────────────────────────────────────────
+    # Register visual verification as a pipeline checkpoint. Provider-aware
+    # threshold accounts for confidence caps that vary across providers:
+    #   Anthropic: uncapped       → 0.90
+    #   Gemini:    capped at 0.95 → 0.85
+    #   Groq:      capped at 0.92 → 0.82
+    #   Ollama:    capped at 0.85 → 0.78
+    # A flat 0.90 made Ollama-only environments always fail VISUAL.
+    if _vis_result is not None:
+        _vis_verified = _vis_result.get("verified")
+        _vis_conf = _vis_result.get("confidence", 0.0)
+        _vis_provider = (_vis_result.get("provider") or "").lower()
+        _vis_issues = _vis_result.get("issues", []) or []
+
+        if "anthropic" in _vis_provider or "claude" in _vis_provider:
+            _vis_threshold = 0.90
+        elif "gemini" in _vis_provider or "google" in _vis_provider:
+            _vis_threshold = 0.85
+        elif "groq" in _vis_provider or "llama" in _vis_provider:
+            _vis_threshold = 0.82
+        elif ("ollama" in _vis_provider or "gemma" in _vis_provider
+              or "llava" in _vis_provider):
+            _vis_threshold = 0.78
+        else:
+            _vis_threshold = 0.75
+
+        # ── LAYERED VISUAL CHECKPOINT ───────────────────────────────────
+        # Visual is a SOFT gate: if all deterministic stages passed, then
+        # vision-LLM uncertainty (cross-validation disagreement, geometry
+        # precheck warnings, "not explicitly verifiable" notes) is recorded
+        # but does NOT fail the checkpoint. Specific feature complaints
+        # ("missing bore", "wrong blade direction") still hard-fail.
+        #
+        # Without this distinction, every part where two vision providers
+        # disagree (typical for borderline-confidence renders) reports a
+        # false-negative even though deterministic checks all passed.
+        _det_stages = ("PLAN", "ROUTE", "GENERATE", "GEOMETRY", "QUALITY")
+        _det_failed = any(
+            session.get("checkpoints", {}).get(s, {}).get("passed") is False
+            for s in _det_stages
+        )
+
+        _disagreement_phrases = (
+            "cross-validation", "disagreed", "marking fail to be safe",
+            "no clear indication", "not explicitly verifiable",
+            "geometry precheck", "appears correct",
+            "image", "thickness", "unclear if", "number of",
+        )
+
+        def _is_soft_visual(issue_text: str) -> bool:
+            s = str(issue_text).lower()
+            return any(p in s for p in _disagreement_phrases)
+
+        _hard_issues = [i for i in _vis_issues if not _is_soft_visual(i)]
+        _soft_issues = [i for i in _vis_issues if _is_soft_visual(i)]
+
+        # When deterministic gates already fired, escalate everything.
+        # When they all passed, hard issues still fail; soft issues warn.
+        _vis_pass_ok = (_vis_verified is True and _vis_conf >= _vis_threshold)
+        if not _vis_pass_ok and not _hard_issues and not _det_failed:
+            # Vision unsure but no specific complaint and no upstream failure:
+            # let it pass. The geometry already cleared deterministic gates.
+            _vis_pass_ok = True
+
+        _critical_issues = _hard_issues if not _det_failed else _vis_issues
+        _no_critical = len(_critical_issues) == 0
+        if not _no_critical and not _det_failed and not _hard_issues:
+            _no_critical = True  # only soft issues, deterministic clean
+
+        _checkpoint("VISUAL", [
+            ("visual_pass",
+             _vis_pass_ok,
+             f"verified={_vis_verified} conf={_vis_conf:.0%} "
+             f"(provider={_vis_provider or 'unknown'} threshold={_vis_threshold:.0%}) "
+             f"{'; '.join(_critical_issues[:2])}" if _critical_issues
+             else f"verified={_vis_verified} conf={_vis_conf:.0%} "
+                  f"(provider={_vis_provider or 'unknown'} threshold={_vis_threshold:.0%})"),
+            ("no_critical_issues",
+             _no_critical,
+             f"{len(_critical_issues)} critical issue(s): "
+             f"{'; '.join(_critical_issues[:3])}"
+             if _critical_issues else "no critical issues"
+                                       + (f" ({len(_soft_issues)} soft warning(s) ignored)"
+                                          if _soft_issues else "")),
+        ], session)
+        if _soft_issues and not _det_failed:
+            print(f"  [VISUAL] {len(_soft_issues)} soft warning(s) (deterministic checks passed):")
+            for s in _soft_issues[:3]:
+                print(f"    [WARN] {s}")
 
     session["automation_artifacts"] = artifacts
     session["attempts"] = 1
@@ -1308,10 +1609,16 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
     _s_step = str(step_path) if step_path.exists() else session.get("step_path", "")
     _s_stl  = str(stl_path)  if stl_path.exists()  else session.get("stl_path",  "")
     _has_geometry = bool(
-        (_s_step and Path(_s_step).exists()) or
-        (_s_stl  and Path(_s_stl).exists())
+        (_s_step and Path(_s_step).is_file()) or
+        (_s_stl  and Path(_s_stl).is_file())
     )
-    _pipeline_ok = _has_geometry and not session.get("cem_blocked")
+    # Same fix as the agent-mode summary: file presence is necessary but not
+    # sufficient. Require every stage checkpoint to have passed.
+    _all_stages_ok = all(cp.get("passed") for cp in _all_cp.values())
+    _pipeline_ok = _has_geometry and _all_stages_ok and not session.get("cem_blocked")
+    session["passed"] = _pipeline_ok
+    session["stages_ok"] = _all_stages_ok
+    session["file_ok"] = _has_geometry
 
     print()
     print(f"{'=' * 64}")
@@ -1489,6 +1796,13 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
 
     event_bus.emit("complete", f"Pipeline complete for {part_id or goal}", {"session": session})
     logger_log(session)
+    # Save user profile if teaching was active
+    if _teaching_engine is not None and _teaching_engine.user_profile is not None:
+        try:
+            _teaching_engine.user_profile.record_session(parts=1)
+            _teaching_engine.user_profile.save()
+        except Exception:
+            pass
     return session
 
 

@@ -269,6 +269,25 @@ def run_dfm_analysis(
     complexity = estimate_feature_complexity(
         geometry.get("face_count", 0), geometry.get("edge_count", 0))
 
+    # ── MeshLib thickness measurement (replaces heuristic if available) ───
+    # Look for the corresponding STL — DFM is run after geometry generation
+    # which writes both .step and .stl side-by-side.
+    thickness_report = None
+    try:
+        stl_candidate = step_path.replace(".step", ".stl").replace(".STEP", ".STL")
+        if Path(stl_candidate).is_file():
+            from manufacturing_core.knowledge.mesh_qa import (
+                is_available as _ml_available,
+                measure_thickness as _ml_thickness,
+            )
+            if _ml_available():
+                thickness_report = _ml_thickness(stl_candidate, thin_threshold_mm=2.0)
+                if thickness_report.error is None and thickness_report.min_thickness_mm > 0:
+                    # Real measurement beats the heuristic — use it
+                    wall_mm = thickness_report.min_thickness_mm
+    except Exception:
+        pass  # Heuristic wall_mm stays as fallback
+
     bbox = geometry.get("bbox_mm", [0, 0, 0])
     max_dim = max(bbox) if bbox else 0
     min_dim = min(d for d in bbox if d > 0) if bbox and any(d > 0 for d in bbox) else 1
@@ -325,7 +344,7 @@ def run_dfm_analysis(
         "undercut_count": undercut_info.get("undercut_count", 0),
     }
 
-    return {
+    result = {
         "passed": passed,
         "score": round(score, 1),
         "process_recommendation": process_rec,
@@ -335,6 +354,31 @@ def run_dfm_analysis(
         "llm_used": llm_used,
         "complexity": complexity,
     }
+
+    # Surface MeshLib thickness data if we got it — drives more specific teachings
+    if thickness_report is not None and thickness_report.error is None:
+        result["mesh_thickness"] = {
+            "min_mm": round(thickness_report.min_thickness_mm, 3),
+            "mean_mm": round(thickness_report.mean_thickness_mm, 3),
+            "max_mm": round(thickness_report.max_thickness_mm, 3),
+            "n_thin_vertices": thickness_report.n_thin_vertices,
+            "thin_locations": thickness_report.thin_locations[:5],
+            "source": "meshlib",
+        }
+        # Add a thin-wall issue if we found genuinely thin regions
+        if thickness_report.n_thin_vertices > 0:
+            worst = thickness_report.thin_locations[0] if thickness_report.thin_locations else None
+            loc_desc = ""
+            if worst:
+                loc_desc = f" at ({worst['x']:.0f}, {worst['y']:.0f}, {worst['z']:.0f})"
+            result["issues"].append({
+                "type": "thin_wall",
+                "severity": "critical" if thickness_report.min_thickness_mm < 1.0 else "warning",
+                "category": "wall_thickness",
+                "description": f"Wall thickness {thickness_report.min_thickness_mm:.2f}mm{loc_desc} — below 2mm threshold",
+                "suggestion": f"Thicken to >=2mm. {thickness_report.n_thin_vertices} thin vertex region(s) detected by MeshLib.",
+            })
+    return result
 
 
 def _parse_llm_response(response: str) -> dict[str, Any] | None:

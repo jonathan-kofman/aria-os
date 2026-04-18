@@ -65,6 +65,35 @@ class MatingSolver:
                 d_b = float(c.params.get("bolt_circle_b", 0.0))
                 if abs(d_a - d_b) <= 1.0:
                     b.rotation = (b.rotation[0], b.rotation[1], a.rotation[2])
+            elif c.type == "shaft_into_bore":
+                # Insert shaft part (B) into bore of part (A). Coaxial + set Z to insertion_depth.
+                b.position = (a.position[0], a.position[1],
+                              a.position[2] - float(c.params.get("insertion_depth_mm", 0.0)))
+            elif c.type == "gear_mesh":
+                # Position B tangent to A's gear outer circle. Center distance = (OD_a + OD_b) / 2.
+                od_a = float(c.params.get("od_a_mm", 0.0))
+                od_b = float(c.params.get("od_b_mm", 0.0))
+                axis_angle_deg = float(c.params.get("axis_angle_deg", 0.0))  # angle in XY plane
+                center_dist = (od_a + od_b) / 2
+                import math as _math
+                theta = _math.radians(axis_angle_deg)
+                b.position = (a.position[0] + center_dist * _math.cos(theta),
+                              a.position[1] + center_dist * _math.sin(theta),
+                              a.position[2])
+            elif c.type == "dowel_locate":
+                # Position B so its dowel hole centers coincide with A's.
+                offset = c.params.get("dowel_offset", [0, 0, 0])
+                b.position = (a.position[0] + float(offset[0]),
+                              a.position[1] + float(offset[1]),
+                              a.position[2] + float(offset[2]))
+                # Dowel locates prevent rotation — B inherits A's rotation
+                b.rotation = a.rotation
+            elif c.type == "slot_engage":
+                # B slides along slot of A. Initial position at slot start.
+                slot_start = c.params.get("slot_start", [0, 0, 0])
+                b.position = (a.position[0] + float(slot_start[0]),
+                              a.position[1] + float(slot_start[1]),
+                              a.position[2] + float(slot_start[2]))
 
         return list(parts_by_name.values())
 

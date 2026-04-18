@@ -4,7 +4,10 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..teaching.engine import TeachingEngine
 
 
 @dataclass
@@ -44,6 +47,9 @@ class DesignState:
     # ── RefinerAgent output ──────────────────────────────────────────────
     refinement_instructions: str = ""
     parameter_overrides: dict[str, Any] = field(default_factory=dict)
+
+    # ── Teaching engine (optional) ──────────────────────────────────────
+    teaching_engine: TeachingEngine | None = field(default=None, repr=False)
 
     # ── Loop tracking ────────────────────────────────────────────────────
     iteration: int = 0

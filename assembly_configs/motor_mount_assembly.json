@@ -1,0 +1,52 @@
+{
+  "name": "motor_mount_assembly",
+  "parts": [
+    {
+      "id": "aluminum_baseplate",
+      "step": "outputs/cad/step/aluminum_baseplate.step",
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ],
+      "notes": "Rectangular aluminum baseplate 80mm long x 50mm wide x 8mm thick. Has 4 countersunk M4 mounting hole"
+    },
+    {
+      "id": "l_bracket",
+      "step": "outputs/cad/step/l_bracket.step",
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ],
+      "notes": "L-shaped bracket made from 3mm thick aluminum sheet. One flange is 40mm long x 30mm wide and the oth",
+      "depends_on": "aluminum_baseplate"
+    },
+    {
+      "id": "nema17_motor_plate",
+      "step": "outputs/cad/step/nema17_motor_plate.step",
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ],
+      "notes": "Square motor mounting plate 42mm x 42mm x 3mm thick, made from aluminum. Has 4 M3 clearance holes (3",
+      "depends_on": "l_bracket"
+    }
+  ]
+}

@@ -83,6 +83,53 @@ _FAILURE_FIXES: dict[str, str] = {
     "SF.*below":             "Safety factor too low. Increase wall thickness, use stronger material, or reduce applied load.",
     "stress.*exceed":        "Stress exceeds yield. Increase cross-section area or use higher-strength material.",
     "deceleration.*exceed":  "Impact deceleration too high. Add energy-absorbing features (thicker corners, softer material).",
+    # Contract validator (genus + radial features)
+    "contract.*hole count.*got 0": (
+        "Holes were NOT actually cut despite spec asking for them. Likely causes: "
+        "(1) hole positions fell on the part edge — move them inward by ≥2mm; "
+        "(2) `.faces('>Z')` selected the wrong face after a prior cut — pre-compute "
+        "hole positions and cut all in one .pushPoints(...).hole() call; "
+        "(3) hole diameter is larger than available material. "
+        "Verify with: print(result.val().Volume()) before and after the cut."
+    ),
+    "contract.*hole count": (
+        "Number of through-holes doesn't match spec. The validator counts holes via "
+        "the mesh's Euler characteristic (genus). Check: are slot cutters merging "
+        "into one super-slot (slot_length > 2*slot_spacing)? Are hole positions "
+        "overlapping each other or the part boundary? Cut each feature explicitly "
+        "rather than chaining .pushPoints + .hole repeatedly — cadquery's slot2D "
+        "doesn't iterate over multiple pushed points."
+    ),
+    "contract.*radial features.*detected 0": (
+        "Spec asked for blades/spokes but geometry is rotationally uniform (a plain "
+        "disc). Common cause: cutter wedges defined in a loop but never .cut() applied. "
+        "For N blades: cut N-1 gap sectors between blades, OR build N blade-shaped "
+        "wedges and union them onto a center hub."
+    ),
+    "contract.*radial features": (
+        "Wrong number of radial lobes (blades/spokes). The detector uses FFT on the "
+        "midplane radial profile — most-energetic frequency = lobe count. If detected "
+        "is much higher than expected, your shape is too smooth/disc-like. If much "
+        "lower, the lobes may be too narrow or too symmetric to register as separate."
+    ),
+    "contract.*bbox.*expected": (
+        "Bounding box doesn't match spec dimensions within 20% tolerance. "
+        "Re-check the literal values in .box() / .extrude() / .circle() calls. "
+        "Watch for radius/diameter confusion: .circle(r) takes radius, but spec gives diameter."
+    ),
+    "contract.*watertight.*got False": (
+        "Mesh has gaps — STL slicer would fail. Avoid .shell() with thin walls "
+        "(<1mm). Use boolean .cut() with a positive cutter solid instead of "
+        "ambiguous face selectors after unions."
+    ),
+    "contract.*solid count": (
+        "Geometry has wrong number of disconnected solids. Use result = base.union(feature) "
+        "to merge all features into one body before exporting."
+    ),
+    "contract.*volume.*below": (
+        "Volume is too small — features may have over-cut the part. Verify cutter "
+        "dimensions (e.g. wall_mm * 2 < part smallest dimension)."
+    ),
 }
 
 

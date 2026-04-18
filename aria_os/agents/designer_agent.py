@@ -62,6 +62,24 @@ class DesignerAgent(BaseAgent):
                 print(f"  [{self.name}] CADSmith failed: {_cs_err}, falling back to LLM")
 
         # LLM-based generation
+        if state.iteration <= 1:
+            self.explain_decision(
+                "design",
+                "No exact template match — using AI code generation",
+                "When no pre-built template covers your part type, the system generates "
+                "CadQuery code using a large language model. A similar template is injected "
+                "as a reference so the AI follows proven CadQuery patterns.",
+                tags=["routing", "cad"],
+            )
+        elif state.refinement_instructions:
+            self.explain(
+                "design",
+                f"Refining design (iteration {state.iteration}) based on evaluation feedback",
+                reasoning="The evaluator found issues with the previous attempt. "
+                "The AI will now regenerate with explicit corrections.",
+                tags=["refinement"],
+            )
+
         # Build the user prompt from state
         prompt_parts = [
             f"## Design Request\n{state.goal}\n",
@@ -291,6 +309,26 @@ class DesignerAgent(BaseAgent):
                 return False
 
             print(f"  [{self.name}] Using template for '{part_type or part_id}' with agent params")
+
+            self.explain_decision(
+                "design",
+                f"Using parametric template '{part_type or part_id}' (match: {match_type})",
+                "Templates are pre-tested CadQuery scripts that produce reliable geometry. "
+                "They're faster and more predictable than LLM-generated code. "
+                "The agent-extracted parameters customize dimensions and features.",
+                related_param="part_type",
+                tags=["routing", "cad"],
+            )
+            # Teach about key parameter choices
+            for key in ("od_mm", "bore_mm", "n_bolts", "n_blades", "n_fins", "n_teeth"):
+                val = _safe_spec.get(key)
+                if val is not None:
+                    self.explain(
+                        "design",
+                        f"Template parameter {key}={val} applied from your specification",
+                        tags=["geometry"],
+                        related_param=key,
+                    )
 
             state.code = code
             state.generation_error = ""

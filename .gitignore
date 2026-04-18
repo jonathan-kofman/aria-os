@@ -6,16 +6,28 @@ __pycache__/
 .venv/
 *.egg-info/
 
-# Outputs (regenerable)
-outputs/cad/step/
-outputs/cad/stl/
-outputs/cad/generated_code/
-outputs/cad/dxf/
-outputs/cam/
-outputs/drawings/
-outputs/ecad/
-outputs/screenshots/
+# Outputs (regenerable) — everything under outputs/ is reproducible from the
+# pipeline; never commit. Only keep .gitkeep markers for required dirs.
+outputs/
 !outputs/**/.gitkeep
+
+# Generated assemblies anywhere — large STEP / STL / 3MF / GCODE binaries
+*.stl
+*.f3d
+*.3dm
+*.3mf
+*.gcode
+*.bgcode
+
+# Cache directories
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Workspace scratch (test data + base64 image dumps from agent runs)
+workspace/
+!workspace/**/.gitkeep
 
 # Workspace
 workspace/scratchpad/

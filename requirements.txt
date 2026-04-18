@@ -24,3 +24,5 @@ requests>=2.31.0
 rich>=13.0.0
 pyserial
 plotly
+joblib>=1.3.0       # parallel catalog generation (process pool, ~3x speedup)
+matplotlib>=3.8.0   # GD&T SVG drawings + render PNGs (pinned for stability)

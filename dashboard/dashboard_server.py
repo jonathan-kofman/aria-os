@@ -45,11 +45,21 @@ _log = _logging.getLogger("aria_dashboard")
 
 app = FastAPI(title="ARIA-OS Dashboard", version="2.0.0")
 
+# CORS — for Vercel-hosted frontend hitting this Railway backend, set
+# ARIA_CORS_ORIGINS=https://aria.vercel.app,https://aria-preview.vercel.app
+# in the Railway environment. Defaults to "*" (open) for local dev.
+_cors_origins_raw = os.environ.get("ARIA_CORS_ORIGINS", "*").strip()
+_cors_origins = (
+    [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+    if _cors_origins_raw != "*"
+    else ["*"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=(_cors_origins != ["*"]),  # credentials only with explicit origins
 )
 
 # Process-start timestamps used by /api/version
@@ -1433,6 +1443,12 @@ async def react_cem_summary():
 
 
 # Serve static files (index.html etc.)
+# IMPORTANT: mount more-specific paths first. Starlette matches mounts in
+# insertion order, so /static/uploads must come before /static.
+_UPLOADS_DIR = REPO_ROOT / "outputs" / "uploads"
+_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/uploads", StaticFiles(directory=str(_UPLOADS_DIR)), name="uploads")
+
 if STATIC.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
@@ -1445,6 +1461,196 @@ async def index():
     return HTMLResponse(html.read_text(encoding="utf-8"))
 
 
+# ---------------------------------------------------------------------------
+# PWA root-level aliases
+# Service workers registered at /sw.js get site-wide scope. The manifest is
+# also aliased at the root so tools that probe "/manifest.json" find it.
+# ---------------------------------------------------------------------------
+
+@app.get("/sw.js")
+async def pwa_service_worker():
+    sw = STATIC / "sw.js"
+    if not sw.is_file():
+        raise HTTPException(status_code=404, detail="sw.js not found")
+    # Service-Worker-Allowed lets the SW control the whole origin even when
+    # served from a nested path (belt-and-suspenders: we already serve it
+    # from root here, but StaticFiles at /static/sw.js benefits too).
+    return FileResponse(
+        str(sw),
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/manifest.json")
+async def pwa_manifest():
+    mf = STATIC / "manifest.json"
+    if not mf.is_file():
+        raise HTTPException(status_code=404, detail="manifest.json not found")
+    return FileResponse(str(mf), media_type="application/manifest+json")
+
+
+# ---------------------------------------------------------------------------
+# Mobile: printable run summary
+# Renders a static HTML page for the latest (or specified) run that formats
+# cleanly when saved as PDF or printed from a phone. No JS, no sockets.
+# ---------------------------------------------------------------------------
+
+def _html_escape(s: Any) -> str:
+    try:
+        from html import escape as _esc
+        return _esc(str(s), quote=True)
+    except Exception:
+        return str(s)
+
+
+@app.get("/print")
+async def print_summary(run_id: str = ""):
+    """
+    Printable summary for a run. If run_id is omitted, uses the most recent run.
+    Renders plain HTML with generous margins and no dark background so it
+    prints/saves to PDF cleanly from a mobile browser.
+    """
+    if not _runs:
+        return HTMLResponse("<h1>No runs yet</h1><p>Start a run from the dashboard, then reload.</p>", status_code=200)
+
+    if run_id:
+        rec = _runs.get(run_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="run not found")
+    else:
+        # Most recent by start time
+        rec = max(_runs.values(), key=lambda r: r.get("start", 0))
+
+    lines = rec.get("lines", []) or []
+    last_lines = lines[-120:]  # cap for print
+    start = rec.get("start")
+    end = rec.get("end") or time.time()
+    elapsed = round(end - start, 1) if start else None
+    start_iso = datetime.fromtimestamp(start, tz=timezone.utc).isoformat() if start else "?"
+
+    # Pull useful artifact paths out of lines (mirrors /api/run/{id}/status logic)
+    step_path = stl_path = None
+    geom_pass = None
+    for ln in reversed([l.get("text", "") for l in lines]):
+        if step_path is None and "STEP:" in ln and "KB" in ln:
+            step_path = ln.split("STEP:")[-1].strip().split("(")[0].strip()
+        if stl_path is None and "STL:" in ln and "KB" in ln:
+            stl_path = ln.split("STL:")[-1].strip().split("(")[0].strip()
+        if geom_pass is None and "Geometry:" in ln:
+            geom_pass = "PASS" in ln
+        if step_path and stl_path and geom_pass is not None:
+            break
+
+    rows = [
+        ("Run ID",       rec.get("id", "?")),
+        ("Command",      rec.get("command", "?")),
+        ("Goal",         rec.get("goal", "")),
+        ("Status",       rec.get("status", "?")),
+        ("Return code", rec.get("returncode")),
+        ("Started (UTC)", start_iso),
+        ("Elapsed (s)",  elapsed),
+        ("STEP",         step_path or "-"),
+        ("STL",          stl_path or "-"),
+        ("Geometry",     "PASS" if geom_pass else ("FAIL" if geom_pass is False else "-")),
+    ]
+
+    rows_html = "\n".join(
+        f"<tr><th style='text-align:left;padding:4px 10px;background:#f4f4f4;border:1px solid #ddd;'>{_html_escape(k)}</th>"
+        f"<td style='padding:4px 10px;border:1px solid #ddd;font-family:monospace;'>{_html_escape(v) if v is not None else '-'}</td></tr>"
+        for k, v in rows
+    )
+
+    log_html = _html_escape("\n".join(l.get("text", "") for l in last_lines)) or "(no output)"
+
+    html = f"""<!doctype html>
+<html><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>ARIA-OS Run {_html_escape(rec.get('id', ''))}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color:#111;
+         background:#fff; max-width: 820px; margin: 24px auto; padding: 0 16px; font-size:14px; }}
+  h1 {{ font-size: 20px; margin: 0 0 8px 0; }}
+  h2 {{ font-size: 16px; margin: 24px 0 8px 0; border-bottom:1px solid #ccc; padding-bottom:4px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  pre {{ background:#f7f7f7; border:1px solid #ddd; padding:10px; font-size:12px;
+         overflow-x:auto; white-space:pre-wrap; word-break:break-word; max-height:none; }}
+  .muted {{ color:#666; font-size:12px; }}
+  @media print {{
+    body {{ margin: 0; }}
+    pre  {{ font-size: 10px; }}
+    a[href]:after {{ content: ""; }}
+  }}
+</style>
+</head><body>
+<h1>ARIA-OS Run Summary</h1>
+<div class="muted">Generated {datetime.now(timezone.utc).isoformat(timespec='seconds')}</div>
+<h2>Run</h2>
+<table>{rows_html}</table>
+<h2>Tail of log (last {len(last_lines)} lines)</h2>
+<pre>{log_html}</pre>
+<div class="muted">ARIA-OS Dashboard &middot; run_id={_html_escape(rec.get('id', ''))}</div>
+</body></html>
+"""
+    return HTMLResponse(html)
+
+
+# ---------------------------------------------------------------------------
+# Mobile: generic file upload (STL / STEP)
+# Saves to outputs/uploads/<uuid>.<ext> and returns the viewer URL.
+# ---------------------------------------------------------------------------
+
+_ALLOWED_UPLOAD_EXTS = {".stl", ".step", ".stp", ".obj", ".3mf", ".ply"}
+
+
+@app.post("/api/upload")
+async def upload_mesh(file: UploadFile = File(...)):
+    """
+    Accept an STL/STEP upload from mobile, save to outputs/uploads/<uuid>.<ext>,
+    and return a URL the dashboard Three.js viewer can load.
+
+    Note: files in outputs/uploads/ are served via /api/file?path=..., which
+    already guards against path traversal. A /static/uploads/ alias is also
+    mounted for direct URL-style access (simpler on mobile).
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="filename missing")
+
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in _ALLOWED_UPLOAD_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported file type: {suffix}. Allowed: {sorted(_ALLOWED_UPLOAD_EXTS)}",
+        )
+
+    upload_dir = REPO_ROOT / "outputs" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    file_id = uuid.uuid4().hex[:12]
+    out_path = upload_dir / f"{file_id}{suffix}"
+    try:
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="empty upload")
+        out_path.write_bytes(data)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to persist upload: {exc}")
+
+    rel = f"outputs/uploads/{out_path.name}"
+    return {
+        "status": "ok",
+        "id": file_id,
+        "filename": file.filename,
+        "size_bytes": out_path.stat().st_size,
+        "path": rel,
+        "url":         f"/static/uploads/{out_path.name}",   # direct file URL (see mount below)
+        "api_file_url": f"/api/file?path={rel}",             # guarded relative-path URL
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Entrypoint
 # --------------------------------------------------------------------------- #
@@ -1452,5 +1658,10 @@ async def index():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("ARIA_PORT", 7861))
-    print(f"ARIA-OS Dashboard → http://localhost:{port}")
-    uvicorn.run("dashboard.dashboard_server:app", host="0.0.0.0", port=port, reload=False)
+    print(f"ARIA-OS Dashboard -> http://localhost:{port}")
+    # Pass the app object directly instead of an import-string so the script
+    # runs whether or not the `dashboard` package is on sys.path. (Running
+    # with `python dashboard/dashboard_server.py` makes the script's own
+    # directory the cwd-of-import, not the repo root, so the import string
+    # form fails with `ModuleNotFoundError: No module named 'dashboard'`.)
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)

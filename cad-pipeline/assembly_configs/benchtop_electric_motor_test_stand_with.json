@@ -1,0 +1,1043 @@
+{
+  "name": "benchtop electric motor test stand with load cell and tachometer",
+  "_generated_by": "scenario_interpreter.interpret_system",
+  "_note": "Positions are LLM estimates \u2014 adjust before final assembly.",
+  "parts": [
+    {
+      "id": "base_frame_main_plate",
+      "step": "outputs/cad/step/base_frame_main_plate.step",
+      "pos": [
+        300.0,
+        200.0,
+        6.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_longitudinal_rail",
+      "step": "outputs/cad/step/base_frame_longitudinal_rail.step",
+      "pos": [
+        300.0,
+        20.0,
+        20.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_cross_rail",
+      "step": "outputs/cad/step/base_frame_cross_rail.step",
+      "pos": [
+        300.0,
+        200.0,
+        20.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_corner_gusset",
+      "step": "outputs/cad/step/base_frame_corner_gusset.step",
+      "pos": [
+        30.0,
+        30.0,
+        20.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_motor_rail_adapter",
+      "step": "outputs/cad/step/base_frame_motor_rail_adapter.step",
+      "pos": [
+        150.0,
+        200.0,
+        18.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_load_cell_pedestal",
+      "step": "outputs/cad/step/base_frame_load_cell_pedestal.step",
+      "pos": [
+        480.0,
+        200.0,
+        37.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_tachometer_bracket",
+      "step": "outputs/cad/step/base_frame_tachometer_bracket.step",
+      "pos": [
+        200.0,
+        280.0,
+        30.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_leveling_foot",
+      "step": "outputs/cad/step/base_frame_leveling_foot.step",
+      "pos": [
+        30.0,
+        30.0,
+        -15.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_lock_nut",
+      "step": "outputs/cad/step/base_frame_lock_nut.step",
+      "pos": [
+        30.0,
+        30.0,
+        5.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_cable_channel",
+      "step": "outputs/cad/step/base_frame_cable_channel.step",
+      "pos": [
+        300.0,
+        390.0,
+        15.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_electronics_bracket",
+      "step": "outputs/cad/step/base_frame_electronics_bracket.step",
+      "pos": [
+        560.0,
+        200.0,
+        40.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "base_frame_dowel_pin",
+      "step": "outputs/cad/step/base_frame_dowel_pin.step",
+      "pos": [
+        300.0,
+        200.0,
+        12.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "mut_mount_base_plate",
+      "step": "outputs/cad/step/mut_mount_base_plate.step",
+      "pos": [
+        150.0,
+        100.0,
+        10.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "mut_mount_adapter_plate",
+      "step": "outputs/cad/step/mut_mount_adapter_plate.step",
+      "pos": [
+        150.0,
+        100.0,
+        22.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "mut_mount_vblock_left",
+      "step": "outputs/cad/step/mut_mount_vblock_left.step",
+      "pos": [
+        80.0,
+        100.0,
+        35.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "mut_mount_vblock_right",
+      "step": "outputs/cad/step/mut_mount_vblock_right.step",
+      "pos": [
+        220.0,
+        100.0,
+        35.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "mut_mount_clamp_strap",
+      "step": "outputs/cad/step/mut_mount_clamp_strap.step",
+      "pos": [
+        150.0,
+        100.0,
+        70.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "mut_mount_clamp_knob",
+      "step": "outputs/cad/step/mut_mount_clamp_knob.step",
+      "pos": [
+        150.0,
+        60.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "mut_mount_alignment_shim_set",
+      "step": "outputs/cad/step/mut_mount_alignment_shim_set.step",
+      "pos": [
+        150.0,
+        100.0,
+        18.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "mut_mount_indicator_bracket",
+      "step": "outputs/cad/step/mut_mount_indicator_bracket.step",
+      "pos": [
+        270.0,
+        150.0,
+        50.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_brake_adapter_flange",
+      "step": "outputs/cad/step/load_brake_adapter_flange.step",
+      "pos": [
+        300.0,
+        80.0,
+        120.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_brake_base_plate",
+      "step": "outputs/cad/step/load_brake_base_plate.step",
+      "pos": [
+        300.0,
+        40.0,
+        80.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_brake_torque_arm",
+      "step": "outputs/cad/step/load_brake_torque_arm.step",
+      "pos": [
+        300.0,
+        80.0,
+        200.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_brake_loadcell_bracket",
+      "step": "outputs/cad/step/load_brake_loadcell_bracket.step",
+      "pos": [
+        300.0,
+        80.0,
+        240.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_brake_coupling_half",
+      "step": "outputs/cad/step/load_brake_coupling_half.step",
+      "pos": [
+        240.0,
+        80.0,
+        120.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_brake_cooling_shroud",
+      "step": "outputs/cad/step/load_brake_cooling_shroud.step",
+      "pos": [
+        310.0,
+        80.0,
+        130.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_cell_torque_arm_beam",
+      "step": "outputs/cad/step/load_cell_torque_arm_beam.step",
+      "pos": [
+        250.0,
+        80.0,
+        120.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_cell_torque_cell_mount_block",
+      "step": "outputs/cad/step/load_cell_torque_cell_mount_block.step",
+      "pos": [
+        250.0,
+        40.0,
+        100.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_cell_torque_shear_load_cell",
+      "step": "outputs/cad/step/load_cell_torque_shear_load_cell.step",
+      "pos": [
+        250.0,
+        60.0,
+        110.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_cell_torque_pivot_housing",
+      "step": "outputs/cad/step/load_cell_torque_pivot_housing.step",
+      "pos": [
+        200.0,
+        80.0,
+        120.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_cell_torque_axial_isolation_flexure",
+      "step": "outputs/cad/step/load_cell_torque_axial_isolation_flexure.step",
+      "pos": [
+        195.0,
+        80.0,
+        120.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_cell_torque_wiring_strain_relief",
+      "step": "outputs/cad/step/load_cell_torque_wiring_strain_relief.step",
+      "pos": [
+        260.0,
+        30.0,
+        95.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "load_cell_torque_measurement_baseplate",
+      "step": "outputs/cad/step/load_cell_torque_measurement_baseplate.step",
+      "pos": [
+        200.0,
+        75.0,
+        85.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "safety_guarding_main_panel",
+      "step": "outputs/cad/step/safety_guarding_main_panel.step",
+      "pos": [
+        150.0,
+        100.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "safety_guarding_rear_panel",
+      "step": "outputs/cad/step/safety_guarding_rear_panel.step",
+      "pos": [
+        150.0,
+        0.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "safety_guarding_left_end_panel",
+      "step": "outputs/cad/step/safety_guarding_left_end_panel.step",
+      "pos": [
+        0.0,
+        75.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "safety_guarding_right_end_panel",
+      "step": "outputs/cad/step/safety_guarding_right_end_panel.step",
+      "pos": [
+        300.0,
+        75.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "safety_guarding_base_frame",
+      "step": "outputs/cad/step/safety_guarding_base_frame.step",
+      "pos": [
+        150.0,
+        75.0,
+        5.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "safety_guarding_hinge",
+      "step": "outputs/cad/step/safety_guarding_hinge.step",
+      "pos": [
+        150.0,
+        0.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "safety_guarding_latch",
+      "step": "outputs/cad/step/safety_guarding_latch.step",
+      "pos": [
+        300.0,
+        100.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "safety_guarding_warning_label",
+      "step": "outputs/cad/step/safety_guarding_warning_label.step",
+      "pos": [
+        150.0,
+        100.0,
+        145.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "shaft_coupling_motor_hub",
+      "step": "outputs/cad/step/shaft_coupling_motor_hub.step",
+      "pos": [
+        200.0,
+        75.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "shaft_coupling_load_hub",
+      "step": "outputs/cad/step/shaft_coupling_load_hub.step",
+      "pos": [
+        260.0,
+        75.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "shaft_coupling_spider",
+      "step": "outputs/cad/step/shaft_coupling_spider.step",
+      "pos": [
+        230.0,
+        75.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "shaft_coupling_spacer",
+      "step": "outputs/cad/step/shaft_coupling_spacer.step",
+      "pos": [
+        230.0,
+        75.0,
+        100.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "shaft_coupling_guard",
+      "step": "outputs/cad/step/shaft_coupling_guard.step",
+      "pos": [
+        230.0,
+        75.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "tachometer_target_disk",
+      "step": "outputs/cad/step/tachometer_target_disk.step",
+      "pos": [
+        200.0,
+        75.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "tachometer_sensor_bracket",
+      "step": "outputs/cad/step/tachometer_sensor_bracket.step",
+      "pos": [
+        200.0,
+        110.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "tachometer_sensor_clamp",
+      "step": "outputs/cad/step/tachometer_sensor_clamp.step",
+      "pos": [
+        200.0,
+        112.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "tachometer_cable_clip",
+      "step": "outputs/cad/step/tachometer_cable_clip.step",
+      "pos": [
+        180.0,
+        130.0,
+        20.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "tachometer_pcb_mount_plate",
+      "step": "outputs/cad/step/tachometer_pcb_mount_plate.step",
+      "pos": [
+        100.0,
+        160.0,
+        20.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "electronics_enclosure_main_box",
+      "step": "outputs/cad/step/electronics_enclosure_main_box.step",
+      "pos": [
+        450.0,
+        100.0,
+        150.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "electronics_enclosure_front_door",
+      "step": "outputs/cad/step/electronics_enclosure_front_door.step",
+      "pos": [
+        450.0,
+        100.0,
+        225.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "electronics_enclosure_door_gasket",
+      "step": "outputs/cad/step/electronics_enclosure_door_gasket.step",
+      "pos": [
+        450.0,
+        100.0,
+        223.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "electronics_enclosure_din_rail_plate",
+      "step": "outputs/cad/step/electronics_enclosure_din_rail_plate.step",
+      "pos": [
+        450.0,
+        100.0,
+        155.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "electronics_enclosure_din_rail_top",
+      "step": "outputs/cad/step/electronics_enclosure_din_rail_top.step",
+      "pos": [
+        450.0,
+        130.0,
+        160.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "electronics_enclosure_din_rail_bottom",
+      "step": "outputs/cad/step/electronics_enclosure_din_rail_bottom.step",
+      "pos": [
+        450.0,
+        70.0,
+        160.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "electronics_enclosure_cable_gland_panel",
+      "step": "outputs/cad/step/electronics_enclosure_cable_gland_panel.step",
+      "pos": [
+        450.0,
+        25.0,
+        150.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "electronics_enclosure_fan_bracket",
+      "step": "outputs/cad/step/electronics_enclosure_fan_bracket.step",
+      "pos": [
+        450.0,
+        220.0,
+        175.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "electronics_enclosure_fan_filter",
+      "step": "outputs/cad/step/electronics_enclosure_fan_filter.step",
+      "pos": [
+        450.0,
+        245.0,
+        175.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "electronics_enclosure_mount_brackets",
+      "step": "outputs/cad/step/electronics_enclosure_mount_brackets.step",
+      "pos": [
+        450.0,
+        50.0,
+        130.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "ui_panel_enclosure_box",
+      "step": "outputs/cad/step/ui_panel_enclosure_box.step",
+      "pos": [
+        600.0,
+        900.0,
+        150.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "ui_panel_faceplate",
+      "step": "outputs/cad/step/ui_panel_faceplate.step",
+      "pos": [
+        600.0,
+        900.0,
+        189.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "ui_panel_estop_button",
+      "step": "outputs/cad/step/ui_panel_estop_button.step",
+      "pos": [
+        720.0,
+        920.0,
+        192.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "ui_panel_lcd_display",
+      "step": "outputs/cad/step/ui_panel_lcd_display.step",
+      "pos": [
+        580.0,
+        910.0,
+        192.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "ui_panel_rotary_encoder",
+      "step": "outputs/cad/step/ui_panel_rotary_encoder.step",
+      "pos": [
+        650.0,
+        870.0,
+        192.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "ui_panel_power_switch",
+      "step": "outputs/cad/step/ui_panel_power_switch.step",
+      "pos": [
+        690.0,
+        870.0,
+        192.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "ui_panel_mounting_arm",
+      "step": "outputs/cad/step/ui_panel_mounting_arm.step",
+      "pos": [
+        600.0,
+        850.0,
+        110.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "cable_management_chain_mount_bracket",
+      "step": "outputs/cad/step/cable_management_chain_mount_bracket.step",
+      "pos": [
+        50.0,
+        20.0,
+        60.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "cable_management_drag_chain",
+      "step": "outputs/cad/step/cable_management_drag_chain.step",
+      "pos": [
+        150.0,
+        20.0,
+        60.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "cable_management_strain_relief_bar",
+      "step": "outputs/cad/step/cable_management_strain_relief_bar.step",
+      "pos": [
+        300.0,
+        15.0,
+        80.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "cable_management_separation_panel",
+      "step": "outputs/cad/step/cable_management_separation_panel.step",
+      "pos": [
+        280.0,
+        40.0,
+        70.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "cable_management_flex_conduit",
+      "step": "outputs/cad/step/cable_management_flex_conduit.step",
+      "pos": [
+        200.0,
+        30.0,
+        75.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "cable_management_connector_label_plate",
+      "step": "outputs/cad/step/cable_management_connector_label_plate.step",
+      "pos": [
+        320.0,
+        10.0,
+        90.0
+      ],
+      "rot": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

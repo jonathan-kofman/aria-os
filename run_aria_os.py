@@ -1612,34 +1612,93 @@ def main():
             print(f"\n[ANALYZE] {_result['analysis_type']}  {'PASS' if _result['passed'] else 'FAIL'}")
         return
 
-    # --- --view: open an existing STL/STEP file in the Three.js browser viewer ---
-    if len(sys.argv) >= 2 and sys.argv[1] == "--view":
+    # --- --view / --preview: open ANY artifact (STL/STEP/SVG/DXF/PNG/JPG) ---
+    # Routes by file extension. STL/STEP open the Three.js browser viewer,
+    # DXF opens the dxf preview UI, SVG/PNG/JPG open in default browser.
+    if len(sys.argv) >= 2 and sys.argv[1] in ("--view", "--preview"):
         if len(sys.argv) < 3:
-            print("Usage: python run_aria_os.py --view <file.stl|file.step>")
+            print("Usage: python run_aria_os.py --view <file>")
+            print("  Supported: .stl, .step, .stp, .dxf, .svg, .png, .jpg, .jpeg")
             sys.exit(1)
         _view_path = Path(sys.argv[2])
         if not _view_path.exists():
-            # Try relative to repo root
             _view_path = ROOT / sys.argv[2]
         if not _view_path.exists():
             print(f"[VIEW] File not found: {sys.argv[2]}")
             sys.exit(1)
-        # Convert STEP → STL if needed (preview_ui only reads STL)
-        _stl_for_view = _view_path
-        if _view_path.suffix.lower() in (".step", ".stp"):
-            _stl_for_view = _view_path.with_suffix(".stl")
-            if not _stl_for_view.exists():
-                print(f"[VIEW] Converting STEP → STL for viewer...")
-                try:
-                    import cadquery as cq
-                    _shape = cq.importers.importStep(str(_view_path))
-                    cq.exporters.export(_shape, str(_stl_for_view))
-                except Exception as _e:
-                    print(f"[VIEW] STEP→STL conversion failed: {_e}")
-                    sys.exit(1)
-        from aria_os.preview_ui import show_preview
-        show_preview(str(_stl_for_view), _view_path.stem)
-        return
+        _suffix = _view_path.suffix.lower()
+
+        if _suffix in (".stl", ".step", ".stp"):
+            # 3D model — Three.js viewer (existing path)
+            _stl_for_view = _view_path
+            if _suffix in (".step", ".stp"):
+                _stl_for_view = _view_path.with_suffix(".stl")
+                if not _stl_for_view.exists():
+                    print(f"[VIEW] Converting STEP -> STL for viewer...")
+                    try:
+                        import cadquery as cq
+                        _shape = cq.importers.importStep(str(_view_path))
+                        cq.exporters.export(_shape, str(_stl_for_view))
+                    except Exception as _e:
+                        print(f"[VIEW] STEP->STL conversion failed: {_e}")
+                        sys.exit(1)
+            from aria_os.preview_ui import show_preview
+            show_preview(str(_stl_for_view), _view_path.stem)
+            return
+
+        if _suffix == ".dxf":
+            # DXF drawing — dedicated DXF preview UI
+            from aria_os.preview_ui import show_dxf_preview
+            show_dxf_preview(str(_view_path), title=_view_path.stem)
+            return
+
+        if _suffix in (".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"):
+            # 2D drawing/render — open in default browser using a file:// URL
+            import webbrowser
+            _abs = _view_path.resolve()
+            _url = _abs.as_uri()
+            print(f"[VIEW] Opening {_view_path.name} in default browser")
+            print(f"[VIEW] URL: {_url}")
+            try:
+                webbrowser.open(_url)
+            except Exception as _e:
+                print(f"[VIEW] Could not auto-open: {_e}")
+                print(f"[VIEW] Open manually: {_abs}")
+            return
+
+        if _suffix == ".json":
+            # Detect ECAD BOM JSONs and render the PCB layout. Otherwise pretty-print.
+            import json as _json
+            try:
+                _data = _json.loads(_view_path.read_text(encoding="utf-8"))
+            except Exception as _e:
+                print(f"[VIEW] JSON parse failed: {_e}")
+                return
+            _is_ecad_bom = (
+                isinstance(_data, dict)
+                and isinstance(_data.get("components"), list)
+                and any(isinstance(c, dict) and "x_mm" in c
+                        for c in _data["components"][:5])
+            )
+            if _is_ecad_bom:
+                print(f"[VIEW] Detected ECAD BOM — rendering PCB layout preview")
+                from aria_os.ecad.ecad_preview import render_pcb_preview
+                _png = render_pcb_preview(_view_path)
+                print(f"[VIEW] Preview: {_png}")
+                # Auto-open the PNG in default browser
+                import webbrowser
+                webbrowser.open(_png.resolve().as_uri())
+                return
+            # Default: pretty-print JSON
+            _txt = _json.dumps(_data, indent=2)
+            print(_txt[:8000])
+            if len(_txt) > 8000:
+                print(f"... (truncated; full file at {_view_path})")
+            return
+
+        print(f"[VIEW] Unsupported file type: {_suffix}")
+        print(f"  Supported: .stl, .step, .stp, .dxf, .svg, .png, .jpg, .json")
+        sys.exit(1)
 
     # --- --image: analyse a photo and derive a goal, then run pipeline ---
     # Uses the fast image-to-CAD path that skips research, DFM, quote, CAM,
@@ -1721,6 +1780,50 @@ def main():
         print("Done.")
         return
 
+    # --- --multi-domain: outer MCAD + ECAD + inner enclosure + drawings + BOMs ---
+    if len(sys.argv) >= 2 and sys.argv[1] == "--multi-domain":
+        from aria_os.multi_domain import run_multi_domain, DEFAULT_DEMO_SPEC
+        _md_args = sys.argv[2:]
+        # Two-spec form: --multi-domain "OUTER" --ecad "ECAD"
+        # Or: --multi-domain  (use the demo spec)
+        _outer_spec = None
+        _ecad_spec = None
+        if "--ecad" in _md_args:
+            _ei = _md_args.index("--ecad")
+            _outer_spec = " ".join(_md_args[:_ei]) or None
+            _ecad_spec = " ".join(_md_args[_ei + 1:]) or None
+        elif _md_args:
+            _outer_spec = " ".join(_md_args)
+        print()
+        print("=" * 64)
+        print("  MULTI-DOMAIN DESIGN — outer MCAD + ECAD + enclosure + drawings + BOMs")
+        if not _outer_spec:
+            print(f"  Using demo spec: {DEFAULT_DEMO_SPEC['name']}")
+        print("=" * 64)
+        _md_result = run_multi_domain(
+            outer_spec=_outer_spec, ecad_spec=_ecad_spec, repo_root=ROOT,
+        )
+        print()
+        for _stg in _md_result.stages:
+            _icon = "[OK]  " if _stg.success else "[FAIL]"
+            print(f"  {_icon} {_stg.name:<20s} ({_stg.elapsed_s:.1f}s)")
+            if _stg.error:
+                print(f"           -> {_stg.error[:140]}")
+        print("-" * 64)
+        _verdict = ("PASS" if _md_result.success
+                    else ("PARTIAL" if _md_result.partial_success else "FAIL"))
+        print(f"  OVERALL: {_verdict}  ({_md_result.elapsed_s:.1f}s)")
+        if _md_result.html_index:
+            print(f"  Preview: {_md_result.html_index}")
+        if _md_result.bom_mcad and _md_result.bom_mcad.get("summary"):
+            _msum = _md_result.bom_mcad["summary"]
+            print(f"  MCAD BOM: {_msum.get('total_parts', 0)} parts, "
+                  f"${_msum.get('total_purchased_cost_usd', 0):.2f}")
+        if _md_result.bom_ecad:
+            print(f"  ECAD BOM: {_md_result.bom_ecad.get('total_components', 0)} components")
+        print("=" * 64)
+        sys.exit(0 if _md_result.success or _md_result.partial_success else 1)
+
     # --- --terrain: synthetic terrain DXF + STL from natural language ---
     if len(sys.argv) >= 2 and sys.argv[1] == "--terrain":
         if len(sys.argv) < 3:
@@ -1750,8 +1853,68 @@ def main():
         search_similar(_search_desc)
         return
 
+    # ── --ask: interactive manufacturing Q&A (Jarvis mode) ────────────
+    if len(sys.argv) >= 2 and sys.argv[1] == "--ask":
+        from aria_os.teaching.engine import TeachingEngine, DifficultyLevel
+        _ask_level = "intermediate"
+        if "--level" in sys.argv:
+            _li = sys.argv.index("--level")
+            if _li + 1 < len(sys.argv):
+                _ask_level = sys.argv[_li + 1]
+        _level_map = {
+            "beginner": DifficultyLevel.BEGINNER,
+            "intermediate": DifficultyLevel.INTERMEDIATE,
+            "expert": DifficultyLevel.EXPERT,
+        }
+        _engine = TeachingEngine(difficulty=_level_map.get(_ask_level, DifficultyLevel.INTERMEDIATE))
+
+        # If a STEP file or goal is provided, load context from the most recent run
+        _ask_args = [a for a in sys.argv[2:] if a not in ("--level", _ask_level)]
+        if _ask_args:
+            _ask_target = _ask_args[0]
+            if Path(_ask_target).exists() and _ask_target.endswith(".step"):
+                _engine.update_context("step_file", _ask_target)
+                # Try to load metadata
+                _meta_p = ROOT / "outputs" / "cad" / "meta" / (Path(_ask_target).stem + ".json")
+                if _meta_p.exists():
+                    _meta = json.loads(_meta_p.read_text(encoding="utf-8"))
+                    _engine.update_context("goal", _meta.get("goal", ""))
+                    _engine.update_context("spec", _meta.get("params", {}))
+                    _engine.update_context("material", _meta.get("params", {}).get("material", ""))
+                    _engine.update_context("cad_tool", _meta.get("cad_tool", ""))
+                    _engine.update_context("bbox", _meta.get("bbox_mm", {}))
+                    print(f"[ASK] Loaded context from {_meta_p.name}")
+
+        print()
+        print("=" * 64)
+        print("  ARIA Manufacturing Assistant")
+        print(f"  Level: {_ask_level} | Type 'quit' to exit")
+        print("=" * 64)
+        print()
+        print("Ask me anything about manufacturing, materials, design,")
+        print("CNC machining, 3D printing, GD&T, DFM, or your current part.")
+        print()
+
+        while True:
+            try:
+                question = input("You: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye.")
+                break
+            if not question:
+                continue
+            if question.lower() in ("quit", "exit", "q"):
+                print("Goodbye.")
+                break
+            answer = _engine.ask(question)
+            print(f"\nARIA: {answer}\n")
+        sys.exit(0)
+
     if len(sys.argv) < 2:
         print("Usage: python run_aria_os.py \"describe the part you want\"")
+        print("       python run_aria_os.py \"part description\" --teach   # with design reasoning narration")
+        print("       python run_aria_os.py \"part description\" --teach-interactive   # pause after each phase for Q&A")
+        print("       python run_aria_os.py --ask [step_file] [--level beginner|intermediate|expert]")
         print("       python run_aria_os.py \"part description\" --fea   # force FEA after export")
         print("       python run_aria_os.py \"part description\" --cfd   # force CFD after export")
         print("       python run_aria_os.py --analyze-part outputs/cad/step/aria_spool.step")
@@ -1796,6 +1959,9 @@ def main():
     _no_agent = "--no-agent" in _args
     _agent_mode_flag = "--agent-mode" in _args
     _coordinator_mode = "--coordinator" in _args
+    _teach_interactive = "--teach-interactive" in _args
+    _teach_mode = "--teach" in _args or _teach_interactive
+    _teach_level = "intermediate"
     _max_agent_iter = 3
     for i, a in enumerate(_args):
         if a == "--max-agent-iterations" and i + 1 < len(_args):
@@ -1803,8 +1969,11 @@ def main():
                 _max_agent_iter = int(_args[i + 1])
             except ValueError:
                 pass
+        if a == "--teach-level" and i + 1 < len(_args):
+            _teach_level = _args[i + 1]
     _strip_flags = {"--preview", "--fea", "--cfd", "--render",
-                    "--no-agent", "--agent-mode", "--coordinator", "--max-agent-iterations"}
+                    "--no-agent", "--agent-mode", "--coordinator", "--max-agent-iterations",
+                    "--teach", "--teach-interactive", "--teach-level"}
     _args_clean = []
     _skip_next = False
     for a in _args:
@@ -1812,7 +1981,7 @@ def main():
             _skip_next = False
             continue
         if a in _strip_flags:
-            if a == "--max-agent-iterations":
+            if a in ("--max-agent-iterations", "--teach-level"):
                 _skip_next = True
             continue
         _args_clean.append(a)
@@ -1851,7 +2020,9 @@ def main():
     from aria_os import run
     try:
         session = run(goal, repo_root=ROOT, preview=_preview,
-                      agent_mode=_agent_mode, max_agent_iterations=_max_agent_iter)
+                      agent_mode=_agent_mode, max_agent_iterations=_max_agent_iter,
+                      teaching=_teach_mode, teaching_level=_teach_level,
+                      teaching_interactive=_teach_interactive)
     except ConnectionRefusedError:
         print("\nERROR: Cannot connect to Ollama.")
         print("  Start it with:  ollama serve")

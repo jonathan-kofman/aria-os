@@ -2,8 +2,23 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
 <title>ARIA-OS</title>
+<!-- PWA: install to home screen, offline shell, dark theme color -->
+<link rel="manifest" href="/static/manifest.json"/>
+<meta name="theme-color" content="#0d1117"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="ARIA"/>
+<link rel="apple-touch-icon" href="/static/icon-192.png"/>
+<script>
+  // Register service worker for offline shell + faster repeat loads
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+    });
+  }
+</script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
 <!-- Three.js for STL 3D preview -->
@@ -33,6 +48,39 @@ window.THREE = THREE; window.STLLoader = STLLoader; window.OrbitControls = Orbit
   .live-dot{animation:pulse 1.4s ease-in-out infinite}
   ::-webkit-scrollbar{width:5px;height:5px}
   ::-webkit-scrollbar-track{background:transparent}
+  /* ── Mobile responsive (≤640px = phone, ≤900px = tablet) ─────────────── */
+  @media (max-width: 900px){
+    body{font-size:13px}
+    .terminal{font-size:11px}
+    /* Stack 2-col layouts vertically */
+    .grid-cols-2,.grid-cols-3,.grid-cols-4{grid-template-columns:1fr !important}
+    /* Reduce padding for small screens */
+    .p-6{padding:1rem !important}
+    .p-4{padding:.75rem !important}
+    /* Make buttons taller for finger taps */
+    button,.btn{min-height:44px;padding:.5rem 1rem}
+    /* Form inputs full-width on mobile */
+    input[type="text"],textarea,select{width:100% !important;font-size:16px !important}
+    /* Hide things that don't fit */
+    .hide-mobile{display:none !important}
+    /* Three.js canvas takes full width */
+    canvas{max-width:100% !important;height:auto !important}
+  }
+  @media (max-width: 640px){
+    body{font-size:12px}
+    h1,h2,h3{font-size:1.05em !important}
+    /* Single-column nav */
+    nav{flex-direction:column !important;gap:.25rem !important}
+    /* Sticky header on mobile */
+    header{position:sticky;top:0;z-index:50;background:#0d1117;border-bottom:1px solid #30363d}
+  }
+  /* Touch-friendly hit targets */
+  @media (pointer:coarse){
+    button,a,select,input{min-height:40px}
+    .badge{padding:.5rem 1rem}
+  }
+  /* Safe-area for notched iOS devices */
+  body{padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
   ::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
   ::-webkit-scrollbar-thumb:hover{background:#484f58}
   .surface{background:#161b22;border:1px solid #21262d;border-radius:6px}

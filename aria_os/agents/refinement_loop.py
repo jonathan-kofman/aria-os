@@ -47,6 +47,17 @@ def run_agent_loop(state: DesignState) -> DesignState:
     evaluator  = EvalAgent(state.domain, state.repo_root)
     refiner    = RefinerAgent(state.repo_root)
 
+    # Wire up teaching engine if present
+    _engine = state.teaching_engine
+    if _engine:
+        _engine.update_context("goal", state.goal)
+        _engine.update_context("domain", state.domain)
+        for agent in (researcher, spec_agent, designer, refiner):
+            if hasattr(agent, "set_teaching_engine"):
+                agent.set_teaching_engine(_engine)
+        # EvalAgent doesn't inherit BaseAgent, so attach directly
+        evaluator._teaching_engine = _engine
+
     # Phase 0: Web research — skip if user already specified enough dimensions.
     # Count numeric dimensions in the raw goal text (e.g. "60mm", "4 holes", "M8")
     # to avoid slow web searches when the user has fully specified the part.
@@ -70,6 +81,15 @@ def run_agent_loop(state: DesignState) -> DesignState:
     print(f"\n  [iter 0] SpecAgent extracting constraints...")
     spec_agent.extract(state)
     event_bus.emit("agent", "SpecAgent done", {"spec": state.spec})
+
+    # Interactive pause after spec extraction
+    if _engine and getattr(_engine, "interactive", False):
+        _spec_summary = f"Specification extraction complete. {len(state.spec)} parameters extracted."
+        if state.spec:
+            _spec_summary += " Key params: " + ", ".join(
+                f"{k}={v}" for k, v in list(state.spec.items())[:5]
+            )
+        _engine.interactive_pause("spec", _spec_summary)
 
     # Phase 2-N: Design → Eval → Refine loop
     for iteration in range(1, state.max_iterations + 1):
@@ -104,6 +124,14 @@ def run_agent_loop(state: DesignState) -> DesignState:
             "failures": len(state.failures),
             "best": state.best_failure_count,
         })
+
+        # Interactive pause after each design iteration evaluation
+        if _engine and getattr(_engine, "interactive", False):
+            _eval_status = "PASSED" if state.eval_passed else f"FAILED ({len(state.failures)} issue(s))"
+            _eval_summary = f"Design iteration {iteration} evaluation {_eval_status}."
+            if not state.eval_passed and state.failures:
+                _eval_summary += " Issues: " + "; ".join(state.failures[:2])
+            _engine.interactive_pause("design", _eval_summary)
 
         # Check convergence
         if state.converged:
