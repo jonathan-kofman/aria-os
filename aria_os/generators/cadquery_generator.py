@@ -983,6 +983,7 @@ def _cq_flat_plate(params: dict[str, Any]) -> str:
     bdia = float(params.get("bolt_dia_mm", 6.0))
     bcr  = params.get("bolt_circle_r_mm")
     bsq  = params.get("bolt_square_mm")
+    bpat = params.get("bolt_pattern")  # None, "corners", "rectangular", "row", "circle"
 
     bore_line = ""
     if bore:
@@ -996,6 +997,26 @@ def _cq_flat_plate(params: dict[str, Any]) -> str:
         elif bcr:
             step = 2 * _math.pi / n
             pts  = [(round(bcr * _math.cos(i * step), 3), round(bcr * _math.sin(i * step), 3)) for i in range(n)]
+        elif n == 4 and (bpat is None or str(bpat).lower() in ("corners", "rectangular", "rect", "corner")):
+            # 4 holes at the plate corners, inset by 2*bolt_dia from each edge.
+            # This is the expected pattern when a goal says "4 holes at the corners"
+            # or simply "4 bolts" on a rectangular plate. Previously this code path
+            # placed the 4 holes linearly along the X axis at y=0, which the contract
+            # validator caught as wrong-position (and vision verifier as linear, not
+            # corner).
+            inset   = 2.0 * bdia
+            x_off   = max(inset, w * 0.10)
+            y_off   = max(inset, d * 0.10)
+            x_off   = min(x_off, w / 2.0 - bdia / 2.0 - 0.5)
+            y_off   = min(y_off, d / 2.0 - bdia / 2.0 - 0.5)
+            half_x  =  w / 2.0 - x_off
+            half_y  =  d / 2.0 - y_off
+            pts = [
+                (round( half_x, 3), round( half_y, 3)),
+                (round(-half_x, 3), round( half_y, 3)),
+                (round(-half_x, 3), round(-half_y, 3)),
+                (round( half_x, 3), round(-half_y, 3)),
+            ]
         else:
             margin  = min(w * 0.15, 15.0)
             x_start = -(w / 2.0 - margin)
