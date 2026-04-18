@@ -41,9 +41,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Pull kicad-cli from the official KiCad image so the backend can export
 # Gerbers headlessly. Adds ~250MB but avoids 1.2GB full apt install.
 # 3dmodels deleted post-copy (~200MB) since Gerber export doesn't need them.
+#
+# IMPORTANT: copy `libki*` broadly (catches both libkicad_* AND libkicommon*).
+# The narrower libkicad_* pattern missed libkicommon.so.9.0.8 on the first
+# attempt and kicad-cli refused to start: "error while loading shared
+# libraries: libkicommon.so.9.0.8". Same goes for OCCT libs — KiCad ships
+# its own libTKernel/libTKMath/etc. (not just libocct_*); copy libTK* too.
 COPY --from=kicad-src /usr/bin/kicad-cli /usr/bin/kicad-cli
-COPY --from=kicad-src /usr/lib/x86_64-linux-gnu/libkicad_* /usr/lib/x86_64-linux-gnu/
-COPY --from=kicad-src /usr/lib/x86_64-linux-gnu/libocct_* /usr/lib/x86_64-linux-gnu/
+COPY --from=kicad-src /usr/lib/x86_64-linux-gnu/libki*   /usr/lib/x86_64-linux-gnu/
+COPY --from=kicad-src /usr/lib/x86_64-linux-gnu/libocct* /usr/lib/x86_64-linux-gnu/
+COPY --from=kicad-src /usr/lib/x86_64-linux-gnu/libTK*   /usr/lib/x86_64-linux-gnu/
 COPY --from=kicad-src /usr/share/kicad /usr/share/kicad
 RUN rm -rf /usr/share/kicad/3dmodels && ldconfig
 
