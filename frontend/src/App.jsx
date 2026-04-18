@@ -1407,15 +1407,29 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
             )}
           </div>
         </Panel>
-        {parts.length > 0 && (
-          <div style={{ display: "flex", gap: "8px", overflowX: "auto", paddingBottom: "4px", flexShrink: 0 }}>
-            {parts.slice(0, 8).map((p, i) => (
-              <button key={p.id || i} onClick={() => setSelectedPart(p)} style={{ flexShrink: 0, padding: "8px 14px", borderRadius: "8px", border: `1px solid ${selectedPart?.id === p.id ? T.ai : T.border}`, background: selectedPart?.id === p.id ? `${T.ai}12` : "rgba(255,255,255,0.02)", color: selectedPart?.id === p.id ? T.ai : T.text2, fontSize: "11px", fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}>
-                {p.part_name || p.id || `Part ${i + 1}`}
-              </button>
-            ))}
-          </div>
-        )}
+        {/* Recent parts row — only show entries that actually have a real name.
+            Unnamed "Part 1 / Part 2 / ..." fallbacks are noisy; the Files tab
+            is the right place to browse by artifact anyway. */}
+        {(() => {
+          const named = parts.filter(p => p.part_name || p.id);
+          if (named.length === 0) return null;
+          return (
+            <div style={{ display: "flex", gap: "8px", overflowX: "auto",
+                          paddingBottom: "4px", flexShrink: 0 }}>
+              {named.slice(0, 8).map((p) => (
+                <button key={p.id} onClick={() => setSelectedPart(p)}
+                  style={{ flexShrink: 0, padding: "8px 14px", borderRadius: "8px",
+                           border: `1px solid ${selectedPart?.id === p.id ? T.ai : T.border}`,
+                           background: selectedPart?.id === p.id ? `${T.ai}12` : "rgba(255,255,255,0.02)",
+                           color: selectedPart?.id === p.id ? T.ai : T.text2,
+                           fontSize: "11px", fontWeight: 600, cursor: "pointer",
+                           whiteSpace: "nowrap" }}>
+                  {p.part_name || p.id}
+                </button>
+              ))}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Right: Quick Builds + Generate form + log.
@@ -1458,8 +1472,8 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
           </div>
         </Panel>
 
-        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: "200px" }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", minHeight: "160px", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+        <Panel title="PIPELINE LOG" style={{ height: "280px", flexShrink: 0 }}>
+          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {logLines.length === 0 ? (
               <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
             ) : (
@@ -1587,8 +1601,8 @@ function GenerateImage({ pipelineStatus, logLines }) {
           </div>
         </Panel>
 
-        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: "200px" }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", minHeight: "160px", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+        <Panel title="PIPELINE LOG" style={{ height: "280px", flexShrink: 0 }}>
+          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {allLog.length === 0 ? (
               <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
             ) : (
@@ -2544,8 +2558,8 @@ function GenerateTerrain({ pipelineStatus, logLines, onGenerate }) {
             </button>
           </div>
         </Panel>
-        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: "200px" }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", minHeight: "160px", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+        <Panel title="PIPELINE LOG" style={{ height: "280px", flexShrink: 0 }}>
+          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {[...logLines, ...localLog].length === 0
               ? <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
               : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
@@ -2755,8 +2769,8 @@ function GenerateRefine({ parts, pipelineStatus, logLines }) {
             </button>
           </div>
         </Panel>
-        <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: "200px" }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", minHeight: "160px", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+        <Panel title="PIPELINE LOG" style={{ height: "280px", flexShrink: 0 }}>
+          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {[...logLines, ...localLog].length === 0
               ? <div style={{ color: T.text4, fontStyle: "italic" }}>Select a part and describe the modification.</div>
               : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
