@@ -1158,25 +1158,25 @@ export default function App() {
     }
   }, []);
 
-  const handleGenerate = useCallback(async (goal, maxAttempts) => {
+  const streamRun = useCallback(async (post) => {
     setPipelineStatus("running");
-    appendPipelineLog(`>>> Starting: ${goal}`);
     if (generateStreamRef.current) {
       generateStreamRef.current.close();
       generateStreamRef.current = null;
     }
     try {
-      const res = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal, max_attempts: maxAttempts }),
-      });
+      const res = await post();
+      if (!res.ok) {
+        let detail = "";
+        try { detail = (await res.json())?.detail || ""; } catch { /* noop */ }
+        throw new Error(`HTTP ${res.status}${detail ? ` — ${detail}` : ""}`);
+      }
       const data = await res.json().catch(() => ({}));
       const runId = data.run_id;
       if (!runId) {
         appendPipelineLog("(no run_id from server — live log unavailable; try dashboard on :8001)");
         setPipelineStatus("idle");
-        return;
+        return null;
       }
       const es = new EventSource(`/api/run/${runId}/stream`);
       generateStreamRef.current = es;
@@ -1201,11 +1201,22 @@ export default function App() {
         if (generateStreamRef.current === es) generateStreamRef.current = null;
         setPipelineStatus((s) => (s === "running" ? "idle" : s));
       };
+      return runId;
     } catch (e) {
       appendPipelineLog(`ERROR: ${e.message}`);
       setPipelineStatus("idle");
+      return null;
     }
   }, [appendPipelineLog, refreshParts]);
+
+  const handleGenerate = useCallback((goal, maxAttempts) => {
+    appendPipelineLog(`>>> Starting: ${goal}`);
+    return streamRun(() => fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ goal, max_attempts: maxAttempts }),
+    }));
+  }, [streamRun, appendPipelineLog]);
 
   const setSub = (section, id) => setSubActive(prev => ({ ...prev, [section]: id }));
 
@@ -1229,6 +1240,7 @@ export default function App() {
               appendPipelineLog={appendPipelineLog}
               setPipelineStatus={setPipelineStatus}
               refreshParts={refreshParts}
+              streamRun={streamRun}
             />
           </Suspense>
         );

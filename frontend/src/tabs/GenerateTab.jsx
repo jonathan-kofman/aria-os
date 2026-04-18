@@ -436,14 +436,13 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
   );
 }
 
-function GenerateImage({ pipelineStatus, logLines }) {
+function GenerateImage({ pipelineStatus, logLines, appendPipelineLog, streamRun }) {
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const [goal, setGoal] = useState("");
-  const [status, setStatus] = useState("idle");
   const [error, setError] = useState(null);
-  const [localLog, setLocalLog] = useState([]);
   const dropRef = useRef(null);
+  const isRunning = pipelineStatus === "running";
 
   const handleFile = (file) => {
     if (!file || !file.type.startsWith("image/")) return;
@@ -458,35 +457,19 @@ function GenerateImage({ pipelineStatus, logLines }) {
   };
 
   const handleGenerate = async () => {
-    if (!imageFile) return;
-    setStatus("running");
+    if (!imageFile || !streamRun) return;
     setError(null);
-    setLocalLog(prev => [...prev, `>>> Uploading image: ${imageFile.name}`]);
+    appendPipelineLog?.(`>>> Image-to-CAD: ${imageFile.name}${goal ? ` — ${goal}` : ""}`);
     const form = new FormData();
     form.append("image", imageFile);
     form.append("goal", goal);
-    try {
-      const res = await fetch("/api/generate-from-image", { method: "POST", body: form });
-      if (res.status === 404) {
-        setError("Image pipeline not available in this deployment.");
-        setStatus("idle");
-        return;
-      }
-      if (!res.ok) throw new Error(`Server error ${res.status}`);
-      const data = await res.json();
-      setLocalLog(prev => [...prev, `[done] ${data.message || "Generation complete"}`]);
-      setStatus("done");
-    } catch (e) {
-      if (e.message.includes("404") || e.message.includes("Failed to fetch")) {
-        setError("Image pipeline not available in this deployment.");
-      } else {
-        setError(e.message);
-      }
-      setStatus("idle");
-    }
+    const runId = await streamRun(() =>
+      fetch("/api/generate-from-image", { method: "POST", body: form })
+    );
+    if (!runId) setError("Image pipeline failed to start. Check server logs.");
   };
 
-  const allLog = [...logLines, ...localLog];
+  const allLog = logLines;
   const vp = useViewport();
   const L = layout(vp);
   const S = spacing(vp);
@@ -511,16 +494,12 @@ function GenerateImage({ pipelineStatus, logLines }) {
       <div style={{ display: "flex", flexDirection: "column", gap: "12px", minWidth: 0, width: "100%" }}>
         <Panel title="GENERATE FROM IMAGE">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
-            <div style={{ padding: "8px 12px", borderRadius: "8px", background: `${T.amber}10`, border: `1px solid ${T.amber}30`, fontSize: "11px", color: T.amber, display: "flex", alignItems: "flex-start", gap: "8px" }}>
-              <span style={{ flexShrink: 0, marginTop: "1px" }}>⚠</span>
-              <span>Image-to-CAD pipeline not available in this deployment. Requires the full ARIA vision backend.</span>
-            </div>
             <div
               ref={dropRef}
               onDrop={handleDrop}
               onDragOver={e => e.preventDefault()}
               onClick={() => { const inp = document.createElement("input"); inp.type = "file"; inp.accept = "image/*"; inp.onchange = e => handleFile(e.target.files[0]); inp.click(); }}
-              style={{ minHeight: "120px", border: `2px dashed ${imageFile ? T.ai + "60" : T.border}`, borderRadius: "10px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", background: "rgba(0,0,0,0.2)", transition: "all 0.15s", overflow: "hidden", padding: "8px", opacity: 0.5 }}>
+              style={{ minHeight: "120px", border: `2px dashed ${imageFile ? T.ai + "60" : T.border}`, borderRadius: "10px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", background: "rgba(0,0,0,0.2)", transition: "all 0.15s", overflow: "hidden", padding: "8px" }}>
               {imagePreview ? (
                 <img src={imagePreview} alt="preview" style={{ maxHeight: "110px", maxWidth: "100%", borderRadius: "6px", objectFit: "contain" }} />
               ) : (
@@ -545,9 +524,9 @@ function GenerateImage({ pipelineStatus, logLines }) {
             )}
             <button
               onClick={handleGenerate}
-              disabled={!imageFile || status === "running"}
-              style={{ padding: "10px", borderRadius: "8px", border: "none", background: `${T.ai}25`, color: T.text4, fontSize: "11px", fontWeight: 700, cursor: "not-allowed", transition: "all 0.2s", letterSpacing: "0.04em" }}>
-              {status === "running" ? "GENERATING..." : "GENERATE FROM IMAGE"}
+              disabled={!imageFile || isRunning}
+              style={{ padding: "10px", borderRadius: "8px", border: "none", background: (!imageFile || isRunning) ? `${T.ai}25` : `linear-gradient(135deg, ${T.ai}, ${T.brand})`, color: (!imageFile || isRunning) ? T.text4 : "#fff", fontSize: "11px", fontWeight: 700, cursor: (!imageFile || isRunning) ? "not-allowed" : "pointer", boxShadow: (imageFile && !isRunning) ? `0 4px 12px ${T.aiGlow}` : "none", transition: "all 0.2s", letterSpacing: "0.04em" }}>
+              {isRunning ? "GENERATING..." : "GENERATE FROM IMAGE"}
             </button>
           </div>
         </Panel>
@@ -566,10 +545,8 @@ function GenerateImage({ pipelineStatus, logLines }) {
   );
 }
 
-function GenerateAssembly({ pipelineStatus, logLines, onGenerate }) {
+function GenerateAssembly({ pipelineStatus, logLines, appendPipelineLog, streamRun }) {
   const [assemblyParts, setAssemblyParts] = useState([{ name: "", description: "" }, { name: "", description: "" }]);
-  const [localLog, setLocalLog] = useState([]);
-  const [status, setStatus] = useState("idle");
 
   const addRow = () => setAssemblyParts(prev => [...prev, { name: "", description: "" }]);
   const removeRow = (i) => setAssemblyParts(prev => prev.filter((_, j) => j !== i));
@@ -577,26 +554,18 @@ function GenerateAssembly({ pipelineStatus, logLines, onGenerate }) {
 
   const handleGenerate = async () => {
     const valid = assemblyParts.filter(p => p.name.trim());
-    if (valid.length === 0) return;
-    const goal = "Assembly: " + valid.map(p => p.description ? `${p.name} (${p.description})` : p.name).join(", ");
-    setStatus("running");
-    setLocalLog(prev => [...prev, `>>> Starting assembly: ${goal}`]);
-    try {
-      await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal, max_attempts: 3 }),
-      });
-      setLocalLog(prev => [...prev, "[done] Assembly job queued"]);
-      setStatus("done");
-    } catch (e) {
-      setLocalLog(prev => [...prev, `ERROR: ${e.message}`]);
-      setStatus("idle");
-    }
+    if (valid.length === 0 || !streamRun) return;
+    const description = valid.map(p => p.description ? `${p.name} (${p.description})` : p.name).join(", ");
+    appendPipelineLog?.(`>>> Assembly: ${description}`);
+    await streamRun(() => fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command: "assembly", goal: description }),
+    }));
   };
 
-  const allLog = [...logLines, ...localLog];
-  const isRunning = pipelineStatus === "running" || status === "running";
+  const allLog = logLines;
+  const isRunning = pipelineStatus === "running";
   const _vp_assembly = useViewport();
   const _S_assembly = spacing(_vp_assembly);
 
@@ -656,35 +625,27 @@ function GenerateAssembly({ pipelineStatus, logLines, onGenerate }) {
 // ---------------------------------------------------------------------------
 // GenerateTerrain
 // ---------------------------------------------------------------------------
-function GenerateTerrain({ pipelineStatus, logLines, onGenerate }) {
+function GenerateTerrain({ pipelineStatus, logLines, appendPipelineLog, streamRun }) {
   const [goal, setGoal] = useState("");
   const [width, setWidth] = useState(500);
   const [depth, setDepth] = useState(500);
   const [height, setHeight] = useState(80);
   const [resolution, setResolution] = useState(128);
   const [style, setStyle] = useState("alpine");
-  const [localLog, setLocalLog] = useState([]);
-  const [status, setStatus] = useState("idle");
-  const isRunning = pipelineStatus === "running" || status === "running";
+  const isRunning = pipelineStatus === "running";
 
   const STYLES = ["alpine", "mesa", "volcanic", "coastal", "canyon", "rolling_hills"];
 
   const handleGenerate = async () => {
-    const g = goal.trim() || `terrain ${style} ${width}x${depth}mm ${height}mm elevation`;
-    setStatus("running");
-    setLocalLog(prev => [...prev, `>>> Generating ${style} terrain ${width}x${depth}x${height}mm`]);
-    try {
-      await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal: g, max_attempts: 2 }),
-      });
-      setLocalLog(prev => [...prev, "[done] Terrain job queued"]);
-      setStatus("done");
-    } catch (e) {
-      setLocalLog(prev => [...prev, `ERROR: ${e.message}`]);
-      setStatus("idle");
-    }
+    if (!streamRun) return;
+    const extra = goal.trim();
+    const g = `${style} terrain ${width}x${depth}mm ${height}mm elevation, ${resolution}px resolution${extra ? `, ${extra}` : ""}`;
+    appendPipelineLog?.(`>>> Terrain: ${g}`);
+    await streamRun(() => fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command: "terrain", goal: g }),
+    }));
   };
   const _vp_terrain = useViewport();
 
@@ -762,9 +723,9 @@ function GenerateTerrain({ pipelineStatus, logLines, onGenerate }) {
         </Panel>
         <Panel title="PIPELINE LOG" style={{ height: "280px", flexShrink: 0 }}>
           <div style={{ padding: "10px 14px", flex: 1, minHeight: 0, overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
-            {[...logLines, ...localLog].length === 0
+            {logLines.length === 0
               ? <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
-              : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
+              : logLines.map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
             }
           </div>
         </Panel>
@@ -883,12 +844,10 @@ function GenerateScan({ pipelineStatus, logLines }) {
 // ---------------------------------------------------------------------------
 // GenerateRefine
 // ---------------------------------------------------------------------------
-function GenerateRefine({ parts, pipelineStatus, logLines }) {
+function GenerateRefine({ parts, pipelineStatus, logLines, appendPipelineLog, streamRun }) {
   const [selectedId, setSelectedId] = useState(parts[0]?.id || null);
   const [modification, setModification] = useState("");
-  const [status, setStatus] = useState("idle");
-  const [localLog, setLocalLog] = useState([]);
-  const isRunning = pipelineStatus === "running" || status === "running";
+  const isRunning = pipelineStatus === "running";
   const selectedPart = parts.find(p => p.id === selectedId) || parts[0];
 
   const SUGGESTIONS = [
@@ -901,21 +860,23 @@ function GenerateRefine({ parts, pipelineStatus, logLines }) {
   ];
 
   const handleRefine = async () => {
-    if (!selectedPart || !modification.trim()) return;
-    setStatus("running");
-    const goal = `${selectedPart.goal || selectedPart.part_name || selectedPart.id} — MODIFY: ${modification}`;
-    setLocalLog(prev => [...prev, `>>> Refining: ${goal}`]);
-    try {
-      await fetch("/api/generate", {
+    if (!selectedPart || !modification.trim() || !streamRun) return;
+    const scriptPath = selectedPart.script_path;
+    if (scriptPath) {
+      appendPipelineLog?.(`>>> Refine ${selectedPart.part_name || selectedPart.id}: ${modification}`);
+      await streamRun(() => fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: "refine", goal: `${scriptPath} ${modification}` }),
+      }));
+    } else {
+      const goal = `${selectedPart.goal || selectedPart.part_name || selectedPart.id} — MODIFY: ${modification}`;
+      appendPipelineLog?.(`>>> Refine (regenerate): ${goal}`);
+      await streamRun(() => fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ goal, max_attempts: 3 }),
-      });
-      setLocalLog(prev => [...prev, "[done] Refinement job queued"]);
-      setStatus("done");
-    } catch (e) {
-      setLocalLog(prev => [...prev, `ERROR: ${e.message}`]);
-      setStatus("idle");
+      }));
     }
   };
 
@@ -973,9 +934,9 @@ function GenerateRefine({ parts, pipelineStatus, logLines }) {
         </Panel>
         <Panel title="PIPELINE LOG" style={{ height: "280px", flexShrink: 0 }}>
           <div style={{ padding: "10px 14px", flex: 1, minHeight: 0, overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
-            {[...logLines, ...localLog].length === 0
+            {logLines.length === 0
               ? <div style={{ color: T.text4, fontStyle: "italic" }}>Select a part and describe the modification.</div>
-              : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
+              : logLines.map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
             }
           </div>
         </Panel>
@@ -983,14 +944,15 @@ function GenerateRefine({ parts, pipelineStatus, logLines }) {
     </div>
   );
 }
-export default function GenerateTab({ currentSub, parts, selectedPart, setSelectedPart, onGenerate, pipelineStatus, logLines, appendPipelineLog, setPipelineStatus, refreshParts }) {
+export default function GenerateTab({ currentSub, parts, selectedPart, setSelectedPart, onGenerate, pipelineStatus, logLines, appendPipelineLog, setPipelineStatus, refreshParts, streamRun }) {
+  const streamProps = { appendPipelineLog, setPipelineStatus, refreshParts, streamRun };
   switch (currentSub) {
-    case "nl": return <GenerateNL parts={parts} selectedPart={selectedPart} setSelectedPart={setSelectedPart} onGenerate={onGenerate} pipelineStatus={pipelineStatus} logLines={logLines} appendPipelineLog={appendPipelineLog} setPipelineStatus={setPipelineStatus} refreshParts={refreshParts} />;
-    case "image": return <GenerateImage pipelineStatus={pipelineStatus} logLines={logLines} />;
-    case "assembly": return <GenerateAssembly pipelineStatus={pipelineStatus} logLines={logLines} onGenerate={onGenerate} />;
-    case "terrain": return <GenerateTerrain pipelineStatus={pipelineStatus} logLines={logLines} onGenerate={onGenerate} />;
+    case "nl": return <GenerateNL parts={parts} selectedPart={selectedPart} setSelectedPart={setSelectedPart} onGenerate={onGenerate} pipelineStatus={pipelineStatus} logLines={logLines} {...streamProps} />;
+    case "image": return <GenerateImage pipelineStatus={pipelineStatus} logLines={logLines} {...streamProps} />;
+    case "assembly": return <GenerateAssembly pipelineStatus={pipelineStatus} logLines={logLines} onGenerate={onGenerate} {...streamProps} />;
+    case "terrain": return <GenerateTerrain pipelineStatus={pipelineStatus} logLines={logLines} onGenerate={onGenerate} {...streamProps} />;
     case "scan": return <GenerateScan pipelineStatus={pipelineStatus} logLines={logLines} />;
-    case "refine": return <GenerateRefine parts={parts} pipelineStatus={pipelineStatus} logLines={logLines} />;
+    case "refine": return <GenerateRefine parts={parts} pipelineStatus={pipelineStatus} logLines={logLines} {...streamProps} />;
     default: return null;
   }
 }
