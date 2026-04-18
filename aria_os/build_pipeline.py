@@ -59,6 +59,10 @@ class BuildResult:
     # Preview thumbnails (PNGs + SVGs) for the "what's in the box" UI tile
     preview_artifacts: list[dict] = field(default_factory=list)
 
+    # Cross-project bridges (StructSight judgment + MillForge pre-CAM handoff)
+    structsight_judgment: dict | None = None
+    millforge_handoff: dict | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "preset_id": self.preset_id,
@@ -87,18 +91,45 @@ class BuildResult:
             "cam_dir":   self.cam_dir,
             "drawings_dir": self.drawings_dir,
             "preview_artifacts": self.preview_artifacts,
+            "structsight_judgment": self.structsight_judgment,
+            "millforge_handoff": self.millforge_handoff,
         }
 
 
-def run_full_build(*, preset_id: str, params: dict | None = None) -> BuildResult:
+def run_full_build(*, preset_id: str, params: dict | None = None,
+                   on_stage: callable = None) -> BuildResult:
     """Run the complete build for a preset. Returns a BuildResult with all
     artifact paths. Each stage is independent — failure in one doesn't abort
-    the others (so you still get whatever did succeed)."""
+    the others (so you still get whatever did succeed).
+
+    on_stage(stage_name, status, elapsed_s, **extra) is called at the start
+    and end of each stage so callers (e.g. the dashboard preset endpoint)
+    can show live progress instead of just "building" while a 30s build runs.
+    """
     t0 = time.monotonic()
+    def _stage(name, status, **extra):
+        if on_stage:
+            try:
+                on_stage(name, status, time.monotonic() - t0, **extra)
+            except Exception:
+                pass
+
+    # ── Stage 0: StructSight engineering judgment (cited, typed) ─────────────
+    # Runs before geometry so the judgment can inform downstream reviewers.
+    # structsight is an optional sibling package — gracefully degrade if absent.
+    _stage("structsight", "start")
+    goal_text = _preset_goal(preset_id, params)
+    structsight_judgment = _run_structsight(goal_text)
+    _stage("structsight", "done",
+           available=structsight_judgment.get("available", False))
+
+    _stage("mechanical", "start")
 
     # ── Stage 1: Mechanical assembly (+ ECAD + drawings inside the drone module) ──
     name, output_dir, mech_ok = _stage_mechanical(preset_id, params)
     result = BuildResult(preset_id=preset_id, name=name, output_dir=str(output_dir))
+    result.structsight_judgment = structsight_judgment
+    _stage("mechanical", "done" if mech_ok else "fail")
     if not mech_ok:
         result.error = "mechanical assembly failed — see drone_quad_result.json"
         result.elapsed_s = time.monotonic() - t0
@@ -125,7 +156,11 @@ def run_full_build(*, preset_id: str, params: dict | None = None) -> BuildResult
         except Exception:
             pass
 
+    _stage("ecad",     "done" if result.ecad_success     else "skip")
+    _stage("drawings", "done" if result.drawings_success else "skip")
+
     # ── Stage 2: Print bundle (slicer-ready STLs + Elegoo config) ────────────
+    _stage("print", "start")
     try:
         from aria_os.slicer import prepare_for_print
         print_summary = prepare_for_print(output_dir)
@@ -134,15 +169,19 @@ def run_full_build(*, preset_id: str, params: dict | None = None) -> BuildResult
     except Exception as exc:
         result.print_success = False
         print(f"[build] print prep skipped: {type(exc).__name__}: {exc}")
+    _stage("print", "done" if result.print_success else "fail")
 
     # ── Stage 3: CAM scripts (CNC mill toolpaths for CFRP/aluminum) ──────────
+    _stage("cam", "start")
     cam_dir = output_dir / "cam"
     cam_dir.mkdir(parents=True, exist_ok=True)
     cam_count = _stage_cam(output_dir, cam_dir)
     result.cam_dir = str(cam_dir) if cam_count > 0 else None
     result.cam_success = cam_count > 0
+    _stage("cam", "done" if result.cam_success else "skip", n_parts=cam_count)
 
     # ── Stage 4: Flight dynamics sim (Genesis if installed, else stub) ────────
+    _stage("sim", "start")
     sim_dir = output_dir / "sim"
     sim_dir.mkdir(parents=True, exist_ok=True)
     if result.stl_path and Path(result.stl_path).is_file():
@@ -166,8 +205,10 @@ def run_full_build(*, preset_id: str, params: dict | None = None) -> BuildResult
             result.sim_success = False
     else:
         result.sim_success = False
+    _stage("sim", "done" if result.sim_success else "skip")
 
     # ── Stage 5: Circuit / electronic sim per ECAD board ────────────────────
+    _stage("circuit_sim", "start")
     # Run PySpice (or analytical stub) on each generated PCB to estimate
     # power-rail loads + flag overloaded supplies. Lightweight — runs even
     # without ngspice installed (analytical only).
@@ -189,6 +230,7 @@ def run_full_build(*, preset_id: str, params: dict | None = None) -> BuildResult
             result.circuit_sim_summary = {"boards": circuit_results}
     except Exception as exc:
         print(f"[build] circuit sim skipped: {type(exc).__name__}: {exc}")
+    _stage("circuit_sim", "done" if result.circuit_sim_success else "skip")
 
     # ── Stage 6: Preview manifest ────────────────────────────────────────────
     result.preview_artifacts = _build_preview_manifest(output_dir, result)
@@ -202,6 +244,14 @@ def run_full_build(*, preset_id: str, params: dict | None = None) -> BuildResult
         build_outputs_graph(output_dir, run_id=preset_id)
     except Exception:
         pass  # Graph indexing is best-effort, don't break the build
+
+    # ── Stage 8: MillForge pre-CAM bundle handoff ───────────────────────────
+    # POSTs bundle metadata to MillForge's /api/aria/bundle so it can register
+    # the part in stage 'pending_cam' and start anomaly/scheduling triage.
+    _stage("millforge", "start")
+    result.millforge_handoff = _post_millforge_bundle(preset_id, output_dir, result)
+    _stage("millforge", "done",
+           available=result.millforge_handoff.get("available", False))
 
     result.success = (result.mech_success and
                       (result.print_success or result.cam_success))
@@ -343,3 +393,201 @@ def _write_summary(result: BuildResult) -> None:
     out = Path(result.output_dir) / "build_summary.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result.to_dict(), indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Cross-project bridges: StructSight (judgment) + MillForge (handoff)
+# ---------------------------------------------------------------------------
+
+_PRESET_GOAL_TEMPLATES = {
+    "5inch_fpv": (
+        "5-inch racing FPV quadcopter frame with CFRP arms and aluminum "
+        "standoffs. Target AUW ~400g, 6S LiPo, 2306 motors."
+    ),
+    "7inch_long_range": (
+        "7-inch long-range quadcopter frame, CFRP arms, aluminum standoffs. "
+        "AUW ~700g, 6S LiPo, 2807 motors, 178mm prop."
+    ),
+    "military_recon": (
+        "Military recon 7-inch quadcopter frame, hardened for ruggedized "
+        "ISR payloads. CFRP primary structure, aluminum brackets, redundant power."
+    ),
+}
+
+
+def _preset_goal(preset_id: str, params: dict | None) -> str:
+    """Return a natural-language description of the preset for StructSight."""
+    base = _PRESET_GOAL_TEMPLATES.get(
+        preset_id,
+        f"Engineering build for preset '{preset_id}'."
+    )
+    if params and isinstance(params, dict) and params.get("notes"):
+        base = f"{base} Notes: {params['notes']}"
+    return base
+
+
+def _has_structsight() -> bool:
+    """Detect structsight availability without importing at module load time.
+
+    structsight is an optional sibling package (pip install -e ../structsight).
+    Railway can't install from a local sibling path, so the build must stay
+    functional when structsight is absent.
+    """
+    try:
+        import structsight  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _run_structsight(goal: str) -> dict:
+    """Call structsight.analyze() and normalize to a JSON-safe dict.
+
+    Returns {"available": False, "error": ...} if the package is missing or
+    analyze() crashes. Never raises.
+    """
+    if not _has_structsight():
+        return {"available": False, "error": "structsight not installed"}
+    try:
+        import structsight
+        r = structsight.analyze(goal)
+        if hasattr(r, "model_dump"):
+            payload = r.model_dump()
+        elif hasattr(r, "dict"):
+            payload = r.dict()
+        else:
+            payload = {"repr": repr(r)}
+        payload["available"] = True
+        return payload
+    except Exception as exc:
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+# MillForge Railway backend — /api/aria/bundle accepts ARIABundleSubmission
+# (see millforge-ai/backend/routers/aria_bridge.py).
+MILLFORGE_BUNDLE_URL = "https://millforge-ai-production.up.railway.app/api/aria/bundle"
+_MILLFORGE_TIMEOUT_S = 10.0
+
+
+def _post_millforge_bundle(
+    preset_id: str,
+    output_dir: Path,
+    result: BuildResult,
+) -> dict:
+    """POST bundle metadata to MillForge. Always returns a dict — never raises.
+
+    Success  -> {"available": True, "millforge_job_id": ..., "work_order_id": ...,
+                 "quote_url": ..., "scheduled_at": ..., "status": ...}
+    Failure  -> {"available": False, "error": ...}
+
+    MillForge's /api/aria/bundle requires run_id + goal + part_name. It returns
+    {aria_run_id, millforge_job_id, status, duplicate, received_at, next_step}.
+    We surface those plus task-requested aliases (work_order_id, quote_url,
+    scheduled_at) for a stable downstream contract.
+    """
+    try:
+        import httpx
+    except Exception as exc:
+        return {"available": False, "error": f"httpx not available: {exc}"}
+
+    # BOM-derived fields: parts_list, materials, mass_g
+    parts_list: list[dict] = []
+    materials: list[str] = []
+    mass_g: float = 0.0
+    if result.bom_path:
+        try:
+            bp = Path(result.bom_path)
+            if bp.is_file():
+                bom = json.loads(bp.read_text(encoding="utf-8"))
+                raw_parts = bom.get("parts") or []
+                mat_set: set[str] = set()
+                for p in raw_parts:
+                    if not isinstance(p, dict):
+                        continue
+                    parts_list.append({
+                        "name": p.get("name") or p.get("spec") or "",
+                        "material": p.get("material"),
+                        "validation": p.get("validation"),
+                    })
+                    m = p.get("material")
+                    if m:
+                        mat_set.add(m)
+                    pm = p.get("mass_g") or (p.get("measured") or {}).get("mass_g")
+                    if isinstance(pm, (int, float)):
+                        mass_g += float(pm)
+                materials = sorted(mat_set)
+        except Exception as exc:
+            print(f"[millforge] bom parse skipped: {type(exc).__name__}: {exc}")
+
+    assembly_step_path = result.step_path
+
+    # run_id = preset + epoch seconds. MillForge is idempotent on run_id.
+    run_id = f"{preset_id}-{int(time.time())}"
+    goal_text = _preset_goal(preset_id, None)
+
+    payload = {
+        "schema_version": "1.0",
+        "run_id": run_id,
+        "goal": goal_text,
+        "part_name": result.name or preset_id,
+        "step_path": result.step_path,
+        "stl_path": result.stl_path,
+        "material": (materials[0] if materials else None),
+        "priority": 5,
+        "notes": f"ARIA preset build: {preset_id}",
+        "structsight_context": result.structsight_judgment,
+        "extra": {
+            "preset_id": preset_id,
+            "bundle_dir": str(output_dir),
+            "mass_g": round(mass_g, 2) if mass_g else None,
+            "parts_list": parts_list,
+            "materials": materials,
+            "assembly_step_path": assembly_step_path,
+            "render_path": result.render_path,
+            "drawings_dir": result.drawings_dir,
+            "print_dir": result.print_dir,
+            "cam_dir": result.cam_dir,
+        },
+    }
+
+    try:
+        resp = httpx.post(
+            MILLFORGE_BUNDLE_URL,
+            json=payload,
+            timeout=_MILLFORGE_TIMEOUT_S,
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception as exc:
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}",
+                "url": MILLFORGE_BUNDLE_URL}
+
+    if resp.status_code != 200:
+        return {
+            "available": False,
+            "error": f"HTTP {resp.status_code}",
+            "body": resp.text[:500],
+            "url": MILLFORGE_BUNDLE_URL,
+        }
+
+    try:
+        body = resp.json()
+    except Exception as exc:
+        return {"available": False, "error": f"non-JSON response: {exc}",
+                "body": resp.text[:500]}
+
+    millforge_job_id = body.get("millforge_job_id")
+    received_at = body.get("received_at")
+    aria_run_id = body.get("aria_run_id", run_id)
+    status_base = "https://millforge-ai-production.up.railway.app/api/bridge/status"
+    return {
+        "available": True,
+        "millforge_job_id": millforge_job_id,
+        "work_order_id": millforge_job_id,           # task-requested alias
+        "status": body.get("status"),
+        "duplicate": body.get("duplicate"),
+        "scheduled_at": received_at,                 # task-requested alias
+        "received_at": received_at,
+        "aria_run_id": aria_run_id,
+        "quote_url": f"{status_base}/{aria_run_id}",
+        "next_step": body.get("next_step"),
+    }

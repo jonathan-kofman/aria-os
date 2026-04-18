@@ -523,6 +523,7 @@ function JsonViewer({ url }) {
 function QuickBuildsPanel() {
   const [presets, setPresets] = useState({});
   const [running, setRunning] = useState(null);   // { run_id, preset_id }
+  const [progress, setProgress] = useState(null); // { stages: [...], current_stage, started_at }
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
 
@@ -533,7 +534,8 @@ function QuickBuildsPanel() {
       .catch(() => setPresets({}));
   }, []);
 
-  // Poll the run status when a preset is in flight
+  // Poll status every 1s while running so the UI shows real per-stage
+  // progress instead of just "building" for 30s.
   useEffect(() => {
     if (!running) return;
     const id = setInterval(async () => {
@@ -541,18 +543,24 @@ function QuickBuildsPanel() {
         const r = await fetch(`/api/preset/run/${running.run_id}`);
         if (!r.ok) return;
         const d = await r.json();
+        // Always pick up partial progress (stages array, current_stage)
+        setProgress({
+          stages: d.stages || [],
+          current_stage: d.current_stage,
+          started_at: d.started_at,
+        });
         if (d.status === "done") {
           setResult(d.result);
           setRunning(null);
           clearInterval(id);
         }
       } catch {}
-    }, 2000);
+    }, 1000);
     return () => clearInterval(id);
   }, [running]);
 
   const launch = async (preset_id) => {
-    setError(null); setResult(null);
+    setError(null); setResult(null); setProgress(null);
     try {
       const r = await fetch(`/api/preset/${preset_id}`, { method: "POST" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -562,6 +570,22 @@ function QuickBuildsPanel() {
       setError(e.message);
     }
   };
+
+  // Show live progress while running. Stage names match build_pipeline.run_full_build.
+  const liveProgress = (() => {
+    if (!running || !progress) return null;
+    // Aggregate stage events into one row per stage with its terminal status
+    const byStage = {};
+    for (const ev of progress.stages || []) {
+      const cur = byStage[ev.stage] || {};
+      byStage[ev.stage] = { ...cur, ...ev };
+    }
+    const ordered = ["structsight", "mechanical", "ecad", "drawings",
+                     "print", "cam", "sim", "circuit_sim", "millforge"];
+    return ordered.filter(s => byStage[s] || progress.current_stage === s)
+                  .map(s => ({ stage: s, ...(byStage[s] || {}),
+                               isCurrent: progress.current_stage === s }));
+  })();
 
   const downloadBundle = () => {
     if (!result?.output_dir) return;
@@ -604,6 +628,56 @@ function QuickBuildsPanel() {
                         background: `${T.red}10`, borderRadius: "6px",
                         border: `1px solid ${T.red}40` }}>
             Error: {error}
+          </div>
+        )}
+        {/* LIVE STAGE PROGRESS — populated by polling /api/preset/run/{id} */}
+        {liveProgress && liveProgress.length > 0 && (
+          <div style={{ marginTop: "4px", padding: "10px", borderRadius: "8px",
+                        background: `${T.ai}08`,
+                        border: `1px solid ${T.ai}30` }}>
+            <div style={{ fontSize: "10px", color: T.ai, fontWeight: 700,
+                          letterSpacing: "0.08em", marginBottom: "6px",
+                          display: "flex", justifyContent: "space-between" }}>
+              <span>BUILDING…</span>
+              {progress?.started_at && (
+                <span style={{ color: T.text3, fontWeight: 500,
+                               fontFamily: "JetBrains Mono, monospace" }}>
+                  {Math.round(Date.now() / 1000 - progress.started_at)}s
+                </span>
+              )}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+              {liveProgress.map((s, i) => {
+                const done = s.status === "done";
+                const failed = s.status === "fail";
+                const skipped = s.status === "skip";
+                const inFlight = s.isCurrent || (s.status === "start" && !done && !failed);
+                let icon, color;
+                if (failed) { icon = "✗"; color = T.red; }
+                else if (skipped) { icon = "·"; color = T.text4; }
+                else if (done) { icon = "✓"; color = T.green; }
+                else if (inFlight) { icon = "◐"; color = T.ai; }
+                else { icon = "○"; color = T.text4; }
+                return (
+                  <div key={i} style={{ display: "flex", alignItems: "center",
+                                         gap: "8px", fontSize: "11px",
+                                         color: inFlight ? T.text0 : T.text2 }}>
+                    <span style={{ color, fontWeight: 700, width: "12px",
+                                   textAlign: "center",
+                                   animation: inFlight ? "pulse 1s infinite" : "none" }}>
+                      {icon}
+                    </span>
+                    <span style={{ flex: 1 }}>{s.stage}</span>
+                    {s.elapsed_s !== undefined && (
+                      <span style={{ fontFamily: "JetBrains Mono, monospace",
+                                     fontSize: "10px", color: T.text3 }}>
+                        {s.elapsed_s.toFixed(1)}s
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
         {result && (

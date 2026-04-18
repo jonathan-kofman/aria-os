@@ -28,3 +28,9 @@ joblib>=1.3.0       # parallel catalog generation (process pool, ~3x speedup)
 matplotlib>=3.8.0   # GD&T SVG drawings + render PNGs (pinned for stability)
 graphifyy>=0.1.0    # knowledge graph + MCP server over the codebase + run bundles
                     # (claims ~71x token reduction vs raw file analysis)
+
+# Optional cross-project bridges (build_pipeline gracefully skips if missing).
+# Not pip-installable from Railway's build env — install locally for dev:
+#   pip install -e ../manufacturing-core
+#   pip install -e ../structsight
+# structsight  # <- intentionally commented: sibling-path install only

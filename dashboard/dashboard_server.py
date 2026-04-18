@@ -972,30 +972,53 @@ async def run_preset(preset_id: str):
 
     run_id = uuid.uuid4().hex[:12]
 
-    def _run_drone():
-        """Use the unified build_pipeline so the user gets the FULL bundle:
-        mechanical + ECAD + drawings + slicer-ready prints + CAM scripts +
-        preview thumbnails. Single call, single result, single ZIP at the end.
-        """
-        try:
-            from aria_os.build_pipeline import run_full_build
-            result = run_full_build(preset_id=preset_id)
-            return result.to_dict()
-        except Exception as exc:
-            import traceback
-            return {
-                "error": f"{type(exc).__name__}: {exc}",
-                "traceback": traceback.format_exc(),
-            }
-
     # Kick off in a background thread; client polls /api/preset/run/{run_id}
     import threading
-    state = {"status": "running", "preset": preset_id, "started_at": time.time()}
+    state = {
+        "status": "running",
+        "preset": preset_id,
+        "started_at": time.time(),
+        "stages": [],            # list of {stage, status, elapsed_s, t_iso}
+        "current_stage": None,   # name of in-flight stage (for the UI spinner)
+    }
     _PRESET_RUNS[run_id] = state
 
+    def _on_stage(stage_name, status, elapsed_s, **extra):
+        """Called by run_full_build at start/end of every stage so the UI
+        can show real progress instead of just 'building'."""
+        state["stages"].append({
+            "stage": stage_name,
+            "status": status,        # 'start' | 'done' | 'fail' | 'skip'
+            "elapsed_s": round(elapsed_s, 2),
+            "t_iso": datetime.now(timezone.utc).isoformat(),
+            **extra,
+        })
+        if status == "start":
+            state["current_stage"] = stage_name
+        elif status in ("done", "fail", "skip"):
+            # Clear current_stage if it matches (next stage will set it)
+            if state.get("current_stage") == stage_name:
+                state["current_stage"] = None
+
     def worker():
-        result = _run_drone()
-        state.update({"status": "done", "result": result, "ended_at": time.time()})
+        try:
+            from aria_os.build_pipeline import run_full_build
+            result = run_full_build(preset_id=preset_id, on_stage=_on_stage)
+            state.update({
+                "status": "done",
+                "result": result.to_dict(),
+                "ended_at": time.time(),
+                "current_stage": None,
+            })
+        except Exception as exc:
+            import traceback
+            state.update({
+                "status": "done",
+                "result": {"error": f"{type(exc).__name__}: {exc}",
+                           "traceback": traceback.format_exc()},
+                "ended_at": time.time(),
+                "current_stage": None,
+            })
 
     threading.Thread(target=worker, daemon=True).start()
     return {"run_id": run_id, "preset_id": preset_id, "preset": preset}
