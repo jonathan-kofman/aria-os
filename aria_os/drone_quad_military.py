@@ -27,7 +27,7 @@ from aria_os.validation import Contract, validate_part
 from aria_os.drone_quad import (
     DEFAULT_PARAMS, PARTS as BASE_PARTS,
     PartSpec, DroneAssemblyResult,
-    _merge, _color_for, _render_assembly,
+    _merge, _color_for, _render_assembly, _render_assembly_by_material,
     # Reuse base part placement helpers
     _motor_xy, _stack_half,
 )
@@ -640,13 +640,25 @@ def run_drone_quad_military(
     bom_path.write_text(json.dumps(bom, indent=2), encoding="utf-8")
     result.bom_path = str(bom_path)
 
+    # Render — prefer the per-material colored render (each part shaded with
+    # its real material color so layered components separate visually).
+    # Falls back to the single-color STL render if BOM or parts dir missing.
     render_path = output_dir / f"{name}_render.png"
     try:
-        if result.stl_path:
+        if bom_path.is_file() and parts_dir.is_dir():
+            _render_assembly_by_material(bom_path, parts_dir, render_path, name)
+            result.render_path = str(render_path)
+        elif result.stl_path:
             _render_assembly(Path(result.stl_path), render_path, name)
             result.render_path = str(render_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[render] per-material render failed: {type(exc).__name__}: {exc}")
+        try:
+            if result.stl_path:
+                _render_assembly(Path(result.stl_path), render_path, name)
+                result.render_path = str(render_path)
+        except Exception:
+            pass
 
     # ── Drawings: GD&T SVG drawings for the top-level mechanical parts ───
     drawings_dir = output_dir / "drawings"

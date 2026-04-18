@@ -31,6 +31,7 @@ const T = {
 
 const NAV = [
   { id: "generate",    label: "Generate",    icon: "◉" },
+  { id: "files",       label: "Files",       icon: "▤" },
   { id: "library",     label: "Library",     icon: "◰" },
   { id: "validate",    label: "Validate",    icon: "⬡" },
   { id: "ecad",        label: "ECAD",        icon: "⊞" },
@@ -40,6 +41,7 @@ const NAV = [
 
 const SUB_TABS = {
   generate:    [{ id: "nl", label: "Natural Language" }, { id: "image", label: "From Image" }, { id: "assembly", label: "Assembly" }, { id: "terrain", label: "Terrain" }, { id: "scan", label: "Scan" }, { id: "refine", label: "Refine" }],
+  files:       [{ id: "browse", label: "Browse" }, { id: "upload", label: "Upload" }],
   library:     [{ id: "parts", label: "Parts" }, { id: "materials", label: "Materials" }, { id: "catalog", label: "Catalog" }],
   validate:    [{ id: "physics", label: "Physics" }, { id: "dfm", label: "DFM" }, { id: "drawings", label: "Drawings" }, { id: "visual", label: "Visual Verify" }, { id: "cem", label: "CEM Advise" }],
   ecad:        [{ id: "schematic", label: "Schematic" }, { id: "layout", label: "PCB Layout" }, { id: "bom", label: "BOM" }, { id: "sim", label: "Simulation" }],
@@ -215,6 +217,303 @@ function Sidebar({ active, setActive }) {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Files tab — universal file browser + previewer. Mirrors what the local
+// dashboard's `--view <file>` CLI does: open ANY artifact (STL/STEP/SVG/PNG/
+// JSON/DXF) and render it with the right viewer per file extension.
+// ---------------------------------------------------------------------------
+function FilesBrowse() {
+  const vp = useViewport();
+  const S = spacing(vp);
+  const [files, setFiles] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [filter, setFilter] = useState("");
+
+  useEffect(() => {
+    fetch("/api/outputs")
+      .then(r => r.json())
+      .then(d => setFiles(d.files || []))
+      .catch(() => setFiles([]));
+  }, []);
+
+  const filtered = files.filter(f =>
+    !filter || (typeof f === "string" ? f : f.path || f.name || "")
+      .toLowerCase().includes(filter.toLowerCase())
+  );
+
+  const fileLike = (f) => typeof f === "string"
+    ? { path: f, name: f.split(/[\\/]/).pop(), size: 0 }
+    : { path: f.path || f, name: (f.name || f.path || "").split(/[\\/]/).pop(), size: f.size || 0 };
+
+  return (
+    <div style={{ padding: `${S.pageY} ${S.pageX}`, display: "grid",
+                  gridTemplateColumns: vp.isMobile ? "1fr" : "320px 1fr",
+                  gap: S.gap,
+                  height: vp.isMobile ? "auto" : "calc(100vh - 56px - 49px)",
+                  overflow: vp.isMobile ? "auto" : "hidden" }}>
+      <Panel title="OUTPUT FILES" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.border}` }}>
+          <input type="text" value={filter} onChange={e => setFilter(e.target.value)}
+            placeholder="filter by name…"
+            style={{ width: "100%", background: "rgba(0,0,0,0.3)",
+                     border: `1px solid ${T.border}`, borderRadius: "6px",
+                     padding: "6px 10px", color: T.text1,
+                     fontSize: vp.isMobile ? "16px" : "12px" }} />
+          <div style={{ fontSize: "10px", color: T.text3, marginTop: "4px" }}>
+            {filtered.length} of {files.length} files
+          </div>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          {filtered.map((f, i) => {
+            const fl = fileLike(f);
+            const ext = (fl.name.match(/\.([^.]+)$/) || [, ""])[1].toLowerCase();
+            const isSelected = selected?.path === fl.path;
+            return (
+              <button key={i} onClick={() => setSelected(fl)}
+                style={{ width: "100%", textAlign: "left", padding: "8px 12px",
+                         border: "none", borderBottom: `1px solid ${T.border}`,
+                         background: isSelected ? `${T.ai}15` : "transparent",
+                         color: isSelected ? T.ai : T.text1,
+                         cursor: "pointer", fontSize: "11px",
+                         display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ fontFamily: "JetBrains Mono, monospace",
+                              fontSize: "9px", color: T.text3,
+                              minWidth: "44px", textTransform: "uppercase" }}>
+                  {ext || "—"}
+                </span>
+                <span style={{ flex: 1, overflow: "hidden",
+                              textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {fl.name}
+                </span>
+              </button>
+            );
+          })}
+          {filtered.length === 0 && (
+            <div style={{ padding: "20px", color: T.text4, fontSize: "11px",
+                          textAlign: "center" }}>
+              No files. Run a build first.
+            </div>
+          )}
+        </div>
+      </Panel>
+      <Panel title={selected?.name || "PREVIEW"} style={{ minHeight: 0 }}>
+        <div style={{ height: "calc(100% - 41px)" }}>
+          <FilePreview file={selected} />
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function FilesUpload() {
+  const vp = useViewport();
+  const S = spacing(vp);
+  const [uploading, setUploading] = useState(false);
+  const [uploaded, setUploaded] = useState(null);
+  const [error, setError] = useState(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    setError(null); setUploaded(null); setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await fetch("/api/upload", { method: "POST", body: fd });
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+      const d = await r.json();
+      setUploaded({
+        name: file.name,
+        size: file.size,
+        url: d.url || d.api_file_url,
+      });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const onDrop = (e) => {
+    e.preventDefault(); setDragOver(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) handleFile(f);
+  };
+
+  return (
+    <div style={{ padding: `${S.pageY} ${S.pageX}`,
+                  display: "grid", gridTemplateColumns: "1fr",
+                  gap: S.gap }}>
+      <Panel title="UPLOAD A FILE">
+        <div style={{ padding: "20px" }}>
+          <div onClick={() => fileInputRef.current?.click()}
+               onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+               onDragLeave={() => setDragOver(false)}
+               onDrop={onDrop}
+               style={{
+                 border: `2px dashed ${dragOver ? T.ai : T.border}`,
+                 borderRadius: "12px",
+                 padding: vp.isMobile ? "32px 16px" : "60px 24px",
+                 textAlign: "center",
+                 cursor: "pointer",
+                 background: dragOver ? `${T.ai}10` : "rgba(255,255,255,0.02)",
+                 transition: "all 0.15s",
+               }}>
+            <div style={{ fontSize: vp.isMobile ? "24px" : "36px",
+                          color: T.text3, marginBottom: "10px" }}>↑</div>
+            <div style={{ fontSize: vp.isMobile ? "14px" : "16px",
+                          color: T.text0, fontWeight: 600,
+                          marginBottom: "6px" }}>
+              {uploading ? "Uploading…"
+                : vp.isMobile ? "Tap to choose a file" : "Drop a file here or click to browse"}
+            </div>
+            <div style={{ fontSize: "11px", color: T.text3 }}>
+              STL · STEP · STP · OBJ · 3MF · PLY
+            </div>
+            <input ref={fileInputRef} type="file"
+                   accept=".stl,.step,.stp,.obj,.3mf,.ply"
+                   style={{ display: "none" }}
+                   onChange={e => handleFile(e.target.files?.[0])} />
+          </div>
+          {error && (
+            <div style={{ marginTop: "12px", padding: "10px",
+                          background: `${T.red}15`, color: T.red,
+                          borderRadius: "8px", fontSize: "11px" }}>
+              {error}
+            </div>
+          )}
+          {uploaded && (
+            <div style={{ marginTop: "16px", padding: "12px",
+                          background: `${T.green}10`,
+                          border: `1px solid ${T.green}40`,
+                          borderRadius: "8px" }}>
+              <div style={{ color: T.green, fontWeight: 600,
+                            fontSize: "12px", marginBottom: "8px" }}>
+                ✓ Uploaded {uploaded.name} ({Math.round(uploaded.size / 1024)} KB)
+              </div>
+              <FilePreview file={{ name: uploaded.name, path: uploaded.url }} />
+            </div>
+          )}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FilePreview — picks a viewer per file extension. Mirrors run_aria_os.py
+// --view CLI: STL/STEP → Three.js; SVG/PNG/JPG → image; JSON → pretty-print;
+// DXF → embed via /api/file iframe.
+// ---------------------------------------------------------------------------
+function FilePreview({ file }) {
+  if (!file?.path) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column",
+                    alignItems: "center", justifyContent: "center",
+                    height: "100%", gap: "12px" }}>
+        <div style={{ fontSize: "32px", opacity: 0.2 }}>◈</div>
+        <div style={{ fontSize: "12px", color: T.text4 }}>
+          Select a file to preview
+        </div>
+      </div>
+    );
+  }
+  const url = file.path.startsWith("/") ? file.path
+            : file.path.startsWith("http") ? file.path
+            : `/api/file?path=${encodeURIComponent(file.path)}`;
+  const ext = (file.name?.match(/\.([^.]+)$/) || [, ""])[1].toLowerCase();
+
+  // STL — direct Three.js viewer
+  if (ext === "stl") {
+    return <STLViewer stlUrl={url} />;
+  }
+  // STEP / STP — backend serves the file; for in-browser preview we
+  // need server-side STEP→STL conversion. Show a download link + note.
+  if (ext === "step" || ext === "stp") {
+    return (
+      <div style={{ padding: "20px", textAlign: "center" }}>
+        <div style={{ fontSize: "12px", color: T.text2, marginBottom: "12px" }}>
+          STEP files preview after server-side conversion to STL.
+        </div>
+        <a href={url} download
+           style={{ display: "inline-block", padding: "10px 16px",
+                    borderRadius: "8px",
+                    background: `linear-gradient(135deg, ${T.ai}, ${T.brand})`,
+                    color: "#fff", fontSize: "12px", fontWeight: 700,
+                    textDecoration: "none" }}>
+          DOWNLOAD STEP
+        </a>
+      </div>
+    );
+  }
+  // Images: SVG, PNG, JPG, GIF, WEBP
+  if (["svg", "png", "jpg", "jpeg", "gif", "webp"].includes(ext)) {
+    return (
+      <div style={{ height: "100%", overflow: "auto", padding: "10px",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    background: ext === "svg" ? "#fff" : "transparent" }}>
+        <img src={url} alt={file.name}
+             style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+      </div>
+    );
+  }
+  // JSON — fetch + pretty-print
+  if (ext === "json") {
+    return <JsonViewer url={url} />;
+  }
+  // DXF — embed in iframe (browser may or may not have a handler; for
+  // proper DXF preview the local --view command's DXF UI is needed)
+  if (ext === "dxf") {
+    return (
+      <iframe src={url} style={{ width: "100%", height: "100%", border: "none" }} />
+    );
+  }
+  // Unknown — just offer download
+  return (
+    <div style={{ padding: "20px", textAlign: "center" }}>
+      <div style={{ fontSize: "12px", color: T.text2, marginBottom: "12px" }}>
+        No preview available for .{ext} files yet.
+      </div>
+      <a href={url} download
+         style={{ display: "inline-block", padding: "10px 16px",
+                  borderRadius: "8px", background: T.bg2,
+                  border: `1px solid ${T.border}`,
+                  color: T.text1, fontSize: "12px",
+                  textDecoration: "none" }}>
+        DOWNLOAD
+      </a>
+    </div>
+  );
+}
+
+function JsonViewer({ url }) {
+  const [content, setContent] = useState("Loading…");
+  useEffect(() => {
+    let cancelled = false;
+    fetch(url).then(r => r.text()).then(t => {
+      if (cancelled) return;
+      try {
+        const obj = JSON.parse(t);
+        setContent(JSON.stringify(obj, null, 2));
+      } catch {
+        setContent(t);
+      }
+    }).catch(e => setContent(`Error: ${e.message}`));
+    return () => { cancelled = true; };
+  }, [url]);
+  return (
+    <pre style={{ height: "100%", margin: 0, padding: "12px",
+                  overflow: "auto", fontSize: "11px",
+                  fontFamily: "JetBrains Mono, monospace",
+                  color: T.text1, background: "#0a0d12",
+                  whiteSpace: "pre", lineHeight: 1.5 }}>
+      {content}
+    </pre>
+  );
+}
+
 
 // ---------------------------------------------------------------------------
 // QuickBuildsPanel — pre-canned drone builds. One click → 30s → STEP+STL+
@@ -2396,6 +2695,12 @@ export default function App() {
           case "scan": return <GenerateScan pipelineStatus={pipelineStatus} logLines={logLines} />;
           case "refine": return <GenerateRefine parts={parts} pipelineStatus={pipelineStatus} logLines={logLines} />;
           default: return null;
+        }
+      case "files":
+        switch (currentSub) {
+          case "browse": return <FilesBrowse />;
+          case "upload": return <FilesUpload />;
+          default:       return <FilesBrowse />;
         }
       case "library":
         switch (currentSub) {

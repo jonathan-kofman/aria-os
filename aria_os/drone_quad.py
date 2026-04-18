@@ -870,14 +870,27 @@ def run_drone_quad(
     bom_path.write_text(json.dumps(bom, indent=2), encoding="utf-8")
     result.bom_path = str(bom_path)
 
-    # Render
+    # Render — prefer the per-material colored render (loads each part STEP
+    # individually so each is shaded with its real material color). Falls
+    # back to single-STL render if BOM is missing or rendering fails.
     render_path = output_dir / f"{name}_render.png"
     try:
-        if result.stl_path:
+        if bom_path.is_file() and parts_dir.is_dir():
+            _render_assembly_by_material(
+                bom_path, parts_dir, render_path, name,
+            )
+            result.render_path = str(render_path)
+        elif result.stl_path:
             _render_assembly(Path(result.stl_path), render_path, name)
             result.render_path = str(render_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[render] per-material render failed: {type(exc).__name__}: {exc}")
+        try:
+            if result.stl_path:
+                _render_assembly(Path(result.stl_path), render_path, name)
+                result.render_path = str(render_path)
+        except Exception:
+            pass
 
     result.success = (result.step_path is not None and not failures)
     result.elapsed_s = time.monotonic() - t0
@@ -900,6 +913,172 @@ def regenerate(output_dir: str | Path) -> DroneAssemblyResult:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _material_rgb(material: str) -> tuple[float, float, float]:
+    """RGB color (0-1) for a material — used by the per-material renderer
+    to paint each part its real-world color so layered components separate
+    visually instead of blending into a dark blob.
+    """
+    table = {
+        "cfrp":           (0.13, 0.13, 0.16),  # carbon fiber — near black
+        "carbon_fiber":   (0.13, 0.13, 0.16),
+        "aramid":         (0.55, 0.50, 0.35),  # OD tan / kevlar
+        "aluminum_6061":  (0.78, 0.79, 0.82),  # silver
+        "aluminum_7075":  (0.72, 0.74, 0.78),
+        "aluminum":       (0.78, 0.79, 0.82),
+        "steel":          (0.50, 0.52, 0.56),
+        "stainless_steel":(0.65, 0.66, 0.68),
+        "titanium":       (0.55, 0.56, 0.60),
+        "fr4":            (0.10, 0.45, 0.20),  # PCB green
+        "polycarbonate":  (0.85, 0.92, 1.00),  # tinted clear blue
+        "lipo_4s":        (0.18, 0.32, 0.72),  # blue battery wrap
+        "lipo_3s":        (0.18, 0.32, 0.72),
+        "petg":           (0.95, 0.55, 0.18),  # orange print
+        "abs":            (0.22, 0.22, 0.24),  # dark gray
+        "asa":            (0.30, 0.30, 0.32),
+    }
+    return table.get((material or "").lower(), (0.55, 0.58, 0.65))
+
+
+def _render_assembly_by_material(bom_path: Path, parts_dir: Path,
+                                  out_png: Path, title: str) -> None:
+    """Render each part with its true material color so layered parts
+    (FC + ESC + battery + canopy + armor + plates) are visually distinct
+    instead of blending into a single shade.
+
+    Loads each per-part STEP, applies the BOM-recorded position + rotation,
+    meshes via STL conversion, then renders all triangles painter's-style
+    with shade-modulated material RGB.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PolyCollection
+    import trimesh
+    import numpy as np
+    import cadquery as cq
+    from aria_os.caching import cached_stl
+
+    bom = json.loads(bom_path.read_text(encoding="utf-8"))
+    parts = bom.get("parts") or []
+
+    # Per-part: resolve STEP path, mesh it, transform vertices to world frame
+    world_tris = []   # list of (verts (NF, 3, 3), normals (NF, 3), color (3,))
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        spec_name = p.get("spec") or p.get("name", "")
+        # Try {spec}.step first (canonical per-spec STEP), fall back to {name}.step
+        step_path = parts_dir / f"{spec_name}.step"
+        if not step_path.is_file():
+            step_path = parts_dir / f"{p.get('name', '')}.step"
+        if not step_path.is_file():
+            continue
+        # Mesh via cached STEP→STL converter (instant on warm runs)
+        try:
+            stl_p = cached_stl(step_path, tolerance=0.05)
+            mesh = trimesh.load_mesh(str(stl_p))
+            if hasattr(mesh, "dump"):
+                mesh = mesh.dump(concatenate=True)
+        except Exception:
+            continue
+
+        # Transform: rotate around Z by rot_z, translate by pos
+        pos = p.get("position_mm") or [0, 0, 0]
+        rot = p.get("rotation_deg") or [0, 0, 0]
+        V = mesh.vertices.copy()
+        if rot[2]:
+            ang = math.radians(rot[2])
+            c, s = math.cos(ang), math.sin(ang)
+            R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+            V = V @ R.T
+        if rot[0]:  # X-axis rotation (e.g. fiber spool)
+            ang = math.radians(rot[0])
+            c, s = math.cos(ang), math.sin(ang)
+            R = np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+            V = V @ R.T
+        V = V + np.array(pos)
+
+        # Recompute face normals after rotation (translation doesn't affect)
+        F = mesh.faces
+        v0 = V[F[:, 0]]; v1 = V[F[:, 1]]; v2 = V[F[:, 2]]
+        N = np.cross(v1 - v0, v2 - v0)
+        norms = np.linalg.norm(N, axis=1, keepdims=True)
+        N = N / np.where(norms > 1e-9, norms, 1.0)
+
+        rgb = _material_rgb(p.get("material", ""))
+        world_tris.append((V[F], N, np.array(rgb)))
+
+    if not world_tris:
+        raise RuntimeError("no parts to render")
+
+    # 3-panel projection
+    def shade_with_lights(N, lights):
+        s = np.zeros(len(N))
+        for d, intensity in lights:
+            d = np.array(d, dtype=float); d /= np.linalg.norm(d)
+            s += np.clip(N @ d, 0, 1) * intensity
+        return np.clip(s + 0.30, 0.0, 1.0)  # 0.30 ambient so colors stay vivid
+
+    def project_view(view, V_world):
+        # V_world shape: (NF, 3, 3)  — flatten last 2 dims for projection
+        flat = V_world.reshape(-1, 3)
+        if view == "top":
+            P2 = flat[:, [0, 1]]
+            depth = flat[:, 2]
+        elif view == "front":
+            P2 = flat[:, [0, 2]]
+            depth = -flat[:, 1]
+        else:
+            u = (flat[:, 0] - flat[:, 1]) / math.sqrt(2.0)
+            v = (flat[:, 0] + flat[:, 1]) / math.sqrt(6.0) + flat[:, 2] * math.sqrt(2.0/3.0)
+            P2 = np.stack([u, v], axis=-1)
+            depth = -(flat[:, 0] + flat[:, 1] + flat[:, 2])
+        return P2.reshape(-1, 3, 2), depth.reshape(-1, 3).mean(axis=1)
+
+    light_sets = {
+        "top":   [((0, 0, 1.0), 0.55), ((1, 1, 0.5), 0.30), ((-1, -1, 0.3), 0.15)],
+        "iso":   [((0.5, 0.5, 1.0), 0.50), ((-0.7, 0.5, 0.4), 0.30), ((0.4, -0.4, 0.3), 0.20)],
+        "front": [((0.3, 1.0, 0.5), 0.55), ((-0.5, 0.5, 1.0), 0.30), ((-0.5, -1.0, 0.0), 0.15)],
+    }
+
+    fig, axes = plt.subplots(1, 3, figsize=(17, 6), dpi=150)
+    for ax, view in zip(axes, ("top", "iso", "front")):
+        # Collect (polys, color, depth) across all parts; sort painter's-style
+        all_polys = []
+        all_colors = []
+        all_depths = []
+        for V_tris, N, rgb in world_tris:
+            polys, depth = project_view(view, V_tris)
+            shade = shade_with_lights(N, light_sets[view])
+            # color = material RGB modulated by shade
+            colors = np.stack([rgb[0] * shade, rgb[1] * shade, rgb[2] * shade,
+                               np.ones_like(shade)], axis=-1)
+            all_polys.append(polys)
+            all_colors.append(colors)
+            all_depths.append(depth)
+        polys = np.concatenate(all_polys, axis=0)
+        colors = np.concatenate(all_colors, axis=0)
+        depths = np.concatenate(all_depths)
+        order = np.argsort(depths)
+        pc = PolyCollection(polys[order], facecolors=colors[order],
+                            edgecolors="none", antialiased=True)
+        ax.add_collection(pc)
+        ax.autoscale()
+        ax.set_aspect("equal")
+        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_title({
+            "top":   "Top (XY) — looking down",
+            "iso":   "Isometric",
+            "front": "Front (XZ) — looking back",
+        }[view], fontsize=11, color="#1f4068")
+        ax.set_facecolor("#f4f6f9")
+
+    fig.suptitle(f"{title}", fontsize=13, color="#0d1117", y=0.99)
+    fig.tight_layout()
+    fig.savefig(str(out_png), dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
 
 def _color_for(material: str):
     from cadquery import Color
