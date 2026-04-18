@@ -40,6 +40,9 @@ class BuildResult:
     ecad_success: bool = False
     drawings_success: bool = False
     diy_fab_success: bool = False
+    drc_success: bool = False      # KiCad kicad-cli pcb drc — fab-ready check
+    autoroute_success: bool = False  # Freerouting Specctra autorouter
+    fea_success: bool = False      # gmsh + CalculiX static-linear FEA
     print_success: bool = False
     cam_success: bool = False
     sim_success: bool = False        # Genesis flight dynamics
@@ -82,6 +85,13 @@ class BuildResult:
     # 3D printer + CNC instead of a PCB house.
     diy_fab: dict = field(default_factory=dict)
 
+    # Per-board DRC results from kicad-cli (pro-grade fab validation).
+    drc: dict = field(default_factory=dict)
+    # Per-board autoroute results from Freerouting.
+    autoroute: dict = field(default_factory=dict)
+    # Per-part FEA results from gmsh + CalculiX.
+    fea: dict = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "preset_id": self.preset_id,
@@ -95,6 +105,9 @@ class BuildResult:
                 "ecad":       self.ecad_success,
                 "drawings":   self.drawings_success,
                 "diy_fab":    self.diy_fab_success,
+                "drc":        self.drc_success,
+                "autoroute":  self.autoroute_success,
+                "fea":        self.fea_success,
                 "print":      self.print_success,
                 "cam":        self.cam_success,
                 "sim":        self.sim_success,
@@ -121,6 +134,9 @@ class BuildResult:
             "millforge_handoff": self.millforge_handoff,
             "ecad": self.ecad,
             "diy_fab": self.diy_fab,
+            "drc": self.drc,
+            "autoroute": self.autoroute,
+            "fea": self.fea,
         }
 
 
@@ -239,6 +255,118 @@ def run_full_build(*, preset_id: str, params: dict | None = None,
     _stage("diy_fab", "done" if diy_any_ok else "skip",
            n_boards=sum(1 for v in result.diy_fab.values()
                         if isinstance(v, dict) and "error" not in v))
+
+    # ── Stage 1.41: DRC — pro-grade PCB validation via kicad-cli ─────────
+    # Runs only if kicad-cli is on PATH; otherwise skips gracefully with a
+    # hint. Fails the stage on real DRC errors; unconnected + parity checks
+    # are reported as info but don't break the build.
+    _stage("drc", "start")
+    drc_any_ok = False
+    drc_any_run = False
+    if isinstance(result.ecad, dict) and result.ecad:
+        try:
+            from aria_os.ecad.drc_check import run_drc
+            for board_name, v in result.ecad.items():
+                pcb_path = v.get("kicad_pcb_path") if isinstance(v, dict) else None
+                if not pcb_path or not Path(pcb_path).is_file():
+                    continue
+                out = Path(result.output_dir) / "ecad" / board_name / "drc"
+                r = run_drc(pcb_path, out)
+                result.drc[board_name] = r
+                if r.get("available"):
+                    drc_any_run = True
+                    if r.get("passed"):
+                        drc_any_ok = True
+        except Exception as exc:
+            print(f"[build] drc import failed: {type(exc).__name__}: {exc}")
+    result.drc_success = drc_any_ok
+    if not drc_any_run:
+        _stage("drc", "skip", reason="kicad-cli not installed")
+    else:
+        _stage("drc", "done" if drc_any_ok else "fail",
+               n_boards=sum(1 for v in result.drc.values()
+                            if isinstance(v, dict) and v.get("passed")))
+
+    # ── Stage 1.42: Autoroute — Freerouting Specctra routing ─────────────
+    # Optional: replaces the naive star-routing in kicad_pcb_writer with a
+    # real autorouter for boards that need proper trace routing.
+    _stage("autoroute", "start")
+    ar_any_ok = False
+    ar_any_run = False
+    if isinstance(result.ecad, dict) and result.ecad:
+        try:
+            from aria_os.ecad.autoroute import run_autoroute
+            for board_name, v in result.ecad.items():
+                pcb_path = v.get("kicad_pcb_path") if isinstance(v, dict) else None
+                if not pcb_path or not Path(pcb_path).is_file():
+                    continue
+                out = Path(result.output_dir) / "ecad" / board_name / "autoroute"
+                r = run_autoroute(pcb_path, out)
+                result.autoroute[board_name] = r
+                if r.get("available"):
+                    ar_any_run = True
+                    if r.get("routed_pcb_path"):
+                        ar_any_ok = True
+        except Exception as exc:
+            print(f"[build] autoroute import failed: {type(exc).__name__}: {exc}")
+    result.autoroute_success = ar_any_ok
+    if not ar_any_run:
+        _stage("autoroute", "skip", reason="freerouting.jar or java missing")
+    else:
+        _stage("autoroute", "done" if ar_any_ok else "fail")
+
+    # ── Stage 1.43: FEA — static-linear stress via gmsh + CalculiX ───────
+    # Per metal part, compute max von Mises under a representative load,
+    # assert safety_factor >= 2 against material yield. Skips gracefully
+    # if ccx (CalculiX) isn't installed.
+    _stage("fea", "start")
+    fea_any_ok = False
+    fea_any_run = False
+    parts_dir_for_fea = Path(result.output_dir) / "parts"
+    if result.bom_path and Path(result.bom_path).is_file() and parts_dir_for_fea.is_dir():
+        try:
+            from aria_os.fea.calculix_stage import (
+                run_static_fea, MATERIAL_PROPS)
+            import json as _j
+            bom = _j.loads(Path(result.bom_path).read_text(encoding="utf-8"))
+            # Only analyse metal parts (plastic/composite FEA needs nonlinear
+            # or orthotropic models we haven't wired yet).
+            metal_prefixes = ("aluminum", "steel", "stainless",
+                              "titanium", "brass")
+            parts = bom.get("parts", []) if isinstance(bom, dict) else []
+            for p in parts:
+                mat = (p.get("material") or "").lower()
+                if not any(mat.startswith(m) for m in metal_prefixes):
+                    continue
+                if mat not in MATERIAL_PROPS:
+                    continue
+                step_rel = p.get("step_path") or p.get("geometry_step")
+                if not step_rel:
+                    continue
+                step_abs = (Path(result.output_dir) / step_rel
+                            if not Path(step_rel).is_absolute()
+                            else Path(step_rel))
+                if not step_abs.is_file():
+                    continue
+                part_name = p.get("name") or Path(step_rel).stem
+                out = Path(result.output_dir) / "fea" / part_name
+                # 100N default test load — representative for bracket/mount
+                r = run_static_fea(step_abs, material=mat, load_n=100.0,
+                                   out_dir=out, mesh_size_mm=5.0)
+                result.fea[part_name] = r
+                if r.get("available"):
+                    fea_any_run = True
+                    if r.get("passed"):
+                        fea_any_ok = True
+        except Exception as exc:
+            print(f"[build] fea import failed: {type(exc).__name__}: {exc}")
+    result.fea_success = fea_any_ok
+    if not fea_any_run:
+        _stage("fea", "skip", reason="ccx (CalculiX) not installed")
+    else:
+        _stage("fea", "done" if fea_any_ok else "fail",
+               n_parts=sum(1 for v in result.fea.values()
+                           if isinstance(v, dict) and v.get("passed")))
 
     # ── Stage 1.5: per-part mass calculation ──────────────────────────────
     # Compute mass_g per part from STEP volume × material density and write
