@@ -1219,6 +1219,57 @@ def _call_vision_ollama(
         return None
 
 
+def _verify_cache_key(image_paths: list[str], prompt: str) -> str:
+    """Stable hash over the rendered views + prompt so a rerun of an identical
+    STL + checklist short-circuits the vision API entirely."""
+    import hashlib
+    h = hashlib.sha256()
+    for p in image_paths:
+        try:
+            with open(p, "rb") as fh:
+                while True:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+        except OSError:
+            h.update(b"\x00")
+    h.update(b"|")
+    h.update(prompt.encode("utf-8", errors="ignore"))
+    return h.hexdigest()
+
+
+def _verify_cache_get(key: str) -> dict | None:
+    """Lookup a cached verify verdict by key. Returns None on miss."""
+    from aria_os.caching import _cache_root
+    p = _cache_root() / "verify" / f"{key}.json"
+    if not p.is_file():
+        return None
+    try:
+        import json as _j
+        d = _j.loads(p.read_text(encoding="utf-8"))
+        d["_from_cache"] = True
+        return d
+    except Exception:
+        return None
+
+
+def _verify_cache_put(key: str, verdict: dict) -> None:
+    """Write verify verdict to cache. Silent on failure."""
+    if not isinstance(verdict, dict):
+        return
+    try:
+        from aria_os.caching import _cache_root
+        import json as _j
+        d = _cache_root() / "verify"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{key}.json").write_text(
+            _j.dumps({k: v for k, v in verdict.items() if k != "_from_cache"},
+                     default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _call_vision(
     image_paths: list[str],
     view_labels: list[str],
@@ -1229,16 +1280,25 @@ def _call_vision(
 ) -> dict | None:
     """Send rendered views to vision AI and parse the verification result.
 
-    Priority: Gemini 2.5 Flash → Groq llama-4-scout → Ollama gemma4:e4b → Anthropic Claude.
-
-    Cross-validation: if a non-Anthropic provider reports PASS at ≥0.80, a second
-    provider is also called.  The final result takes the lower confidence and requires
-    both to agree on PASS.  This prevents a single overconfident model from approving
-    bad geometry.
+    Escalation ladder (cheapest → priciest):
+      0. cache lookup by (images_hash + prompt_hash) — zero-cost rerun
+      1. Ollama local — cheap offline check. Trusted for FAIL (fail-fast in
+         refinement loop); PASS falls through since local VLM can't solo-
+         approve (per feedback_aria_pipeline_quirks memory).
+      2. Gemini / Groq — free cloud, cross-validated.
+      3. Anthropic — last resort (credits).
 
     Returns parsed dict or None if no API is available.
     """
     prompt = _build_vision_prompt(goal, checks, view_labels, spec=spec)
+
+    # Tier 0: cache — identical STL renders + checklist = identical verdict
+    cache_key = _verify_cache_key(image_paths, prompt)
+    cached = _verify_cache_get(cache_key)
+    if cached is not None:
+        print(f"[VISUAL] cache hit {cache_key[:12]} — "
+              f"skipped vision API (was {cached.get('_verified_by', '?')})")
+        return cached
 
     # Confidence caps per provider — self-reported 100% is never trustworthy
     _CONF_CAPS = {
@@ -1259,11 +1319,14 @@ def _call_vision(
             print(f"[VISUAL] {provider} confidence capped: {raw:.2f} -> {cap:.2f}")
         return result
 
-    # Provider call order
+    # Provider call order — Ollama first so cheap local FAILs short-circuit
+    # the refinement loop (most iterations fail; paying cloud $ to discover
+    # that is waste). Gemini/Groq handle PASS confirmation on free quotas;
+    # Anthropic remains the authoritative last resort.
     providers = [
+        ("ollama",    lambda: _call_vision_ollama(image_paths, prompt)),
         ("gemini",    lambda: _call_vision_gemini(image_paths, prompt, repo_root)),
         ("groq",      lambda: _call_vision_groq(image_paths, prompt, repo_root)),
-        ("ollama",    lambda: _call_vision_ollama(image_paths, prompt)),
         ("anthropic", lambda: _call_vision_anthropic(image_paths, prompt, repo_root)),
     ]
 
@@ -1272,10 +1335,29 @@ def _call_vision(
     for name, fn in providers:
         try:
             result = fn()
-            if result is not None:
-                primary = _apply_cap(result)
+            if result is None:
+                continue
+            result = _apply_cap(result)
+            # If Ollama says FAIL, trust it and short-circuit. Local VLM can't
+            # solo-approve PASS but it's reliable for catching bad geometry.
+            # Falling through on Ollama-PASS is what the cross-validation step
+            # below handles.
+            if name == "ollama" and not result.get("overall_match", False):
+                print(f"[VISUAL] ollama FAIL — short-circuit "
+                      f"(conf={result.get('confidence', 0):.2f})")
+                primary = result
                 primary_provider = name
                 break
+            if name == "ollama":
+                # Ollama PASS — don't trust alone, continue to cloud providers.
+                # But keep it as a floor if nothing else answers.
+                if primary is None:
+                    primary = result
+                    primary_provider = name
+                continue
+            primary = result
+            primary_provider = name
+            break
         except Exception as exc:
             print(f"[VISUAL] {name} unexpected error: {exc}")
 
@@ -1325,6 +1407,8 @@ def _call_vision(
             primary["confidence"] = min(primary_conf, cross_conf)
             primary["_cross_validated_by"] = cross_by
 
+    # Cache the verdict so repeat verifications of the same STL+checklist are free.
+    _verify_cache_put(cache_key, primary)
     return primary
 
 
