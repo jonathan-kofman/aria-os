@@ -470,6 +470,12 @@ function FilePreview({ file }) {
       <iframe src={url} style={{ width: "100%", height: "100%", border: "none" }} />
     );
   }
+  // KiCad PCB — no in-browser KiCad renderer exists; surface the 3 viable
+  // viewing paths instead of falling through to "no preview available."
+  // The path stems are predictable from the build_pipeline output structure.
+  if (ext === "kicad_pcb") {
+    return <KiCadPcbPreview file={file} url={url} />;
+  }
   // Unknown — just offer download
   return (
     <div style={{ padding: "20px", textAlign: "center" }}>
@@ -487,6 +493,121 @@ function FilePreview({ file }) {
     </div>
   );
 }
+
+function KiCadPcbPreview({ file, url }) {
+  // No browser-native KiCad renderer exists. Surface the 3 viable viewing
+  // paths instead of failing silently:
+  //   1. View the populated 3D PCB STEP we generate (Three.js viewer)
+  //   2. View the 2D BOM layout PNG (rendered server-side from BOM JSON)
+  //   3. Download the .kicad_pcb to open in KiCad app on desktop
+  //
+  // File path conventions from build_pipeline:
+  //   ecad/<label>/<label>.kicad_pcb       ← this file
+  //   ecad/<label>_populated.step          ← 3D STEP (in ecad/ root)
+  //   ecad/<label>/<slug>/<slug>_bom_preview.png ← 2D layout PNG
+  const [previewSrc, setPreviewSrc] = useState(null);
+  const [populatedStl, setPopulatedStl] = useState(null);
+  const [boardName, setBoardName] = useState("");
+
+  useEffect(() => {
+    const path = file.path || "";
+    const m = path.match(/[\\/]ecad[\\/]([^\\/]+)[\\/]/);
+    const label = m ? m[1]
+                    : path.split(/[\\/]/).pop().replace(/\.kicad_pcb$/, "");
+    setBoardName(label);
+
+    // Look up sibling artifacts via the existing /api/outputs listing
+    fetch("/api/outputs")
+      .then(r => r.json())
+      .then(d => {
+        const files = (d.files || []).map(f =>
+          typeof f === "string" ? f : (f.path || f.name || ""));
+        // 2D BOM preview PNG
+        const previewMatch = files.find(f =>
+          (f.includes(`/ecad/${label}/`) || f.includes(`\\ecad\\${label}\\`))
+          && f.endsWith("_bom_preview.png"));
+        if (previewMatch) setPreviewSrc(`/api/file?path=${encodeURIComponent(previewMatch)}`);
+        // Populated 3D STEP — converted to STL by /api/file? Three.js needs STL,
+        // so try the .stl variant first; fall back to .step.
+        const stepMatch = files.find(f =>
+          (f.includes(`/ecad/${label}_populated.`) || f.includes(`\\ecad\\${label}_populated.`))
+          && (f.endsWith("_populated.stl") || f.endsWith("_populated.step")));
+        if (stepMatch) {
+          const stlVariant = stepMatch.replace(/\.step$/, ".stl");
+          setPopulatedStl(`/api/file?path=${encodeURIComponent(stlVariant)}`);
+        }
+      })
+      .catch(() => {});
+  }, [file?.path]);
+
+  return (
+    <div style={{ height: "100%", overflow: "auto", padding: "16px",
+                  display: "flex", flexDirection: "column", gap: "16px",
+                  WebkitOverflowScrolling: "touch" }}>
+      <div>
+        <div style={{ fontSize: "13px", fontWeight: 700, color: T.text0,
+                      marginBottom: "4px" }}>{boardName || "PCB"}</div>
+        <div style={{ fontSize: "11px", color: T.text3 }}>
+          KiCad PCB files need KiCad to render. Use one of the viewers below
+          OR download to open in the KiCad desktop app.
+        </div>
+      </div>
+
+      {/* 2D BOM layout — rendered server-side from BOM JSON */}
+      {previewSrc && (
+        <div style={{ border: `1px solid ${T.border}`, borderRadius: "8px",
+                      overflow: "hidden", background: "#fff" }}>
+          <div style={{ padding: "8px 12px", background: T.bg2, color: T.text2,
+                        fontSize: "10px", fontWeight: 700, letterSpacing: "0.06em",
+                        borderBottom: `1px solid ${T.border}` }}>
+            2D LAYOUT — components placed on board
+          </div>
+          <img src={previewSrc} alt={`${boardName} layout`}
+               style={{ display: "block", maxWidth: "100%", margin: "0 auto" }} />
+        </div>
+      )}
+
+      {/* 3D populated PCB — Three.js viewer */}
+      <div style={{ border: `1px solid ${T.border}`, borderRadius: "8px",
+                    overflow: "hidden" }}>
+        <div style={{ padding: "8px 12px", background: T.bg2, color: T.text2,
+                      fontSize: "10px", fontWeight: 700, letterSpacing: "0.06em",
+                      borderBottom: `1px solid ${T.border}` }}>
+          3D POPULATED PCB
+        </div>
+        <div style={{ height: "300px", background: "#0a0a0f" }}>
+          {populatedStl
+            ? <STLViewer stlUrl={populatedStl} />
+            : <div style={{ height: "100%", display: "flex",
+                            alignItems: "center", justifyContent: "center",
+                            color: T.text4, fontSize: "11px" }}>
+                Populated PCB STEP not found in outputs/
+              </div>}
+        </div>
+      </div>
+
+      {/* Download + external-tool hints */}
+      <div>
+        <a href={url} download
+           style={{ display: "block", padding: "10px 16px", borderRadius: "8px",
+                    background: `linear-gradient(135deg, ${T.ai}, ${T.brand})`,
+                    color: "#fff", fontSize: "12px", fontWeight: 700,
+                    textDecoration: "none", textAlign: "center",
+                    marginBottom: "10px" }}>
+          ↓ DOWNLOAD .kicad_pcb
+        </a>
+        <div style={{ fontSize: "10px", color: T.text4, lineHeight: 1.7,
+                      fontFamily: "JetBrains Mono, monospace" }}>
+          Open in KiCad: <span style={{ color: T.ai }}>kicad {file.name}</span><br />
+          Export Gerbers: <span style={{ color: T.ai }}>kicad-cli pcb export gerbers -o gerbers/ {file.name}</span><br />
+          Web viewer: <a href="https://kicanvas.org/" target="_blank" rel="noreferrer"
+              style={{ color: T.ai }}>kicanvas.org</a> (drag-drop the downloaded file)
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function JsonViewer({ url }) {
   const [content, setContent] = useState("Loading…");
