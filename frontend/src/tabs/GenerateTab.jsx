@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import { useViewport, layout, spacing, viewContainer } from "../responsive.js";
 import { T } from "../aria/theme.js";
 import { Panel, StatCard, Badge } from "../aria/uiPrimitives.jsx";
@@ -21,6 +21,7 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
   const [running, setRunning] = useState(null);   // { run_id, preset_id }
   const [progress, setProgress] = useState(null); // { stages: [...], current_stage, started_at }
   const [result, setResult] = useState(null);
+  const [cost, setCost] = useState(null);         // { totals, headline, top_lines, line_count }
   const [error, setError] = useState(null);
   const loggedPresetStagesRef = useRef(0);
 
@@ -54,7 +55,7 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
           started_at: d.started_at,
         });
         if (d.status === "done") {
-          setResult(d.result);
+          setResult({ ...d.result, run_id: running.run_id });
           setRunning(null);
           clearInterval(id);
           const ok = d.result?.success === true;
@@ -71,8 +72,23 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
     return () => clearInterval(id);
   }, [running, appendPipelineLog, setPipelineStatus, refreshParts]);
 
+  // Fetch cost breakdown once the build is done and successful.
+  useEffect(() => {
+    if (!result || !result.success) { setCost(null); return; }
+    // The /api/preset/run/{id} response already has run_id in it via URL;
+    // stash from running state if still available, else from result
+    const rid = result.run_id;
+    if (!rid) return;
+    let cancelled = false;
+    fetch(`/api/cost/build/${rid}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled && d?.ready) setCost(d); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [result]);
+
   const launch = async (preset_id) => {
-    setError(null); setResult(null); setProgress(null);
+    setError(null); setResult(null); setProgress(null); setCost(null);
     loggedPresetStagesRef.current = 0;
     try {
       const r = await fetch(`/api/preset/${preset_id}`, { method: "POST" });
@@ -287,6 +303,46 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
                     </a>
                   ))}
                 </div>
+              </div>
+            )}
+            {/* Cost breakdown card — totals per category + top line items. */}
+            {result.success && cost && cost.totals && (
+              <div style={{ marginBottom: "8px", padding: "8px 10px",
+                            borderRadius: "6px",
+                            background: "rgba(0,0,0,0.25)",
+                            border: `1px solid ${T.border}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between",
+                              alignItems: "baseline", marginBottom: "6px" }}>
+                  <span style={{ fontSize: "9px", color: T.text3, fontWeight: 700,
+                                 letterSpacing: "0.08em" }}>COST BREAKDOWN</span>
+                  <span style={{ fontFamily: "JetBrains Mono, monospace",
+                                 fontSize: "13px", color: T.text0, fontWeight: 700 }}>
+                    {cost.headline || `$${(cost.totals.total_usd || 0).toFixed(2)}`}
+                  </span>
+                </div>
+                <div style={{ display: "grid",
+                              gridTemplateColumns: "1fr auto", rowGap: "2px",
+                              fontSize: "10px", fontFamily: "JetBrains Mono, monospace" }}>
+                  {[
+                    ["Print",      cost.totals.print_usd],
+                    ["CNC stock",  cost.totals.cnc_usd],
+                    ["PCB fab",    cost.totals.pcb_usd],
+                    ["Electronics",cost.totals.electronics_usd],
+                    ["Fasteners",  cost.totals.fasteners_usd],
+                  ].filter(([, v]) => v && v > 0).map(([label, v]) => (
+                    <Fragment key={label}>
+                      <span style={{ color: T.text2 }}>{label}</span>
+                      <span style={{ color: T.text1, textAlign: "right" }}>
+                        ${v.toFixed(2)}
+                      </span>
+                    </Fragment>
+                  ))}
+                </div>
+                {cost.line_count > 0 && (
+                  <div style={{ marginTop: "5px", fontSize: "9px", color: T.text4 }}>
+                    {cost.line_count} line item{cost.line_count === 1 ? "" : "s"}
+                  </div>
+                )}
               </div>
             )}
             {result.success && (

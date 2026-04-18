@@ -1150,19 +1150,35 @@ async def cost_reset():
 
 @app.get("/api/cost/build/{run_id}")
 async def cost_for_build(run_id: str):
-    """Return the cost_breakdown.json for a completed preset run."""
+    """Return the cost_breakdown.json for a completed preset run, including
+    parsed totals + top line items so the UI can render a cost card without
+    a second request."""
     state = _PRESET_RUNS.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Run not found")
     if state.get("status") != "done":
         return {"status": state.get("status"), "ready": False}
     result = state.get("result") or {}
-    return {
+    breakdown_path = result.get("cost_breakdown_path")
+    payload = {
         "status": "done",
         "ready": True,
         "total_cost_usd": result.get("total_cost_usd", 0.0),
-        "cost_breakdown_path": result.get("cost_breakdown_path"),
+        "cost_breakdown_path": breakdown_path,
     }
+    # Parse cost_breakdown.json and surface totals + top 10 line items
+    if breakdown_path and Path(breakdown_path).is_file():
+        try:
+            data = json.loads(Path(breakdown_path).read_text(encoding="utf-8"))
+            payload["totals"] = data.get("totals") or {}
+            payload["headline"] = data.get("headline")
+            lines = sorted(data.get("lines", []),
+                           key=lambda l: -(l.get("cost_usd") or 0))
+            payload["top_lines"] = lines[:10]
+            payload["line_count"] = len(lines)
+        except Exception:
+            pass
+    return payload
 
 
 @app.get("/api/preset/run/{run_id}/preview")
