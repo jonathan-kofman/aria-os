@@ -3,19 +3,21 @@
 # strips libGL.so.1 from the runtime image even when it's installed
 # at build time, breaking cadquery / OCP imports.
 #
-# kicad-cli installation: switched from multi-stage COPY (kicad/kicad:9.0)
-# to plain `apt install kicad`. The COPY approach failed 3 times in a row
-# chasing transitive deps (libkicommon, libwx_gtk3u_gl, libnss3, …). The
-# apt path adds ~600MB to the image but every dep KiCad needs is captured
-# in one line. Image goes from ~1.5GB to ~2.1GB; Railway hobby tier has
-# no hard cap so this is fine. ldconfig issues from the COPY approach
-# (libTKV3d.so.7 not a symlink) also disappear.
+# kicad-cli installation history:
+#   1. multi-stage COPY from kicad/kicad:9.0 — failed chasing transitive
+#      deps (libkicommon, libwx_gtk3u_gl, libnss3, libTKV3d.so.7 symlink).
+#   2. `apt install kicad` on bookworm-slim — the `kicad` metapackage
+#      pulls the full IDE + 3D models + symbols + footprints (~1.8GB
+#      unpacked). Railway builder ran out of memory/disk during unpack.
+#   3. Current: switch base to Debian trixie (13) via python:3.11-slim-trixie.
+#      Trixie ships a standalone `kicad-cli` package (~150MB) separate
+#      from the full IDE — exactly what we need for headless Gerber export.
 
-FROM python:3.11-slim-bookworm AS runtime
+FROM python:3.11-slim-trixie AS runtime
 
 # System libraries cadquery / OCP / VTK / matplotlib / kicad-cli need at
-# runtime. `kicad` itself pulls wxGTK + libsecret + libnss3 + most other
-# transitive deps automatically.
+# runtime. `kicad-cli` on trixie is a small standalone package — it does
+# NOT drag in wxGTK or the full IDE.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
@@ -35,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libfreetype6 \
         ca-certificates \
         curl \
-        kicad \
+        kicad-cli \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
