@@ -3,8 +3,11 @@
 # strips libGL.so.1 from the runtime image even when it's installed
 # at build time, breaking cadquery / OCP imports.
 #
-# This single-stage Dockerfile keeps every system lib in the final
-# image so cadquery_ocp can dlopen its native deps at runtime.
+# Two-stage build: pull kicad-cli from the official KiCad image
+# (bookworm-based, ABI-compatible with our runtime) so the backend can
+# export Gerbers headlessly. Pinned to 9.0 for reproducible builds.
+
+FROM kicad/kicad:9.0 AS kicad-src
 
 FROM python:3.11-slim-bookworm AS runtime
 
@@ -30,7 +33,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libfreetype6 \
         ca-certificates \
         curl \
+        libwxgtk3.2-1 \
+        libngspice0 \
+        libpython3.11 \
     && rm -rf /var/lib/apt/lists/*
+
+# Pull kicad-cli from the official KiCad image so the backend can export
+# Gerbers headlessly. Adds ~250MB but avoids 1.2GB full apt install.
+# 3dmodels deleted post-copy (~200MB) since Gerber export doesn't need them.
+COPY --from=kicad-src /usr/bin/kicad-cli /usr/bin/kicad-cli
+COPY --from=kicad-src /usr/lib/x86_64-linux-gnu/libkicad_* /usr/lib/x86_64-linux-gnu/
+COPY --from=kicad-src /usr/lib/x86_64-linux-gnu/libocct_* /usr/lib/x86_64-linux-gnu/
+COPY --from=kicad-src /usr/share/kicad /usr/share/kicad
+RUN rm -rf /usr/share/kicad/3dmodels && ldconfig
 
 WORKDIR /app
 
@@ -48,6 +63,8 @@ EXPOSE 8080
 
 # Verify cadquery imports cleanly during build so Railway's deploy
 # fails fast instead of producing a degraded healthcheck pass.
-RUN python -c "import cadquery; print('cadquery', cadquery.__version__, 'OK')"
+# Also verify kicad-cli is callable so Gerber export works at runtime.
+RUN python -c "import cadquery; print('cadquery', cadquery.__version__, 'OK')" \
+ && kicad-cli version
 
 CMD ["python", "run_dashboard.py", "--no-browser"]
