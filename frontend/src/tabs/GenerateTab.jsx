@@ -306,14 +306,16 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
 
   return (
     <div style={{ padding: `${S.pageY} ${S.pageX}`, display: "grid",
-                  gridTemplateColumns: L.twoColGrid, gap: S.gap,
+                  gridTemplateColumns: L.twoColGrid,
+                  gridTemplateRows: vp.isMobile ? undefined : "minmax(0, 1fr)",
+                  gap: S.gap,
                   height: vp.isMobile ? "auto" : "100%",
                   minHeight: 0,
                   overflow: vp.isMobile ? "visible" : "hidden" }}>
       {/* Left: 3D Viewer (full width on mobile, stacks above the form) */}
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0, overflow: "hidden" }}>
         <Panel title="3D VIEWER" style={{ flex: 1, minHeight: 0 }}>
-          <div style={{ height: "calc(100% - 41px)", position: "relative" }}>
+          <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
             <STLViewer stlUrl={stlUrl} />
             {selectedPart && (
               <div style={{ position: "absolute", bottom: "12px", left: "12px", padding: "6px 12px", background: "rgba(10,10,15,0.8)", borderRadius: "8px", border: `1px solid ${T.border}`, backdropFilter: "blur(12px)" }}>
@@ -352,7 +354,7 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
           overflowY:auto so the entire stack is scrollable — otherwise tall
           QuickBuilds results push the Generate form + log out of view. */}
       <div style={{ display: "flex", flexDirection: "column", gap: "12px",
-                    minHeight: 0, overflowY: "auto",
+                    minHeight: 0, overflowY: "auto", overflowX: "hidden",
                     WebkitOverflowScrolling: "touch",
                     paddingRight: "4px" }}>
         <QuickBuildsPanel />
@@ -389,7 +391,7 @@ function GenerateNL({ parts, selectedPart, setSelectedPart, onGenerate, pipeline
         </Panel>
 
         <Panel title="PIPELINE LOG" style={{ height: "280px", flexShrink: 0 }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+          <div style={{ padding: "10px 14px", flex: 1, minHeight: 0, overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {logLines.length === 0 ? (
               <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
             ) : (
@@ -461,18 +463,20 @@ function GenerateImage({ pipelineStatus, logLines }) {
 
   return (
     <div style={{ padding: `${S.pageY} ${S.pageX}`, display: "grid",
-                  gridTemplateColumns: L.twoColGrid, gap: S.gap,
+                  gridTemplateColumns: L.twoColGrid,
+                  gridTemplateRows: vp.isMobile ? undefined : "minmax(0, 1fr)",
+                  gap: S.gap,
                   height: vp.isMobile ? "auto" : "100%",
                   minHeight: 0,
                   overflow: vp.isMobile ? "visible" : "hidden" }}>
-      <Panel title="3D VIEWER" style={{ minHeight: 0 }}>
-        <div style={{ height: "calc(100% - 41px)" }}>
+      <Panel title="3D VIEWER" style={{ minHeight: 0, overflow: "hidden" }}>
+        <div style={{ flex: 1, minHeight: 0 }}>
           <STLViewer stlUrl={null} />
         </div>
       </Panel>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "12px",
-                    minHeight: 0, overflowY: "auto",
+                    minHeight: 0, overflowY: "auto", overflowX: "hidden",
                     WebkitOverflowScrolling: "touch", paddingRight: "4px" }}>
         <Panel title="GENERATE FROM IMAGE">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -518,7 +522,7 @@ function GenerateImage({ pipelineStatus, logLines }) {
         </Panel>
 
         <Panel title="PIPELINE LOG" style={{ height: "280px", flexShrink: 0 }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+          <div style={{ padding: "10px 14px", flex: 1, minHeight: 0, overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {allLog.length === 0 ? (
               <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
             ) : (
@@ -607,7 +611,7 @@ function GenerateAssembly({ pipelineStatus, logLines, onGenerate }) {
       </Panel>
 
       <Panel title="PIPELINE LOG" style={{ flex: 1, minHeight: 0 }}>
-        <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+        <div style={{ padding: "10px 14px", flex: 1, minHeight: 0, overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
           {allLog.length === 0 ? (
             <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
           ) : (
@@ -656,7 +660,7 @@ function GenerateTerrain({ pipelineStatus, logLines, onGenerate }) {
   return (
     <div style={viewContainer(_vp_terrain, "1fr 360px")}>
       <Panel title="TERRAIN PREVIEW" style={{ flex: 1, minHeight: 0 }}>
-        <div style={{ height: "calc(100% - 41px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "16px" }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "16px" }}>
           <svg viewBox="0 0 400 200" style={{ width: "80%", opacity: 0.4 }}>
             <defs>
               <linearGradient id="tg" x1="0" x2="0" y1="0" y2="1">
@@ -686,7 +690,7 @@ function GenerateTerrain({ pipelineStatus, logLines, onGenerate }) {
       </Panel>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "12px",
-                    minHeight: 0, overflowY: "auto",
+                    minHeight: 0, overflowY: "auto", overflowX: "hidden",
                     WebkitOverflowScrolling: "touch", paddingRight: "4px" }}>
         <Panel title="TERRAIN PARAMETERS">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -726,7 +730,7 @@ function GenerateTerrain({ pipelineStatus, logLines, onGenerate }) {
           </div>
         </Panel>
         <Panel title="PIPELINE LOG" style={{ height: "280px", flexShrink: 0 }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+          <div style={{ padding: "10px 14px", flex: 1, minHeight: 0, overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {[...logLines, ...localLog].length === 0
               ? <div style={{ color: T.text4, fontStyle: "italic" }}>Waiting for pipeline events...</div>
               : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)
@@ -771,9 +775,9 @@ function GenerateScan({ pipelineStatus, logLines }) {
 
   return (
     <div style={viewContainer(_vp_scan, "1fr 360px")}>
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0, overflow: "hidden" }}>
         <Panel title="SCAN VIEWER" style={{ flex: 1, minHeight: 0 }}>
-          <div style={{ height: "calc(100% - 41px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "12px" }}>
+          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "12px" }}>
             <div style={{ fontSize: "32px", opacity: 0.15 }}>⊹</div>
             <div style={{ fontSize: "12px", color: T.text4 }}>Upload a 3D scan to reconstruct</div>
             <div style={{ fontSize: "10px", color: T.text4 }}>STL, PLY, OBJ, PCD supported</div>
@@ -797,7 +801,7 @@ function GenerateScan({ pipelineStatus, logLines }) {
         </Panel>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0, overflowY: "auto", overflowX: "hidden", WebkitOverflowScrolling: "touch", paddingRight: "4px" }}>
         <Panel title="UPLOAD SCAN">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
             <div ref={dropRef}
@@ -903,7 +907,7 @@ function GenerateRefine({ parts, pipelineStatus, logLines }) {
       </Panel>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "12px",
-                    minHeight: 0, overflowY: "auto",
+                    minHeight: 0, overflowY: "auto", overflowX: "hidden",
                     WebkitOverflowScrolling: "touch", paddingRight: "4px" }}>
         <Panel title="REFINEMENT">
           <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -937,7 +941,7 @@ function GenerateRefine({ parts, pipelineStatus, logLines }) {
           </div>
         </Panel>
         <Panel title="PIPELINE LOG" style={{ height: "280px", flexShrink: 0 }}>
-          <div style={{ padding: "10px 14px", height: "calc(100% - 41px)", overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
+          <div style={{ padding: "10px 14px", flex: 1, minHeight: 0, overflowY: "auto", fontFamily: "'JetBrains Mono', monospace", fontSize: "10px", lineHeight: 1.7 }}>
             {[...logLines, ...localLog].length === 0
               ? <div style={{ color: T.text4, fontStyle: "italic" }}>Select a part and describe the modification.</div>
               : [...logLines, ...localLog].map((line, i) => <div key={i} style={{ color: logColor(line) }}>{line}</div>)

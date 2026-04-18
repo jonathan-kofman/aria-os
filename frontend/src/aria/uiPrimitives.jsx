@@ -29,9 +29,28 @@ export function StatCard({ label, value, sub, color, spark }) {
 
 export function Panel({ children, title, style = {} }) {
   return (
-    <div style={{ background: `linear-gradient(180deg, ${T.bg2} 0%, ${T.bg1} 100%)`, border: `1px solid ${T.border}`, borderRadius: "14px", overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.4)", ...style }}>
+    <div style={{
+      background: `linear-gradient(180deg, ${T.bg2} 0%, ${T.bg1} 100%)`,
+      border: `1px solid ${T.border}`,
+      borderRadius: "14px",
+      overflow: "hidden",
+      boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+      display: "flex",
+      flexDirection: "column",
+      minHeight: 0,
+      ...style,
+    }}>
       {title && (
-        <div style={{ padding: "12px 18px", borderBottom: `1px solid ${T.border}`, background: "rgba(0,0,0,0.3)", fontSize: "9px", color: T.text3, fontWeight: 700, letterSpacing: "0.12em" }}>{title}</div>
+        <div style={{
+          padding: "12px 18px",
+          borderBottom: `1px solid ${T.border}`,
+          background: "rgba(0,0,0,0.3)",
+          fontSize: "9px",
+          color: T.text3,
+          fontWeight: 700,
+          letterSpacing: "0.12em",
+          flexShrink: 0,
+        }}>{title}</div>
       )}
       {children}
     </div>

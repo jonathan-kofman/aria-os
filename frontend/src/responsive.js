@@ -83,6 +83,8 @@ export function viewContainer(vp, cols = "1fr 380px") {
     padding: `${S.pageY} ${S.pageX}`,
     display: "grid",
     gridTemplateColumns: vp.isMobile ? "1fr" : cols,
+    // One row fills the main column height so side-by-side cells can scroll inside (minmax avoids grid min-content blow-up).
+    gridTemplateRows: vp.isMobile ? undefined : "minmax(0, 1fr)",
     gap: S.gap,
     // Fill the main scroll column (below TopBar + SubTabs), not raw 100vh — avoids double-counting chrome and broken scroll.
     height: vp.isMobile ? "auto" : "100%",

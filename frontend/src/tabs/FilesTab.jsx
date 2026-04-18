@@ -357,7 +357,7 @@ function FilesBrowse() {
         </div>
       </Panel>
       <Panel title={selected?.name || "PREVIEW"} style={{ minHeight: 0 }}>
-        <div style={{ height: "calc(100% - 41px)" }}>
+        <div style={{ flex: 1, minHeight: 0 }}>
           <FilePreview file={selected} />
         </div>
       </Panel>

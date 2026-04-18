@@ -77,7 +77,7 @@ function LibraryParts({ parts }) {
 
       <div style={{ display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
         <Panel title="3D PREVIEW" style={{ flex: 1, minHeight: 0 }}>
-          <div style={{ height: "calc(100% - 41px)" }}>
+          <div style={{ flex: 1, minHeight: 0 }}>
             <STLViewer stlUrl={stlUrl} />
           </div>
         </Panel>
