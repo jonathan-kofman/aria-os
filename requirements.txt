@@ -26,3 +26,5 @@ pyserial
 plotly
 joblib>=1.3.0       # parallel catalog generation (process pool, ~3x speedup)
 matplotlib>=3.8.0   # GD&T SVG drawings + render PNGs (pinned for stability)
+graphifyy>=0.1.0    # knowledge graph + MCP server over the codebase + run bundles
+                    # (claims ~71x token reduction vs raw file analysis)
