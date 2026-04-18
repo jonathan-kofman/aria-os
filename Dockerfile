@@ -1,27 +1,31 @@
 # ARIA-OS dashboard — Railway Dockerfile
-# Used in preference to nixpacks because nixpacks's multi-stage build
-# strips libGL.so.1 from the runtime image even when it's installed
-# at build time, breaking cadquery / OCP imports.
 #
-# kicad-cli installation history:
-#   1. multi-stage COPY from kicad/kicad:9.0 — failed chasing transitive
-#      deps (libkicommon, libwx_gtk3u_gl, libnss3, libTKV3d.so.7 symlink).
-#   2. `apt install kicad` on bookworm-slim — the `kicad` metapackage
-#      pulls the full IDE + 3D models + symbols + footprints (~1.8GB
-#      unpacked). Railway builder ran out of memory/disk during unpack.
-#   3. Current: switch base to Debian trixie (13) via python:3.13-slim-trixie.
-#      Trixie ships a standalone `kicad-cli` package (~150MB) separate
-#      from the full IDE — exactly what we need for headless Gerber export.
-#      NOTE: python:3.11-slim-trixie does NOT exist on Docker Hub — only
-#      3.13/3.14/bare `slim-trixie` tags exist. 3.11 was never published
-#      against trixie. Using 3.13 (stable, ~2x faster than 3.11 for pure py).
+# kicad-cli installation history (4 failed attempts before this one):
+#   1. Multi-stage COPY from kicad/kicad:9.0 — chased transitive deps
+#      one at a time (libkicommon, libwx_gtk3u_gl, libnss3, libTKV3d).
+#   2. `apt install kicad` on bookworm-slim — IDE metapackage ~1.8GB
+#      OOM'd Railway builder during apt unpack.
+#   3. `python:3.13-slim-trixie` + `apt install kicad-cli` — failed
+#      with apt exit code 100 (`kicad-cli` not in trixie main repo, OR
+#      package isn't built for slim base, can't tell which).
+#   4. (this attempt) FROM kicad/kicad:9.0 directly — flip the polarity:
+#      use KiCad's official image as the BASE, then add Python + cadquery
+#      system libs on top. KiCad's image already has every kicad dep +
+#      working OS — we only need to layer the python runtime onto it.
+#
+# Base: kicad/kicad:9.0 is Ubuntu 24.04 noble. python3.12 ships in apt.
 
-FROM python:3.13-slim-trixie AS runtime
+FROM kicad/kicad:9.0 AS runtime
 
-# System libraries cadquery / OCP / VTK / matplotlib / kicad-cli need at
-# runtime. `kicad-cli` on trixie is a small standalone package — it does
-# NOT drag in wxGTK or the full IDE.
+# Become root for install steps (kicad image runs as `kicad` user by default)
+USER root
+
+# Python 3.12 + cadquery / OCP / VTK / matplotlib system libs.
+# kicad-cli is already at /usr/bin/kicad-cli — pre-installed in the base.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
         libgl1 \
         libglib2.0-0 \
         libxrender1 \
@@ -40,15 +44,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libfreetype6 \
         ca-certificates \
         curl \
-        kicad-cli \
     && rm -rf /var/lib/apt/lists/*
+
+# Symlink python → python3 so existing CMD/RUN entries don't break
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
 
 WORKDIR /app
 
-# Copy requirements first so changes to source don't bust the pip cache
+# Copy requirements first so changes to source don't bust the pip cache.
+# Ubuntu 24.04 enforces PEP 668 (externally-managed env) — use
+# --break-system-packages since this is a container; we own the env.
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages --upgrade pip \
+    && pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Then copy the app source
 COPY . .
@@ -57,9 +65,8 @@ COPY . .
 ENV PORT=8080
 EXPOSE 8080
 
-# Verify cadquery imports cleanly during build so Railway's deploy
-# fails fast instead of producing a degraded healthcheck pass.
-# Also verify kicad-cli is callable so Gerber export works at runtime.
+# Verify both runtimes work during build so Railway's deploy fails fast
+# instead of producing a degraded healthcheck pass.
 RUN python -c "import cadquery; print('cadquery', cadquery.__version__, 'OK')" \
  && kicad-cli version
 
