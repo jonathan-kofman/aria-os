@@ -518,10 +518,33 @@ def write_sdf_artifacts(
 
     event_bus.emit("sdf", f"Generating {part_id} via SDF/voxel", {"part_id": part_id})
 
-    # Generate SDF via LLM
-    sdf_func, bounds, code = _generate_sdf_via_llm(goal, plan, repo_root)
+    # 1) Template-first path — try the deterministic SDF template library
+    # (aria_os/sdf/templates.py). Skips the LLM entirely when a template
+    # matches the goal (gyroid block, octet-truss sphere, honeycomb panel,
+    # FGM-graded lattices, etc.), so the common pro-grade lattice parts
+    # generate without burning a Claude/Gemini token.
+    template_used: str | None = None
+    try:
+        from aria_os.sdf.templates import build_from_template
+        _tmpl = build_from_template(goal, plan.get("params") if isinstance(plan, dict) else None)
+    except Exception as _texc:  # pragma: no cover
+        print(f"[SDF] template lookup failed: {type(_texc).__name__}: {_texc}")
+        _tmpl = None
 
-    # Save generated code
+    if _tmpl is not None:
+        sdf_func, bounds, meta = _tmpl
+        template_used = meta.get("template")
+        event_bus.emit("sdf",
+                       f"template: {template_used} (no LLM call needed)",
+                       {"part_id": part_id, "meta": meta})
+        code = (f"# aria-os SDF template: {template_used}\n"
+                f"# params: {meta}\n"
+                f"# source: aria_os/sdf/templates.py\n")
+    else:
+        # 2) LLM fallback — only used when no template matches the goal.
+        sdf_func, bounds, code = _generate_sdf_via_llm(goal, plan, repo_root)
+
+    # Save generated code (either template reference or LLM-emitted code)
     code_path = out_dir / f"{part_id}_sdf.py"
     code_path.write_text(code, encoding="utf-8")
 
@@ -571,6 +594,7 @@ def write_sdf_artifacts(
         "resolution_mm": scene.resolution,
         "bounds": [list(bounds[0]), list(bounds[1])],
         "mesh_stats": stats,
+        "template_used": template_used,  # None if LLM fallback was used
     }
     plan_path = out_dir / "sdf_plan.json"
     plan_path.write_text(json.dumps(plan_data, indent=2), encoding="utf-8")

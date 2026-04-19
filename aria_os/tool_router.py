@@ -46,10 +46,19 @@ FUSION_KEYWORDS = [
 ]
 
 SDF_KEYWORDS = [
+    # Classic TPMS + lattice keywords
     "lattice", "gyroid", "schwarz", "tpms", "infill", "porous",
     "organic", "topology optim", "conformal", "variable density",
     "heat exchanger", "cellular", "foam", "sponge", "lightweight fill",
     "gradient density", "bone structure", "voronoi", "metamaterial",
+    # Full TPMS family (added by aria_os.sdf pro-kernel expansion)
+    "diamond lattice", "schwarz-w", "schwarz_w", "iwp", "neovius", "f-rd",
+    # Strut lattices
+    "octet-truss", "octet_truss", "octet truss", "octet",
+    "bcc lattice", "fcc lattice", "kagome", "honeycomb",
+    # FGM / topology-opt terminology
+    "functionally graded", "fgm", "stress-driven", "density gradient",
+    "graded lattice",
 ]
 
 GRASSHOPPER_KEYWORDS = [

@@ -2330,6 +2330,10 @@ def build_bom(components: List[Component], board_w: float = 0, board_h: float = 
                 "pad_count":   len(c.pads),
                 "nets":        list(c.nets) if c.nets
                                else (list(set(c.net_map.values())) if c.net_map else []),
+                # Per-pad net assignment so the schematic writer places
+                # labels on the correct pin (not just near the component
+                # body) and ERC can validate power/ground pin topology.
+                "net_map":     dict(c.net_map) if c.net_map else {},
             }
             for c in components
         ]
