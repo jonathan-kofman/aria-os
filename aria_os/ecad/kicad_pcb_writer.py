@@ -118,10 +118,22 @@ def write_kicad_pcb(
         kx = page_x_mm + x + w / 2.0
         ky = page_y_mm + (board_h - y) - h / 2.0
 
+        # Resolve per-pad nets. Priority:
+        #   1. c["net_map"] — explicit pad_num → net_name mapping (preferred)
+        #   2. c["nets"]    — distribute nets across pads in order (connectors)
+        # When neither is present pads stay unassigned (DRC will flag them).
+        comp_nets = c.get("nets") or []
+        net_map = c.get("net_map") or {}
+        n_pads_hint = _resolve_pad_count(c, w)
+
         footprint_blocks.append(
             _build_footprint_sexpr(ref, value, footprint_field,
-                                   kx, ky, rotation, w, h))
-        component_pad_positions[ref] = _compute_pad_world_positions(kx, ky, w, h)
+                                   kx, ky, rotation, w, h,
+                                   n_pads=n_pads_hint,
+                                   net_map=net_map, comp_nets=comp_nets,
+                                   net_index=net_index))
+        component_pad_positions[ref] = _compute_pad_world_positions(
+            kx, ky, w, h, n_pads=n_pads_hint)
 
     trace_block = _build_traces_sexpr(components, nets, net_index,
                                       component_pad_positions)
@@ -194,31 +206,88 @@ def write_kicad_pcb(
     return out_pcb_path
 
 
+def _resolve_pad_count(c: dict, w_mm: float) -> int:
+    """Determine how many pads a component should emit.
+
+    Priority:
+      1. explicit c["pad_count"] > 0
+      2. length of c["net_map"] (per-pin net assignment)
+      3. length of c["nets"] (useful for connectors that ship a flat net list)
+      4. size-based default (bigger body = more pads, up to 8 columns)
+    """
+    pc = int(c.get("pad_count") or 0)
+    if pc > 0:
+        return pc
+    net_map = c.get("net_map") or {}
+    if net_map:
+        return len(net_map)
+    nets = c.get("nets") or []
+    if nets:
+        return len(nets)
+    return max(2, min(8, int(w_mm / 3.0)))
+
+
+def _net_sexpr_for_pad(pad_num: int, net_map: dict,
+                       comp_nets: list, net_index: dict) -> str:
+    """Return the `(net N "name")` fragment for a pad, or '' if the pad
+    has no net assignment. Pad numbers can key either by str or int."""
+    key_str = str(pad_num)
+    net_name = None
+    if net_map:
+        net_name = net_map.get(key_str) or net_map.get(pad_num)
+    if net_name is None and comp_nets:
+        # Flat-list fallback: distribute nets across pads in order. This is
+        # the right behaviour for connectors like XT60 (pad 1 = VBAT,
+        # pad 2 = GND) where the BOM ships a nets list but no net_map.
+        idx = pad_num - 1
+        if 0 <= idx < len(comp_nets):
+            net_name = comp_nets[idx]
+    if not net_name:
+        return ""
+    idx = net_index.get(net_name)
+    if idx is None:
+        return ""
+    return f' (net {idx} "{net_name}")'
+
+
 def _build_footprint_sexpr(ref: str, value: str, footprint_field: str,
                            kx: float, ky: float, rotation: float,
-                           w: float, h: float) -> str:
+                           w: float, h: float,
+                           *,
+                           n_pads: int | None = None,
+                           net_map: dict | None = None,
+                           comp_nets: list | None = None,
+                           net_index: dict | None = None) -> str:
     """Build a minimal but valid KiCad footprint s-expression.
 
-    The actual graphical body is a rectangle on F.SilkS + F.Fab + F.CrtYd,
-    sized to (w, h). Pads: a 2x2 grid of through-hole pads inside the body
-    so the footprint is 'wirable' (not just visual).
+    Each pad emits a `(net N "name")` tag so DRC doesn't flag every
+    track-over-pad as a short between a named net and `<no net>`.
+
+    Pad-count heuristic:
+      - Use `n_pads` if provided (resolved upstream by _resolve_pad_count)
+      - Otherwise fall back to a size-based default (2..8 pads wide).
     """
     fp_uuid = str(uuid4())
-    # Decide number of pads based on size — bigger components get more pads.
-    n_pads = max(2, min(8, int(w / 3.0)))
+    if n_pads is None or n_pads <= 0:
+        n_pads = max(2, min(8, int(w / 3.0)))
     pad_pitch_x = max(2.0, w / (n_pads + 1))
     pad_y = h * 0.3
+    net_map = net_map or {}
+    comp_nets = comp_nets or []
+    net_index = net_index or {}
 
     pad_lines = []
     for i in range(n_pads):
+        pad_num = i + 1
         px = -w / 2.0 + pad_pitch_x * (i + 1)
+        net_frag = _net_sexpr_for_pad(pad_num, net_map, comp_nets, net_index)
         for sign in (-1, 1):
             py = sign * pad_y
             pad_lines.append(
-                f'        (pad "{i+1}" smd rect '
+                f'        (pad "{pad_num}" smd rect '
                 f'(at {px:.3f} {py:.3f}) '
                 f'(size 1.0 0.6) '
-                f'(layers "F.Cu" "F.Paste" "F.Mask"))'
+                f'(layers "F.Cu" "F.Paste" "F.Mask"){net_frag})'
             )
 
     return f'''    (footprint "{footprint_field}"
@@ -246,17 +315,18 @@ def _build_footprint_sexpr(ref: str, value: str, footprint_field: str,
 
 
 def _compute_pad_world_positions(kx: float, ky: float,
-                                 w: float, h: float) -> list[tuple[float, float]]:
+                                 w: float, h: float,
+                                 *, n_pads: int | None = None
+                                 ) -> list[tuple[float, float]]:
     """Recompute the SMD pad centers used inside _build_footprint_sexpr and
     translate them from footprint-local coords into board/world coords.
 
-    Mirrors the pad layout rule in _build_footprint_sexpr: n_pads columns
-    (2..8 depending on width) with two rows offset by +/-h*0.3 from center.
-    Rotation is ignored (rotation_deg is also 0 everywhere in the current
-    BOM writer; correct rotation handling can be added if/when rotated
-    footprints start appearing).
+    Mirrors the pad layout rule in _build_footprint_sexpr. Accepts an
+    explicit n_pads so connectors (pad_count=0 but nets present) line up
+    the same way the footprint does.
     """
-    n_pads = max(2, min(8, int(w / 3.0)))
+    if n_pads is None or n_pads <= 0:
+        n_pads = max(2, min(8, int(w / 3.0)))
     pad_pitch_x = max(2.0, w / (n_pads + 1))
     pad_y = h * 0.3
     positions: list[tuple[float, float]] = []
