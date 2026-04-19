@@ -178,7 +178,10 @@ def write_kicad_sch(bom_path: str | Path,
     header_uuid = _uuid()
 
     out = [
-        '(kicad_sch (version 20231120) (generator "aria-os-export")',
+        '(kicad_sch',
+        '  (version 20250610)',
+        '  (generator "aria-os-export")',
+        '  (generator_version "10.0")',
         f'  (uuid "{header_uuid}")',
         '  (paper "A4")',
         '  (title_block',
