@@ -19,6 +19,7 @@ Entry point:
 from __future__ import annotations
 
 import json
+import os
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -831,7 +832,12 @@ def _run_structsight(goal: str) -> dict:
 
 # MillForge Railway backend — /api/aria/bundle accepts ARIABundleSubmission
 # (see millforge-ai/backend/routers/aria_bridge.py).
-MILLFORGE_BUNDLE_URL = "https://millforge-ai-production.up.railway.app/api/aria/bundle"
+# Env override: MILLFORGE_API_URL (same var used by coordinator.py).
+_MILLFORGE_DEFAULT_URL = "https://millforge-ai-production.up.railway.app"
+MILLFORGE_BUNDLE_URL = (
+    os.environ.get("MILLFORGE_API_URL", _MILLFORGE_DEFAULT_URL).rstrip("/")
+    + "/api/aria/bundle"
+)
 _MILLFORGE_TIMEOUT_S = 10.0
 
 

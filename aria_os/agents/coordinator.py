@@ -1254,6 +1254,14 @@ Spec: {json.dumps(spec, default=str)[:400]}"""
                 "Add it to the map if this material is used frequently.",
                 raw_material,
             )
+        # Surface unmapped materials so they don't silently become steel.
+        # Was a P0 audit finding: `inconel` became `steel` with no warning,
+        # breaking downstream MillForge scheduling.
+        if raw_material and raw_material not in self._MATERIAL_TO_MILLFORGE:
+            logger.warning(
+                "[coordinator] unmapped material %r — defaulting to 'steel'. "
+                "Add to _MATERIAL_TO_MILLFORGE if this is a common case.",
+                raw_material)
         mf_material = self._MATERIAL_TO_MILLFORGE.get(raw_material, "steel")
 
         # Cycle time: prefer CAM result, fallback to FEA or a reasonable default
