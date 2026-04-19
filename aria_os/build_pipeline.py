@@ -45,6 +45,8 @@ class BuildResult:
     autoroute_success: bool = False  # Freerouting Specctra autorouter
     fea_success: bool = False      # gmsh + CalculiX static-linear FEA
     nc_sim_success: bool = False   # CAMotics G-code collision check
+    cam_headless_success: bool = False  # FreeCAD Path (OSS alt to Fusion)
+    mbd_drawings_success: bool = False  # FreeCAD TechDraw MBD drawings
     print_success: bool = False
     cam_success: bool = False
     sim_success: bool = False        # Genesis flight dynamics
@@ -95,6 +97,10 @@ class BuildResult:
     fea: dict = field(default_factory=dict)
     # Per-gcode CAMotics simulation results — collision + axis-limit check.
     nc_sim: dict = field(default_factory=dict)
+    # Per-part FreeCAD Path headless CAM results (OSS replacement for Fusion).
+    cam_headless: dict = field(default_factory=dict)
+    # Per-part FreeCAD TechDraw MBD drawings (svg + pdf paths).
+    mbd_drawings: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +121,8 @@ class BuildResult:
                 "print":      self.print_success,
                 "cam":        self.cam_success,
                 "nc_sim":     self.nc_sim_success,
+                "cam_headless": self.cam_headless_success,
+                "mbd_drawings": self.mbd_drawings_success,
                 "sim":        self.sim_success,
                 "circuit_sim": self.circuit_sim_success,
             },
@@ -143,6 +151,8 @@ class BuildResult:
             "autoroute": self.autoroute,
             "fea": self.fea,
             "nc_sim": self.nc_sim,
+            "cam_headless": self.cam_headless,
+            "mbd_drawings": self.mbd_drawings,
         }
 
 
@@ -519,6 +529,93 @@ def run_full_build(*, preset_id: str, params: dict | None = None,
         _stage("nc_sim", "done" if nc_any_ok else "fail",
                n_ok=sum(1 for v in result.nc_sim.values()
                         if isinstance(v, dict) and v.get("passed")))
+
+    # ── Stage 3.6: Headless CAM via FreeCAD Path (OSS, no Fusion dep) ────
+    # Alternative to the Fusion-app-dependent CAM stage above; runs only
+    # when freecadcmd is on PATH. Per metal part: imports STEP, emits
+    # .ngc + summary via FreeCAD Path workbench.
+    _stage("cam_headless", "start")
+    fc_any_run = False
+    fc_any_ok = False
+    parts_dir_fc = Path(result.output_dir) / "parts"
+    if result.bom_path and Path(result.bom_path).is_file() and parts_dir_fc.is_dir():
+        try:
+            from aria_os.cam.freecad_cam import generate_cam, _find_freecadcmd
+            if _find_freecadcmd():
+                bom = json.loads(Path(result.bom_path).read_text(encoding="utf-8"))
+                metal_prefixes = ("aluminum", "steel", "stainless",
+                                  "titanium", "brass", "cfrp")
+                for p in bom.get("parts", []) if isinstance(bom, dict) else []:
+                    mat = (p.get("material") or "").lower()
+                    if not any(mat.startswith(m) for m in metal_prefixes):
+                        continue
+                    step_rel = p.get("step_path") or p.get("geometry_step")
+                    if not step_rel:
+                        continue
+                    step_abs = (Path(result.output_dir) / step_rel
+                                if not Path(step_rel).is_absolute()
+                                else Path(step_rel))
+                    if not step_abs.is_file():
+                        continue
+                    part_name = p.get("name") or Path(step_rel).stem
+                    out = Path(result.output_dir) / "cam_headless" / part_name
+                    r = generate_cam(step_abs, material=mat, out_dir=out)
+                    result.cam_headless[part_name] = r
+                    if r.get("available"):
+                        fc_any_run = True
+                        if r.get("passed"):
+                            fc_any_ok = True
+        except Exception as exc:
+            print(f"[build] cam_headless import failed: {type(exc).__name__}: {exc}")
+    result.cam_headless_success = fc_any_ok
+    if not fc_any_run:
+        _stage("cam_headless", "skip", reason="freecadcmd not installed")
+    else:
+        _stage("cam_headless", "done" if fc_any_ok else "fail",
+               n_parts=sum(1 for v in result.cam_headless.values()
+                           if isinstance(v, dict) and v.get("passed")))
+
+    # ── Stage 3.7: MBD drawings via FreeCAD TechDraw ─────────────────────
+    # Proper engineering drawings (3 ortho views + title block + placeholder
+    # for future GD&T annotations) as PDF + SVG. Replaces the
+    # CadQuery-wireframe drawings for fab-grade output.
+    _stage("mbd_drawings", "start")
+    md_any_run = False
+    md_any_ok = False
+    if result.bom_path and Path(result.bom_path).is_file() and parts_dir_fc.is_dir():
+        try:
+            from aria_os.drawings.mbd_drawings import generate_drawing
+            from aria_os.cam.freecad_cam import _find_freecadcmd
+            if _find_freecadcmd():
+                bom = json.loads(Path(result.bom_path).read_text(encoding="utf-8"))
+                for p in bom.get("parts", []) if isinstance(bom, dict) else []:
+                    step_rel = p.get("step_path") or p.get("geometry_step")
+                    if not step_rel:
+                        continue
+                    step_abs = (Path(result.output_dir) / step_rel
+                                if not Path(step_rel).is_absolute()
+                                else Path(step_rel))
+                    if not step_abs.is_file():
+                        continue
+                    part_name = p.get("name") or Path(step_rel).stem
+                    out = Path(result.output_dir) / "drawings_mbd" / part_name
+                    r = generate_drawing(step_abs, out_dir=out,
+                                         title=part_name,
+                                         material=p.get("material", ""))
+                    result.mbd_drawings[part_name] = r
+                    if r.get("available"):
+                        md_any_run = True
+                        if r.get("passed"):
+                            md_any_ok = True
+        except Exception as exc:
+            print(f"[build] mbd_drawings import failed: {type(exc).__name__}: {exc}")
+    result.mbd_drawings_success = md_any_ok
+    if not md_any_run:
+        _stage("mbd_drawings", "skip", reason="freecadcmd not installed")
+    else:
+        _stage("mbd_drawings", "done" if md_any_ok else "fail",
+               n_parts=sum(1 for v in result.mbd_drawings.values()
+                           if isinstance(v, dict) and v.get("passed")))
 
     # ── Stage 4: Flight dynamics sim (Genesis if installed, else stub) ────────
     _stage("sim", "start")
