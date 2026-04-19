@@ -179,7 +179,7 @@ def write_kicad_pcb(
 {_LAYERS_2L}
     (setup
         (pad_to_mask_clearance 0.051)
-        (solder_mask_min_width 0.25)
+        (solder_mask_min_width 0.05)
         (pcbplotparams
             (layerselection 0x00010fc_ffffffff)
             (disableapertmacros false)

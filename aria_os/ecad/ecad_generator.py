@@ -1226,6 +1226,66 @@ def _clamp(val: float, lo: float, hi: float) -> float:
     return max(lo, min(val, hi))
 
 
+def inflate_components_to_courtyards(components: List["Component"]) -> dict:
+    """Update each component's width_mm / height_mm to match the F.CrtYd
+    (courtyard) bbox of the real KiCad footprint. Call this BEFORE
+    place_components() when real footprints will be embedded in the PCB.
+
+    Without this, the placer uses the BOM's nominal bbox — typically smaller
+    than the real footprint's courtyard — and the PCB ends up with
+    overlapping courtyards (DRC errors: courtyards_overlap,
+    pth_inside_courtyard).
+
+    Returns a dict {ref: (old_w, old_h, new_w, new_h, fp_name)} for logging.
+    Keeps components that didn't match silently unchanged.
+    """
+    import re as _re
+    try:
+        from aria_os.ecad.kicad_footprint_lib import (
+            lookup_footprint, load_footprint_sexpr)
+    except Exception:
+        return {}
+
+    _crtyd_re = _re.compile(
+        r'\(fp_(?:line|rect|poly)\b[\s\S]*?\(layer\s+"F\.CrtYd"\)',
+    )
+    _pt_re = _re.compile(r'(?:start|end|xy)\s+([-\d.]+)\s+([-\d.]+)')
+
+    changes: dict = {}
+    for c in components:
+        pkg_hint = (c.footprint.split(":", 1)[-1].strip()
+                    if c.footprint else "")
+        fp_meta = lookup_footprint(c.value, package=pkg_hint or None)
+        if fp_meta is None:
+            continue
+        raw = load_footprint_sexpr(fp_meta["path"], fp_meta["fp"])
+        if raw is None:
+            continue
+
+        # Collect every x/y referenced by an F.CrtYd line/rect/poly
+        xs: list[float] = []
+        ys: list[float] = []
+        for m in _crtyd_re.finditer(raw):
+            for pt in _pt_re.finditer(m.group(0)):
+                xs.append(float(pt.group(1)))
+                ys.append(float(pt.group(2)))
+        if not xs or not ys:
+            continue
+        new_w = max(xs) - min(xs)
+        new_h = max(ys) - min(ys)
+        if new_w <= 0 or new_h <= 0:
+            continue
+        # Only grow (never shrink — a larger BOM bbox might mean the part
+        # has mounting ears, heatsinks, etc. that aren't in the courtyard).
+        old_w, old_h = c.width_mm, c.height_mm
+        if new_w > old_w or new_h > old_h:
+            c.width_mm = max(new_w, old_w)
+            c.height_mm = max(new_h, old_h)
+            changes[c.ref] = (old_w, old_h, c.width_mm, c.height_mm,
+                              fp_meta["fp"])
+    return changes
+
+
 def place_components(components: List[Component], board_w: float, board_h: float) -> None:
     """
     Zone-based placement with overlap avoidance.
@@ -2378,6 +2438,21 @@ def generate_ecad(description: str, out_dir: Path | None = None) -> tuple[Path, 
     # (both kicad_pcb_writer and the in-KiCad pcbnew script) see a real
     # electrical netlist and not the fan-everyone-to-power-rails fallback.
     _assign_component_nets(components, description)
+
+    # When real footprints are enabled for the PCB writer, inflate each
+    # component's bbox to match its real KiCad footprint courtyard BEFORE
+    # placing. Otherwise the placer uses the nominal BOM bbox and the
+    # resulting board has courtyards_overlap / pth_inside_courtyard DRC
+    # errors.
+    if os.environ.get("ARIA_USE_REAL_FOOTPRINTS") == "1":
+        try:
+            _crtyd_changes = inflate_components_to_courtyards(components)
+            if _crtyd_changes:
+                print(f"[ECAD] courtyard-inflated {len(_crtyd_changes)} "
+                      f"components for real-footprint placement")
+        except Exception as _exc:
+            print(f"[ECAD] courtyard inflation skipped: "
+                  f"{type(_exc).__name__}: {_exc}")
 
     place_components(components, board_w, board_h)
 
