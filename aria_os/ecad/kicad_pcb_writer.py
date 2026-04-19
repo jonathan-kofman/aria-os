@@ -126,14 +126,33 @@ def write_kicad_pcb(
         net_map = c.get("net_map") or {}
         n_pads_hint = _resolve_pad_count(c, w)
 
-        footprint_blocks.append(
-            _build_footprint_sexpr(ref, value, footprint_field,
-                                   kx, ky, rotation, w, h,
-                                   n_pads=n_pads_hint,
-                                   net_map=net_map, comp_nets=comp_nets,
-                                   net_index=net_index))
-        component_pad_positions[ref] = _compute_pad_world_positions(
-            kx, ky, w, h, n_pads=n_pads_hint)
+        # Real KiCad footprint path — gives correct pad geometry / courtyards
+        # / silkscreen / clearances when enabled. Off by default because the
+        # placer is NOT courtyard-aware yet: real footprints have larger
+        # courtyards than minimal placeholders, so components overlap and
+        # DRC goes UP (courtyards_overlap, pth_inside_courtyard violations).
+        # Opt in via ARIA_USE_REAL_FOOTPRINTS=1 once placer is upgraded to
+        # respect courtyard dimensions. Infrastructure stays ready.
+        import os as _os
+        _use_real_fp = _os.environ.get("ARIA_USE_REAL_FOOTPRINTS") == "1"
+        real_fp_block, real_pad_positions = (
+            _try_real_footprint(
+                value=value, footprint_field=footprint_field,
+                ref=ref, kx=kx, ky=ky, rotation=rotation,
+                net_map=net_map, comp_nets=comp_nets, net_index=net_index)
+            if _use_real_fp else (None, []))
+        if real_fp_block is not None:
+            footprint_blocks.append(real_fp_block)
+            component_pad_positions[ref] = real_pad_positions
+        else:
+            footprint_blocks.append(
+                _build_footprint_sexpr(ref, value, footprint_field,
+                                       kx, ky, rotation, w, h,
+                                       n_pads=n_pads_hint,
+                                       net_map=net_map, comp_nets=comp_nets,
+                                       net_index=net_index))
+            component_pad_positions[ref] = _compute_pad_world_positions(
+                kx, ky, w, h, n_pads=n_pads_hint)
 
     trace_block = _build_traces_sexpr(components, nets, net_index,
                                       component_pad_positions)
@@ -204,6 +223,130 @@ def write_kicad_pcb(
 '''
     out_pcb_path.write_text(pcb, encoding="utf-8")
     return out_pcb_path
+
+
+def _try_real_footprint(*, value: str, footprint_field: str, ref: str,
+                        kx: float, ky: float, rotation: float,
+                        net_map: dict, comp_nets: list,
+                        net_index: dict) -> tuple[str | None, list]:
+    """Attempt to resolve a real KiCad footprint via kicad_footprint_lib,
+    rewrite it for board embedding, and return (footprint_block, pad_xy_list).
+
+    Returns (None, []) if lookup fails or KiCad isn't installed — the
+    caller then falls back to the minimal placeholder footprint.
+    """
+    try:
+        from .kicad_footprint_lib import lookup_footprint, load_footprint_sexpr
+    except Exception:
+        return None, []
+
+    # footprint_field from the BOM looks like "Package_QFP:LQFP-64_10x10mm_P0.5mm"
+    # — split on ':' and use the right side as the package hint.
+    pkg_hint = footprint_field.split(":", 1)[-1].strip() if footprint_field else ""
+    fp_meta = lookup_footprint(value, package=pkg_hint or None)
+    if fp_meta is None:
+        return None, []
+
+    raw = load_footprint_sexpr(fp_meta["path"], fp_meta["fp"])
+    if raw is None:
+        return None, []
+
+    return _embed_real_footprint(
+        raw_fp_text=raw, library_name=fp_meta["lib"], fp_name=fp_meta["fp"],
+        ref=ref, value=value, kx=kx, ky=ky, rotation=rotation,
+        net_map=net_map, comp_nets=comp_nets, net_index=net_index)
+
+
+def _embed_real_footprint(*, raw_fp_text: str, library_name: str, fp_name: str,
+                          ref: str, value: str, kx: float, ky: float,
+                          rotation: float,
+                          net_map: dict, comp_nets: list,
+                          net_index: dict) -> tuple[str | None, list]:
+    """Rewrite a `.kicad_mod` footprint block for embedding in a .kicad_pcb:
+      - top-level tag: (footprint "lib:name" ...) with (at kx ky rot) on the
+        parent (positions footprint on the board)
+      - set Reference + Value properties
+      - inject (net N "name") into each (pad "X" ...) block based on net_map
+      - preserve everything else (pad geometry, silkscreen, courtyard, fab)
+
+    Returns (rewritten_sexpr_string, world_pad_positions).
+    """
+    import re as _re
+
+    text = raw_fp_text
+    # Swap the top-level (footprint "NAME" ... to reference lib:name and ensure
+    # tstamp/tedit + (at X Y R). The raw text starts with (footprint "NAME"\n
+    # so we normalise the header then prepend placement.
+    # 1. Extract the tag-name chunk up to the first '(' inside the footprint
+    m = _re.match(r'^\s*\(footprint\s+"([^"]+)"', text)
+    if not m:
+        return None, []
+    text = text[:m.end()] + "\n" + text[m.end():]
+    # Insert placement after the name
+    placement = (f'        (layer "F.Cu")\n'
+                 f'        (tstamp {uuid4()})\n'
+                 f'        (tedit {int(time.time()):X})\n'
+                 f'        (at {kx:.3f} {ky:.3f} {rotation:.1f})\n')
+    text = text[:m.end() + 1] + placement + text[m.end() + 1:]
+    # Guard against duplicate layer declarations KiCad 10 might ship with
+    text = _re.sub(r'\n\s*\(layer\s+"F\.Cu"\)\n',
+                   "\n", text, count=1)  # drop a second F.Cu layer line
+
+    # Reference + Value: fill the blanks left by load_footprint_sexpr
+    text = _re.sub(r'(\(property\s+"Reference"\s+)""',
+                   f'\\1"{ref}"', text, count=1)
+    text = _re.sub(r'(\(property\s+"Value"\s+)""',
+                   f'\\1"{value}"', text, count=1)
+
+    # Inject (net N "name") into each (pad "X" smd|thru_hole ... ) block.
+    # KiCad pad format: (pad "1" smd rect (at ...) (size ...) (layers ...)
+    #                        [other props] )
+    # We append (net N "NAME") just before the closing ')' of each top-level
+    # pad block.
+    def _rewrite_pad(match: _re.Match) -> str:
+        pad_num_s = match.group(1)
+        body = match.group(2)
+        # Skip if pad already has a (net ...) tag (rare in library files)
+        if _re.search(r'\(net\s+\d+\s+', body):
+            return match.group(0)
+        # Resolve net for this pad
+        try:
+            pad_num = int(pad_num_s)
+        except ValueError:
+            return match.group(0)
+        net_frag = _net_sexpr_for_pad(pad_num, net_map, comp_nets, net_index)
+        if not net_frag:
+            return match.group(0)
+        # Insert net_frag just before the final closing parenthesis of the pad
+        # Strip leading space from net_frag (it has a leading space for the
+        # placeholder case)
+        net_frag = net_frag.strip()
+        return f'(pad "{pad_num_s}"{body} {net_frag})'
+
+    text = _re.sub(
+        r'\(pad\s+"([^"]+)"((?:(?:\([^()]*\))|[^()])*?)\)',
+        _rewrite_pad, text)
+
+    # Extract pad world positions for the trace router.
+    pad_positions: list[tuple[float, float]] = []
+    for pm in _re.finditer(
+            r'\(pad\s+"[^"]+"[\s\S]*?\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+[-\d.]+)?\)',
+            text):
+        px = float(pm.group(1))
+        py = float(pm.group(2))
+        # These are footprint-local; translate to world
+        # (rotation handling: apply rot around (kx, ky))
+        if abs(rotation) > 0.01:
+            import math as _m
+            rad = _m.radians(rotation)
+            c_, s_ = _m.cos(rad), _m.sin(rad)
+            wx = kx + (px * c_ - py * s_)
+            wy = ky + (px * s_ + py * c_)
+        else:
+            wx, wy = kx + px, ky + py
+        pad_positions.append((wx, wy))
+
+    return text, pad_positions
 
 
 def _resolve_pad_count(c: dict, w_mm: float) -> int:
