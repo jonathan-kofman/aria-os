@@ -98,20 +98,167 @@ def _generic_symbol_sexpr(pin_count: int) -> str:
     return "\n".join(lines)
 
 
-def _lib_symbols_block(pin_counts_used: set[int]) -> str:
+def _lib_symbols_block(pin_counts_used: set[int],
+                       embedded_real: list[str] | None = None) -> str:
     body = "\n".join(_generic_symbol_sexpr(n) for n in sorted(pin_counts_used))
+    if embedded_real:
+        body = body + "\n" + "\n".join(embedded_real) if body \
+               else "\n".join(embedded_real)
     return f"(lib_symbols\n{body}\n)"
 
 
-def _symbol_instance(component: dict, x_mm: float, y_mm: float) -> str:
+# ---------------------------------------------------------------------------
+# Real-symbol embedder (v2 path) — reuse KiCad library symbols with correct
+# pin electrical types, avoiding the colon-prefix trap by renaming to
+# ARIA_<name>. Flattens (extends ...) chains so we don't need a
+# sym-lib-table sidecar.
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+
+def _extract_symbol_sexpr(text: str, sym_name: str) -> str | None:
+    """Return the full (symbol "sym_name" ...) block via depth-matched
+    parens. Returns None if the symbol isn't in this file."""
+    key = f'(symbol "{sym_name}"'
+    i = text.find(key)
+    if i < 0:
+        return None
+    depth = 0
+    j = i
+    while j < len(text):
+        c = text[j]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return text[i:j + 1]
+        j += 1
+    return None
+
+
+def _embed_real_symbol(lib_path: str, sym_name: str,
+                       renamed: str) -> str | None:
+    """Read the source .kicad_sym, extract `sym_name`, flatten its
+    (extends ...) chain by inlining the parent's body, rename the
+    outer symbol name + all unit sub-symbols to `renamed` (no colon,
+    avoids the sym-lib-table requirement).
+
+    Returns the embedded s-expression, or None on failure.
+    """
+    try:
+        text = Path(lib_path).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    block = _extract_symbol_sexpr(text, sym_name)
+    if block is None:
+        return None
+
+    # Walk (extends "PARENT") chain — inline parent's unit sub-symbols so
+    # pins are available without a library lookup. Re-rename parent's unit
+    # sub-symbol names from <parent_orig>_N_N to <renamed>_N_N.
+    parent_blocks: list[str] = []
+    visited = {sym_name}
+    current_block = block
+    for _ in range(4):  # max chain depth
+        m = _re.search(r'\(extends\s+"([^"]+)"\)', current_block)
+        if not m:
+            break
+        parent_name = m.group(1)
+        if parent_name in visited:
+            break
+        visited.add(parent_name)
+        parent_block = _extract_symbol_sexpr(text, parent_name)
+        if parent_block is None:
+            break
+        # Grab parent's unit sub-symbols (_N_N) for inlining
+        for sub_m in _re.finditer(
+                rf'\(symbol\s+"{_re.escape(parent_name)}_\d+_\d+"',
+                parent_block):
+            start = sub_m.start()
+            depth = 0
+            k = start
+            while k < len(parent_block):
+                ch = parent_block[k]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        unit_block = parent_block[start:k + 1]
+                        # Rename parent_name -> renamed in the unit block
+                        unit_block = _re.sub(
+                            rf'"{_re.escape(parent_name)}(_\d+_\d+)"',
+                            lambda x: f'"{renamed}{x.group(1)}"',
+                            unit_block)
+                        parent_blocks.append(unit_block)
+                        break
+                k += 1
+        current_block = parent_block
+
+    # Rewrite the outer block: strip (extends ...), rename symbol refs,
+    # append parent unit sub-symbols before the closing paren.
+    result = _re.sub(r'\(extends\s+"[^"]+"\)', "", block)
+    result = _re.sub(
+        rf'\(symbol\s+"{_re.escape(sym_name)}"',
+        f'(symbol "{renamed}"', result, count=1)
+    result = _re.sub(
+        rf'"{_re.escape(sym_name)}(_\d+_\d+)"',
+        lambda x: f'"{renamed}{x.group(1)}"', result)
+    if parent_blocks:
+        # Insert parent unit blocks BEFORE the final ')' of the outer symbol
+        last_paren = result.rfind(")")
+        if last_paren > 0:
+            result = (result[:last_paren]
+                      + "\n" + "\n".join(parent_blocks) + "\n"
+                      + result[last_paren:])
+    return result
+
+
+def _renamed_lib_id(sym_name: str) -> str:
+    """KiCad-safe lib_id from a library symbol name. No colons."""
+    clean = _re.sub(r"[^A-Za-z0-9_]", "_", sym_name)
+    return f"ARIA_{clean}"
+
+
+def _resolve_real_symbol(component: dict) -> dict | None:
+    """Try kicad_symbol_lib.lookup_symbol; return
+    {renamed, embedded_sexpr} or None on miss."""
+    try:
+        from .kicad_symbol_lib import lookup_symbol
+    except Exception:
+        return None
+    value = component.get("value", "")
+    if not value:
+        return None
+    sym = lookup_symbol(value)
+    if sym is None or not sym.get("pins"):
+        return None
+    renamed = _renamed_lib_id(sym["symbol_name"])
+    embedded = _embed_real_symbol(sym["lib_path"], sym["symbol_name"],
+                                    renamed)
+    if embedded is None:
+        return None
+    return {"renamed": renamed, "embedded_sexpr": embedded,
+            "pins": sym["pins"], "symbol_name": sym["symbol_name"]}
+
+
+def _symbol_instance(component: dict, x_mm: float, y_mm: float,
+                     real_lib_id: str | None = None) -> str:
     ref = component.get("ref", "U?")
     value = component.get("value", "?")
     footprint = component.get("footprint", "")
-    pad_count = component.get("pad_count", 8)
-    pin_n = _sym_pin_count(pad_count)
+    if real_lib_id is not None:
+        lib_id = real_lib_id
+    else:
+        pad_count = component.get("pad_count", 8)
+        pin_n = _sym_pin_count(pad_count)
+        lib_id = f"ARIA_Generic{pin_n}"
     uid = _uuid()
     return (
-        f'  (symbol (lib_id "ARIA_Generic{pin_n}") (at {x_mm} {y_mm} 0)'
+        f'  (symbol (lib_id "{lib_id}") (at {x_mm} {y_mm} 0)'
         f' (unit 1) (in_bom yes) (on_board yes)\n'
         f'    (uuid "{uid}")\n'
         f'    (property "Reference" "{ref}" (at {x_mm} {y_mm - 8} 0)\n'
@@ -163,17 +310,44 @@ def write_kicad_sch(bom_path: str | Path,
              or bom.get("board", {}).get("name")
              or out_sch_path.stem)
 
-    pin_counts_used = {_sym_pin_count(c.get("pad_count", 8)) for c in components}
-    lib_syms = _lib_symbols_block(pin_counts_used)
+    # v2: try to resolve every component to a real KiCad library symbol
+    # (kicad_symbol_lib). Those that hit get embedded with real pin
+    # electrical types; those that miss fall back to the generic N-pin
+    # block. The generic block is only emitted for pin counts that are
+    # actually used by fallback components.
+    resolved: list[dict | None] = []
+    real_embeds: list[str] = []
+    seen_renamed: set[str] = set()
+    n_real = 0
+    n_fallback = 0
+    for c in components:
+        rr = _resolve_real_symbol(c)
+        resolved.append(rr)
+        if rr:
+            if rr["renamed"] not in seen_renamed:
+                seen_renamed.add(rr["renamed"])
+                real_embeds.append(rr["embedded_sexpr"])
+            n_real += 1
+        else:
+            n_fallback += 1
+
+    pin_counts_used = {_sym_pin_count(c.get("pad_count", 8))
+                       for c, rr in zip(components, resolved) if rr is None}
+    lib_syms = _lib_symbols_block(pin_counts_used, embedded_real=real_embeds)
 
     symbol_sexprs = []
     label_sexprs = []
-    for i, c in enumerate(components):
+    for i, (c, rr) in enumerate(zip(components, resolved)):
         row, col = divmod(i, _GRID_COLS)
         x = 50 + col * _CELL_W_MM
         y = 50 + row * _CELL_H_MM
-        symbol_sexprs.append(_symbol_instance(c, x, y))
+        real_lib_id = rr["renamed"] if rr else None
+        symbol_sexprs.append(_symbol_instance(c, x, y,
+                                               real_lib_id=real_lib_id))
         label_sexprs.extend(_global_labels_for_component(c.get("nets", []), x, y))
+
+    print(f"[kicad_sch_writer] real symbols: {n_real}  "
+          f"generic fallback: {n_fallback}")
 
     header_uuid = _uuid()
 

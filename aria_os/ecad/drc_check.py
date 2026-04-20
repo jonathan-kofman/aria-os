@@ -182,12 +182,18 @@ def run_erc(sch_path: str | Path, out_dir: str | Path) -> dict:
                 "report_path": str(report_path),
                 "error": f"report unreadable: {exc}"}
 
-    violations = data.get("violations", []) or []
-    passed = not any(v.get("severity") == "error" for v in violations)
+    # KiCad 10 nests ERC violations per sheet under data["sheets"][i]["violations"],
+    # not top-level data["violations"] (which is the DRC format).
+    violations = list(data.get("violations", []) or [])
+    for sheet in data.get("sheets", []) or []:
+        violations.extend(sheet.get("violations", []) or [])
+    errors = sum(1 for v in violations if v.get("severity") == "error")
+    passed = errors == 0
     return {
         "available": True,
         "passed": passed,
         "n_violations": len(violations),
+        "n_errors": errors,
         "violations": violations[:50],
         "report_path": str(report_path),
     }
