@@ -27,17 +27,24 @@ from typing import Any
 
 
 def _judge_mcad(sandbox, candidate: dict, spec: dict) -> dict:
-    """FEA-based judgement. Runs static-linear analysis on the candidate's
-    emitted STEP file, checks max von Mises vs material yield, returns
-    a safety-factor score."""
+    """FEA-based judgement for MCAD/SDF candidates.
+
+    Runs both (a) static-linear stress vs yield and (b) modal analysis
+    vs excitation frequency, depending on what the spec declares:
+      - spec.load_n                        → static stress gate
+      - spec.min_frequency_hz              → modal gate (first natural
+                                              frequency must exceed this)
+      - spec.target_safety_factor          → static safety-factor target
+    Either gate failing fails the candidate. Both unspecified → static
+    with defaults.
+    """
     try:
-        from aria_os.fea.calculix_stage import run_static_fea
+        from aria_os.fea.calculix_stage import run_static_fea, run_modal_fea
     except Exception as exc:
         return {"passed": False, "score": 0.0, "metrics": {},
                 "reason": f"FEA import failed: {exc}",
                 "evidence_paths": {}}
 
-    # Find a STEP produced during the contract run
     step_candidates = list(Path(sandbox.scratch_dir).rglob("*.step"))
     if not step_candidates:
         return {"passed": False, "score": 0.0, "metrics": {},
@@ -46,35 +53,71 @@ def _judge_mcad(sandbox, candidate: dict, spec: dict) -> dict:
     step_path = step_candidates[0]
 
     material = (spec.get("material") or "aluminum_6061").lower()
-    load_n = float(spec.get("load_n", 100.0))
-    target_sf = float(spec.get("target_safety_factor", 2.0))
-
     out_dir = Path(sandbox.scratch_dir) / "fea"
-    result = run_static_fea(step_path=step_path, material=material,
-                             load_n=load_n, out_dir=out_dir,
-                             target_safety_factor=target_sf)
-    if not result.get("available"):
-        # FEA unavailable (ccx not installed). Degrade gracefully: accept
-        # candidate based on contract pass. Records this in the verdict.
-        return {"passed": True, "score": 1.0,
-                "metrics": {"fea_skipped": True,
-                            "reason": result.get("error")},
-                "reason": None,
-                "evidence_paths": {}}
 
-    passed = bool(result.get("passed"))
+    metrics: dict = {}
+    evidence: dict = {}
+    failures: list[str] = []
+    sub_scores: list[float] = []
+
+    # ── Static stress gate ─────────────────────────────────────────────
+    if "load_n" in spec or "target_safety_factor" in spec or True:
+        load_n = float(spec.get("load_n", 100.0))
+        target_sf = float(spec.get("target_safety_factor", 2.0))
+        static = run_static_fea(step_path=step_path, material=material,
+                                load_n=load_n, out_dir=out_dir,
+                                target_safety_factor=target_sf)
+        if not static.get("available"):
+            # FEA tooling absent — degrade, skip rather than fail.
+            return {"passed": True, "score": 1.0,
+                    "metrics": {"fea_skipped": True,
+                                "reason": static.get("error")},
+                    "reason": None, "evidence_paths": {}}
+        metrics.update({
+            "max_stress_mpa":   static.get("max_stress_mpa"),
+            "safety_factor":    static.get("safety_factor"),
+            "yield_mpa":        static.get("yield_mpa"),
+            "target_sf":        target_sf,
+        })
+        if static.get("report_path"):
+            evidence["static_fea_report"] = static["report_path"]
+        if not static.get("passed"):
+            failures.append(
+                f"safety factor {static.get('safety_factor')} < "
+                f"target {target_sf}")
+        sub_scores.append(float(static.get("safety_factor", 0.0)))
+
+    # ── Modal gate (first natural frequency must exceed excitation) ─────
+    min_freq = spec.get("min_frequency_hz") or spec.get("excitation_hz")
+    if min_freq is not None:
+        modal_dir = Path(sandbox.scratch_dir) / "modal"
+        modal = run_modal_fea(step_path=step_path, material=material,
+                              out_dir=modal_dir,
+                              min_freq_hz=float(min_freq), n_modes=6)
+        if modal.get("available"):
+            metrics.update({
+                "first_mode_hz":     modal.get("first_mode_hz"),
+                "frequencies_hz":    modal.get("frequencies_hz"),
+                "min_freq_target_hz": float(min_freq),
+            })
+            if modal.get("report_path"):
+                evidence["modal_fea_report"] = modal["report_path"]
+            if not modal.get("passed"):
+                failures.append(
+                    f"first natural freq {modal.get('first_mode_hz')} Hz "
+                    f"< target {min_freq} Hz")
+            first = modal.get("first_mode_hz") or 0.0
+            sub_scores.append(first / float(min_freq))  # normalised margin
+
+    passed = len(failures) == 0
+    # Composite score: min of sub-scores (weakest gate dominates)
+    score = min(sub_scores) if sub_scores else 0.0
     return {
         "passed": passed,
-        "score": float(result.get("safety_factor", 0.0)),
-        "metrics": {
-            "max_stress_mpa": result.get("max_stress_mpa"),
-            "safety_factor": result.get("safety_factor"),
-            "yield_mpa": result.get("yield_mpa"),
-            "target_sf": target_sf,
-        },
-        "reason": None if passed else
-                  f"safety factor {result.get('safety_factor')} < target {target_sf}",
-        "evidence_paths": {"fea_report": result.get("report_path")},
+        "score": score,
+        "metrics": metrics,
+        "reason": None if passed else "; ".join(failures),
+        "evidence_paths": evidence,
     }
 
 

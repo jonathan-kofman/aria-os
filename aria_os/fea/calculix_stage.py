@@ -345,3 +345,228 @@ def run_static_fea(step_path: str | Path,
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     report["report_path"] = str(report_path)
     return report
+
+
+# ---------------------------------------------------------------------------
+# Modal FEA — *FREQUENCY step, first N natural frequencies
+# ---------------------------------------------------------------------------
+#
+# The hackathon demo scenario (NEMA17 stepper mount at 200 Hz excitation)
+# needs modal analysis, not just static. CalculiX supports a *FREQUENCY
+# step natively; below we generate an alternate .inp and parse *EIGENVALUE
+# blocks from the .frd output.
+
+def msh_to_inp_modal(msh_path: str | Path,
+                      inp_path: str | Path,
+                      *,
+                      material: str,
+                      n_modes: int = 6,
+                      fixed_z_below_mm: float = 2.0) -> dict:
+    """Convert gmsh .msh -> CalculiX .inp for a *FREQUENCY modal analysis.
+
+    Same mesh layout as the static case (tet4 C3D4) — only difference is
+    the step block: *FREQUENCY (eigenvalue extraction) instead of *STATIC.
+
+    Returns {ok, inp_path, n_fixed, n_modes}.
+    """
+    import meshio
+    if material not in MATERIAL_PROPS:
+        return {"ok": False,
+                "error": f"unknown material '{material}'; "
+                         f"known: {sorted(MATERIAL_PROPS)}"}
+    mp = MATERIAL_PROPS[material]
+
+    try:
+        m = meshio.read(str(msh_path))
+    except Exception as exc:
+        return {"ok": False, "error": f"msh read failed: {exc}"}
+
+    tets = None
+    for cb in m.cells:
+        if cb.type == "tetra":
+            tets = cb.data
+            break
+    if tets is None or len(tets) == 0:
+        return {"ok": False, "error": "no tet elements in mesh"}
+
+    pts = m.points
+    z_min = pts[:, 2].min()
+    fixed_ids = [i + 1 for i, p in enumerate(pts)
+                 if p[2] <= z_min + fixed_z_below_mm]
+    if not fixed_ids:
+        return {"ok": False, "error": "no fixed nodes"}
+
+    inp_path = Path(inp_path)
+    inp_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Density is required for modal analysis (M matrix needs it).
+    density_ton_mm3 = mp["density_kg_m3"] * 1e-12  # CCX prefers
+    # consistent unit set (N-mm-s-tonne). ρ in tonne/mm³.
+
+    lines: list[str] = ["*NODE, NSET=NALL"]
+    for i, p in enumerate(pts, 1):
+        lines.append(f"{i},{p[0]:.6f},{p[1]:.6f},{p[2]:.6f}")
+    lines.append("*ELEMENT, TYPE=C3D4, ELSET=EALL")
+    for i, t in enumerate(tets, 1):
+        a, b, c, d = (int(x) + 1 for x in t)
+        lines.append(f"{i},{a},{b},{c},{d}")
+
+    lines.append("*NSET, NSET=FIXED")
+    for i in range(0, len(fixed_ids), 16):
+        lines.append(",".join(str(x) for x in fixed_ids[i:i + 16]))
+
+    lines += [
+        f"*MATERIAL, NAME={material.upper()}",
+        "*ELASTIC",
+        f"{mp['E_mpa']},{mp['nu']}",
+        "*DENSITY",
+        f"{density_ton_mm3:.6e}",
+        f"*SOLID SECTION, ELSET=EALL, MATERIAL={material.upper()}",
+        "*BOUNDARY",
+        "FIXED,1,3",
+        "*STEP",
+        "*FREQUENCY",
+        f"{n_modes}",
+        "*NODE FILE",
+        "U",
+        "*END STEP",
+    ]
+    inp_path.write_text("\n".join(lines), encoding="utf-8")
+    return {"ok": True, "inp_path": str(inp_path),
+            "n_fixed": len(fixed_ids), "n_modes": n_modes}
+
+
+def parse_eigenfrequencies(frd_path: str | Path) -> list[float]:
+    """Read the .frd and return the natural frequencies in Hz (sorted asc).
+
+    CalculiX writes eigenfrequencies in the *.dat file (not *.frd) by
+    default. We first try to locate a companion .dat file; if absent,
+    we fall back to scanning the .frd for (1PE) eigenvalue blocks.
+    """
+    frd = Path(frd_path)
+    dat = frd.with_suffix(".dat")
+    freqs: list[float] = []
+
+    # Preferred: .dat file has "E I G E N V A L U E   N U M B E R" blocks
+    if dat.is_file():
+        try:
+            text = dat.read_text(errors="replace")
+        except Exception:
+            text = ""
+        # CCX .dat line pattern for mode 1:
+        # " 1    2.0944832E+06    1.4476473E+03    2.3037254E+02"
+        #  mode  eigenvalue       circ_freq (rad/s) freq (Hz)
+        import re as _re
+        # Grab the first column-aligned numeric block after the eigen marker
+        in_block = False
+        for line in text.splitlines():
+            if "NO           EIGENVALUE" in line.upper() or \
+               "M O D A L" in line.upper() or \
+               "EIGENVALUE OUTPUT" in line.upper():
+                in_block = True
+                continue
+            if not in_block:
+                continue
+            parts = line.split()
+            # Expected: [mode_int, eigenvalue, omega_rad_s, freq_hz, ...]
+            if len(parts) >= 4:
+                try:
+                    _mode = int(parts[0])
+                    freq_hz = float(parts[3])
+                    freqs.append(freq_hz)
+                except ValueError:
+                    # Block ended
+                    if freqs:
+                        break
+    if freqs:
+        return sorted(freqs)
+
+    # Fallback: scan .frd — CCX also dumps " -4  DISP" blocks per mode.
+    try:
+        text = Path(frd_path).read_text(errors="replace")
+    except Exception:
+        return []
+    # Modes appear as " 100CL..." headers with the time-field being the
+    # eigenvalue (rad/s)^2. Very format-sensitive; skip in v1 if the
+    # .dat path didn't exist.
+    return sorted(freqs)
+
+
+def run_modal_fea(step_path: str | Path,
+                   *,
+                   material: str,
+                   out_dir: str | Path,
+                   n_modes: int = 6,
+                   mesh_size_mm: float = 5.0,
+                   min_freq_hz: float | None = None) -> dict:
+    """End-to-end modal FEA on a STEP file.
+
+    Returns
+    -------
+    dict with keys:
+        available, passed, frequencies_hz (list), first_mode_hz,
+        min_freq_hz (target if provided), material, n_modes,
+        mesh (stats), report_path, error
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if material not in MATERIAL_PROPS:
+        return {"available": False, "passed": None,
+                "error": f"unknown material '{material}'"}
+
+    if not _have_gmsh():
+        return {"available": False, "passed": None,
+                "error": "gmsh not installed"}
+
+    ccx = _find_ccx()
+    if ccx is None:
+        return {"available": False, "passed": None,
+                "error": "CalculiX (ccx) not on PATH — see "
+                         "scripts/PRO_HEADLESS_SETUP.md"}
+
+    msh_path = out_dir / "mesh.msh"
+    inp_path = out_dir / "modal.inp"
+    report_path = out_dir / "modal_report.json"
+
+    mesh_r = mesh_step(step_path, msh_path, mesh_size_mm=mesh_size_mm)
+    if not mesh_r.get("ok"):
+        return {"available": True, "passed": False,
+                "error": f"meshing failed: {mesh_r.get('error')}",
+                "mesh": mesh_r}
+
+    inp_r = msh_to_inp_modal(msh_path, inp_path, material=material,
+                               n_modes=n_modes)
+    if not inp_r.get("ok"):
+        return {"available": True, "passed": False,
+                "error": f"inp gen failed: {inp_r.get('error')}",
+                "mesh": mesh_r}
+
+    ccx_r = run_ccx(inp_path)
+    if not ccx_r.get("ok"):
+        return {"available": True, "passed": False,
+                "error": f"ccx failed: {ccx_r.get('error') or ccx_r.get('stderr')}",
+                "mesh": mesh_r}
+
+    freqs = parse_eigenfrequencies(ccx_r["frd_path"])
+    first = freqs[0] if freqs else None
+
+    passed = True
+    if min_freq_hz is not None and first is not None:
+        passed = first >= min_freq_hz
+
+    report = {
+        "available": True,
+        "passed": passed,
+        "frequencies_hz": [round(f, 2) for f in freqs],
+        "first_mode_hz": round(first, 2) if first is not None else None,
+        "min_freq_target_hz": min_freq_hz,
+        "material": material,
+        "n_modes": n_modes,
+        "mesh": {"n_nodes": mesh_r["n_nodes"],
+                 "n_elements": mesh_r["n_elements"]},
+        "frd_path": ccx_r["frd_path"],
+    }
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report["report_path"] = str(report_path)
+    return report

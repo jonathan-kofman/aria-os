@@ -1202,6 +1202,157 @@ async def get_preset_preview(run_id: str):
     }
 
 
+# --------------------------------------------------------------------------- #
+# Self-extending engineering agent — the hackathon core
+# (aria_os/self_extend package; see that module's __init__.py for the loop
+# shape. This endpoint set lets the dashboard trigger + stream + review.)
+# --------------------------------------------------------------------------- #
+
+_EXTEND_RUNS: dict[str, dict] = {}
+
+
+@app.post("/api/extend")
+async def start_extension(req: dict):
+    """Kick off a self-extension agent run for a natural-language request.
+
+    body: {
+      goal: str,
+      domain: "mcad"|"ecad"|"lattice"|"unknown" (optional),
+      max_candidates: int (default 4),
+      spec: {...} (optional; material/load/freq/etc),
+      dry_run: bool (default true — set false only once we have credits)
+    }
+    Returns: {request_id, status}.
+    """
+    goal = (req.get("goal") or "").strip()
+    if not goal:
+        raise HTTPException(status_code=400, detail="goal is required")
+
+    from aria_os.self_extend.orchestrator import (
+        ExtensionRequest, Domain, run_extension_request, ExtensionEvent)
+
+    try:
+        domain = Domain(req.get("domain", "unknown"))
+    except ValueError:
+        domain = Domain.UNKNOWN
+
+    ext_req = ExtensionRequest.new(
+        goal=goal, domain=domain,
+        spec=req.get("spec") or {},
+        max_candidates=int(req.get("max_candidates", 4)))
+    state = {
+        "request_id": ext_req.request_id,
+        "goal": goal,
+        "status": "running",
+        "events": [],          # list of event dicts in order
+        "result": None,
+        "started_at": time.time(),
+    }
+    _EXTEND_RUNS[ext_req.request_id] = state
+
+    def _on_event(ev: ExtensionEvent) -> None:
+        state["events"].append(ev.to_dict())
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        dry_run = bool(req.get("dry_run", True))
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: run_extension_request(ext_req, on_event=_on_event,
+                                              dry_run=dry_run))
+            state["result"] = result.to_dict()
+            state["status"] = "done" if result.success else "failed"
+        except Exception as exc:
+            state["status"] = "error"
+            state["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            state["finished_at"] = time.time()
+
+    asyncio.create_task(_run())
+    return {"request_id": ext_req.request_id, "status": "running"}
+
+
+@app.get("/api/extend/{request_id}")
+async def get_extension(request_id: str):
+    """Return the current state (events so far + result if done)."""
+    st = _EXTEND_RUNS.get(request_id)
+    if st is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return st
+
+
+@app.get("/api/extend/{request_id}/stream")
+async def stream_extension(request_id: str):
+    """SSE: stream agent stage events live to the dashboard."""
+    if request_id not in _EXTEND_RUNS:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    async def generator():
+        sent = 0
+        while True:
+            st = _EXTEND_RUNS.get(request_id)
+            if st is None:
+                return
+            events = st.get("events", [])
+            while sent < len(events):
+                yield f"data: {json.dumps(events[sent])}\n\n"
+                sent += 1
+            if st.get("status") in ("done", "failed", "error"):
+                terminal = {"terminal": True, "status": st.get("status"),
+                            "result": st.get("result"),
+                            "error": st.get("error")}
+                yield f"data: {json.dumps(terminal)}\n\n"
+                return
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(0.15)
+
+    return StreamingResponse(generator(), media_type="text/event-stream")
+
+
+@app.get("/api/extend")
+async def list_extensions():
+    """Recent self-extension runs — newest first."""
+    items = []
+    for rid, st in list(_EXTEND_RUNS.items())[-50:]:
+        items.append({
+            "request_id": rid,
+            "goal": st.get("goal"),
+            "status": st.get("status"),
+            "n_events": len(st.get("events", [])),
+            "started_at": st.get("started_at"),
+            "finished_at": st.get("finished_at"),
+            "success": (st.get("result") or {}).get("success")
+                       if st.get("result") else None,
+        })
+    return {"runs": list(reversed(items))}
+
+
+@app.get("/api/extend/trust/list")
+async def list_trust_registry():
+    """The guardrail-4 module trust registry — show quarantined /
+    review_required / trusted modules for the dashboard's HITL tab."""
+    try:
+        from aria_os.self_extend.trust import list_all
+        return {"modules": [r.to_dict() for r in list_all()]}
+    except Exception as exc:
+        return {"modules": [], "error": str(exc)}
+
+
+@app.post("/api/extend/trust/approve")
+async def approve_trust_module(req: dict):
+    """HITL approve button — human promotes a quarantined module to TRUSTED."""
+    module_path = req.get("module_path", "").strip()
+    if not module_path:
+        raise HTTPException(status_code=400, detail="module_path required")
+    try:
+        from aria_os.self_extend.trust import approve_module
+        new_state = approve_module(module_path)
+        return {"module_path": module_path, "state": new_state.value}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/api/millforge/token")
 async def set_millforge_token(req: MillForgeTokenRequest):
     """Store a MillForge JWT for use by /api/send-cam-to-millforge."""
