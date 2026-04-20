@@ -8,6 +8,7 @@ import STLViewer from "./aria/STLViewer.jsx";
 
 const FilesTab = lazy(() => import("./tabs/FilesTab.jsx"));
 const GenerateTab = lazy(() => import("./tabs/GenerateTab.jsx"));
+const AgentTab = lazy(() => import("./tabs/AgentTab.jsx"));
 
 function TabFallback() {
   return (
@@ -1242,6 +1243,12 @@ export default function App() {
               refreshParts={refreshParts}
               streamRun={streamRun}
             />
+          </Suspense>
+        );
+      case "agent":
+        return (
+          <Suspense fallback={<TabFallback />}>
+            <AgentTab subsection={currentSub} />
           </Suspense>
         );
       case "files":
