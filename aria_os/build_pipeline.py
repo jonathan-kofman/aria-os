@@ -42,6 +42,7 @@ class BuildResult:
     drawings_success: bool = False
     diy_fab_success: bool = False
     drc_success: bool = False      # KiCad kicad-cli pcb drc — fab-ready check
+    erc_success: bool = False      # KiCad kicad-cli sch erc — electrical
     autoroute_success: bool = False  # Freerouting Specctra autorouter
     fea_success: bool = False      # gmsh + CalculiX static-linear FEA
     nc_sim_success: bool = False   # CAMotics G-code collision check
@@ -91,6 +92,8 @@ class BuildResult:
 
     # Per-board DRC results from kicad-cli (pro-grade fab validation).
     drc: dict = field(default_factory=dict)
+    # Per-board ERC results — electrical rule check on generated schematics.
+    erc: dict = field(default_factory=dict)
     # Per-board autoroute results from Freerouting.
     autoroute: dict = field(default_factory=dict)
     # Per-part FEA results from gmsh + CalculiX.
@@ -116,6 +119,7 @@ class BuildResult:
                 "drawings":   self.drawings_success,
                 "diy_fab":    self.diy_fab_success,
                 "drc":        self.drc_success,
+                "erc":        self.erc_success,
                 "autoroute":  self.autoroute_success,
                 "fea":        self.fea_success,
                 "print":      self.print_success,
@@ -148,6 +152,7 @@ class BuildResult:
             "ecad": self.ecad,
             "diy_fab": self.diy_fab,
             "drc": self.drc,
+            "erc": self.erc,
             "autoroute": self.autoroute,
             "fea": self.fea,
             "nc_sim": self.nc_sim,
@@ -301,6 +306,46 @@ def run_full_build(*, preset_id: str, params: dict | None = None,
     else:
         _stage("drc", "done" if drc_any_ok else "fail",
                n_boards=sum(1 for v in result.drc.values()
+                            if isinstance(v, dict) and v.get("passed")))
+
+    # ── Stage 1.415: ERC — generate .kicad_sch from each board's BOM,
+    # then run kicad-cli sch erc on it. ERC catches electrical issues
+    # (floating labels, multiple drivers, power flag mismatches) that
+    # DRC can't see — DRC is geometric, ERC is topological.
+    _stage("erc", "start")
+    erc_any_run = False
+    erc_any_ok = False
+    if isinstance(result.ecad, dict) and result.ecad:
+        try:
+            from aria_os.ecad.kicad_sch_writer import write_kicad_sch
+            from aria_os.ecad.drc_check import run_erc
+            for board_name, v in result.ecad.items():
+                bom_path = v.get("bom_path") if isinstance(v, dict) else None
+                if not bom_path or not Path(bom_path).is_file():
+                    continue
+                # Generate .kicad_sch alongside the .kicad_pcb
+                try:
+                    sch_path = write_kicad_sch(bom_path)
+                except Exception as exc:
+                    result.erc[board_name] = {
+                        "error": f"sch writer failed: {type(exc).__name__}: {exc}"}
+                    continue
+                out = Path(result.output_dir) / "ecad" / board_name / "erc"
+                r = run_erc(sch_path, out)
+                r["sch_path"] = str(sch_path)
+                result.erc[board_name] = r
+                if r.get("available"):
+                    erc_any_run = True
+                    if r.get("passed"):
+                        erc_any_ok = True
+        except Exception as exc:
+            print(f"[build] erc import failed: {type(exc).__name__}: {exc}")
+    result.erc_success = erc_any_ok
+    if not erc_any_run:
+        _stage("erc", "skip", reason="kicad-cli not installed or no BOMs")
+    else:
+        _stage("erc", "done" if erc_any_ok else "fail",
+               n_boards=sum(1 for v in result.erc.values()
                             if isinstance(v, dict) and v.get("passed")))
 
     # ── Stage 1.42: Autoroute — Freerouting Specctra routing ─────────────

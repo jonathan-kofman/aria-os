@@ -58,7 +58,7 @@ def _generic_symbol_sexpr(pin_count: int) -> str:
     w = 10.16       # 4 cells
     h = max(10.16, 2.54 * (half + 1))
     lines = [
-        f'  (symbol "aria:Generic{pin_count}"',
+        f'  (symbol "ARIA_Generic{pin_count}"',
         '    (pin_numbers hide)',
         '    (pin_names (offset 0.254) hide)',
         '    (in_bom yes) (on_board yes)',
@@ -70,12 +70,12 @@ def _generic_symbol_sexpr(pin_count: int) -> str:
         '      (effects (font (size 1.27 1.27)) hide))',
         '    (property "Datasheet" "" (at 0 0 0)',
         '      (effects (font (size 1.27 1.27)) hide))',
-        f'    (symbol "aria:Generic{pin_count}_0_1"',
+        f'    (symbol "ARIA_Generic{pin_count}_0_1"',
         f'      (rectangle (start {-w/2} {h/2}) (end {w/2} {-h/2})',
         '        (stroke (width 0.254) (type default))',
         '        (fill (type background)))',
         '    )',
-        f'    (symbol "aria:Generic{pin_count}_1_1"',
+        f'    (symbol "ARIA_Generic{pin_count}_1_1"',
     ]
     # Left-side pins (1 to half)
     for i in range(half):
@@ -111,7 +111,7 @@ def _symbol_instance(component: dict, x_mm: float, y_mm: float) -> str:
     pin_n = _sym_pin_count(pad_count)
     uid = _uuid()
     return (
-        f'  (symbol (lib_id "aria:Generic{pin_n}") (at {x_mm} {y_mm} 0)'
+        f'  (symbol (lib_id "ARIA_Generic{pin_n}") (at {x_mm} {y_mm} 0)'
         f' (unit 1) (in_bom yes) (on_board yes)\n'
         f'    (uuid "{uid}")\n'
         f'    (property "Reference" "{ref}" (at {x_mm} {y_mm - 8} 0)\n'
