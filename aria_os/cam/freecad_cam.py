@@ -64,17 +64,30 @@ def _find_freecadcmd() -> str | None:
         p = shutil.which(name)
         if p:
             return p
-    # Windows fallback
+    # Windows fallback — covers LOCALAPPDATA\Programs\FreeCAD 1.1 too
     candidates = [
         r"C:\Program Files\FreeCAD",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs"),
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\FreeCAD"),
     ]
     for base in candidates:
         if not os.path.isdir(base):
             continue
-        for ver in sorted(os.listdir(base), reverse=True):
-            for exe_name in ("FreeCADCmd.exe", "freecadcmd.exe"):
-                cand = os.path.join(base, ver, "bin", exe_name)
+        for sub in sorted(os.listdir(base), reverse=True):
+            full = os.path.join(base, sub)
+            if not os.path.isdir(full):
+                continue
+            # Accept "FreeCAD 1.1" or "FreeCAD" subdirs
+            sub_lower = sub.lower()
+            if "freecad" not in sub_lower:
+                # Maybe base already IS the FreeCAD dir, check bin/ directly
+                for exe_name in ("freecadcmd.exe", "FreeCADCmd.exe"):
+                    cand = os.path.join(full, "bin", exe_name)
+                    if os.path.isfile(cand):
+                        return cand
+                continue
+            for exe_name in ("freecadcmd.exe", "FreeCADCmd.exe"):
+                cand = os.path.join(full, "bin", exe_name)
                 if os.path.isfile(cand):
                     return cand
     return None

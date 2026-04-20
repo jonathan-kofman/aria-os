@@ -49,7 +49,24 @@ def _find_freerouting_jar() -> str | None:
 
 
 def _find_java() -> str | None:
-    return shutil.which("java") or shutil.which("java.exe")
+    found = shutil.which("java") or shutil.which("java.exe")
+    if found:
+        return found
+    # Windows fallback — check Eclipse Temurin / Adoptium install dirs
+    candidates = [
+        r"C:\Program Files\Eclipse Adoptium",
+        r"C:\Program Files\Java",
+        r"C:\Program Files\Eclipse Foundation",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Eclipse Adoptium"),
+    ]
+    for base in candidates:
+        if not os.path.isdir(base):
+            continue
+        for sub in sorted(os.listdir(base), reverse=True):
+            cand = os.path.join(base, sub, "bin", "java.exe")
+            if os.path.isfile(cand):
+                return cand
+    return None
 
 
 def run_autoroute(pcb_path: str | Path,
