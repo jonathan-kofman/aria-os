@@ -587,3 +587,29 @@ A professional engineering drawing (turbopump, mechanical part) requires:
 ### Geometry precheck additions
 - Disconnected component count: `mesh.split(only_watertight=False)` → should be 1
 - Minimum face count: `len(mesh.faces) >= 20` → catches degenerate/empty meshes
+
+
+## [2026-04-19] KiCad 10 `.kicad_sch` colon-prefix requires sym-lib-table
+- **Finding**: Any symbol name in `lib_symbols` that contains a colon (e.g. `aria:GenericN`, `Device:R`) makes `kicad-cli sch erc` refuse to load the schematic with the opaque error "Failed to load schematic". KiCad treats the colon as a `LibraryName:SymbolName` reference and tries to resolve it via a sym-lib-table file. If that table is absent or doesn't list the library, loading fails before the inline definition is even consulted.
+- **Evidence**: Binary-searched with minimal schematics. `(symbol "aria:TestSym" ...)` fails. `(symbol "TestSym" ...)` loads. Even `(symbol "CM5IO:Device" ...)` fails standalone — KiCad's own demos work only because they ship a sym-lib-table sidecar.
+- **Rule**: Either (a) emit symbols under colon-free names and use `(lib_id "PlainName")`, or (b) emit a sym-lib-table alongside the `.kicad_sch` with every library referenced. Option (a) is what kicad_sch_writer v2 does today with the `ARIA_` prefix, but that's a workaround — proper pro-grade path is (b) with the real sym-lib-table.
+
+## [2026-04-19] KiCad 10 ERC JSON nests violations under sheets[]
+- **Finding**: The ERC report JSON schema in KiCad 10 differs from DRC. DRC puts violations at `data["violations"]`. ERC puts them at `data["sheets"][i]["violations"]` per-sheet; `data["violations"]` is empty or missing. A parser that only reads top-level reports zero violations on a schematic that actually has many.
+- **Evidence**: fc_pcb ERC via `run_erc` returned `n_violations: 0`; same report parsed via `sheets[0]["violations"]` showed 184 violations (154 errors). Confirmed against `erc.v1.json` schema reference in the output header.
+- **Rule**: When parsing KiCad 10 JSON outputs, always walk both top-level `violations` AND nested `sheets[i].violations`. Emit a combined list. Count `severity == "error"` separately from total so the caller can choose to pass on warnings.
+
+## [2026-04-19] Real KiCad footprints reveal placer density problem
+- **Finding**: Enabling real footprints via `ARIA_USE_REAL_FOOTPRINTS=1` made fc_pcb DRC go from 193 → 318 violations, not down. Root cause: real footprints (e.g. LQFP-64 10×10mm) have larger courtyards than placeholder pads, and the placer's 5mm min_gap isn't enough for dense boards like a 36×36mm fc_pcb with STM32 + MPU + BMP + QMC + USB-C + 3 connectors + passives.
+- **Evidence**: `inflate_components_to_courtyards` correctly grows component bboxes (LQFP-64 10×10 → 13.4×13.4 mm), but `place_components` still picks positions where inflated bboxes overlap. Courtyard-overlap and pth-inside-courtyard errors dominate the extra violations.
+- **Rule**: Courtyard-aware placement alone isn't enough. The placer must either (a) auto-grow board dimensions when courtyards can't fit, or (b) reject a placement entirely and reject the board spec upstream, or (c) use multi-layer stackup to give more routing real estate. Silent fit-at-any-cost is what we did before and it's what produces unmanufacturable output.
+
+## [2026-04-19] Half the pipeline stages skip every build
+- **Finding**: Of the 17 stages in `build_pipeline.run_full_build`, 7 skip on every production build because their OSS tools (CalculiX, FreeCAD, Freerouting, CAMotics, Java) are not installed: `drc`/`erc` (skip when kicad-cli is not on PATH for a given worker), `autoroute`, `fea`, `nc_sim`, `cam_headless`, `mbd_drawings`. The dashboard stage-pill row shows skip-skip-skip, implying progress where none exists.
+- **Evidence**: Every military_recon run reports the same skip reasons. No CCX / freecadcmd / java binary found on the dev machine.
+- **Rule**: Either install the tools (and verify each runs end-to-end on a real artifact at least once before claiming the stage "works"), or remove the stage from the pipeline manifest. Half-wired stages that skip silently are worse than no stage at all — they make the system look more capable than it is.
+
+## [2026-04-19] ecad_generator net_map is the root cause of ERC pin_not_connected floods
+- **Finding**: Real symbols (STM32F405RGTx, 64 pins) expose every pin to ERC. Our schematic emits global_labels only for nets the BOM declares (~12 nets). The remaining 52 pins appear as unconnected. This is why enabling real symbols drove ERC violations from 0 to 184 — the schematic isn't wrong, it's incomplete.
+- **Evidence**: 137 of 184 violations are `pin_not_connected`. `ecad_generator._assign_component_nets` has peripheral tables that cover power, ground, I2C, UART, USB, a few PWMs — everything else is left unconnected.
+- **Rule**: Net assignment must be complete per component BEFORE the schematic writer is called. Every IC pin needs either a real functional net or an explicit NC (no-connect) marker. Anything else creates phantom ERC errors that hide the real ones.

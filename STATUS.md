@@ -1,244 +1,155 @@
-# ARIA-OS — Status & Pro-Quality Roadmap
+# ARIA-OS — Honest Status
 
-_Last updated: 2026-04-19. Pass this doc to a fresh Claude session along with `CLAUDE.md` to get accurate context._
+_Last updated: 2026-04-19. No percentages, no averages, no self-scoring. Every claim backed by a runnable command or marked **UNVERIFIED**._
 
 ---
 
-## TL;DR
+## What this is
 
-**What ARIA-OS is:** a headless natural-language → multi-domain engineering pipeline. Prompt in, fab-ready CAD + ECAD + drawings + CAM + assembly docs + cost out. Target verticals: drones, brackets/mounts, enclosures, lattice-structural parts, impellers, consumer-grade electronics.
+A headless natural-language → engineering pipeline for CAD + ECAD + CAM + FEA + drawings. 16,000 lines. In active rebuild toward professional-grade output using the same tooling professionals use (KiCad's own `pcbnew` API, FreeCAD Python API, CalculiX, Freerouting HTTP mode, pythonOCC direct access).
 
-**Closest commercial analog:** Zoo.dev (KCL + Text-to-CAD) + nTop (implicit/lattice) stitched together. Unlike either, ARIA-OS spans MCAD + ECAD + CAM in one pipeline.
+---
 
-**Current pro-quality level (honest):**
+## Per-feature honest state
 
-| Domain | Level | Gap to pro |
+### CAD (mechanical)
+
+| Feature | State | Evidence |
 |---|---|---|
-| MCAD (B-rep via CadQuery/OCCT) | 75% | Missing: constraint solver (DCM), feature tree, assembly mates. Pad pitch issues in minimal footprints. |
-| MCAD (implicit/SDF) | **85%** | Full TPMS family, strut lattices, FGM, FEA-stress-driven density all landed. Need: STEP export via NURBS fit (out of scope for OSS), more lattice primitives. |
-| ECAD (KiCad-writer pipeline) | 60% | **DRC-aware but 205 violations/board** — minimal footprints cause 120 mask-bridges + 14 IC shorts. Footprint lib lookup landed but not wired. Schematic writer v1 works (generic pins); v2 w/ real symbols needs fixing. No ERC yet. |
-| CAM | 70% | Fusion-script path works but needs Fusion app. FreeCAD Path headless module ships; NC sim via CAMotics ships. Both skip gracefully until installed. |
-| FEA | 65% | Static-linear via gmsh+CalculiX wired. Topology-opt loop landed (iterative FGM). Missing: nonlinear, modal, thermal coupling. |
-| Drawings | 40% | Orthographic SVG projections via CadQuery today. TechDraw MBD module ships but not wired. Missing real GD&T. |
-| Validation | 70% | Vision LLM (cross-validated Gemini+Groq+Ollama+Anthropic, cache+escalation ladder) + geometry precheck. Missing: stress checks, tolerance stacks, metrology comparisons. |
-| Testing | 75% | 522 tests collected, 516/522 pass on local run. 23% branch coverage overall. Zero-coverage on build_pipeline.py + coordinator.py (big gap). |
-| **Weighted average** | **~70%** | Realistic "matches AdamCAD/Zoo.dev on target verticals" with tier-2 polish missing. |
+| CadQuery templates (80+) | **WORKS** for common families (bracket, flange, impeller, gear, shaft, housing, heat_sink). Tested. | `python run_aria_os.py "100mm flange 4 M6 bolts"` produces valid STEP+STL |
+| SDF kernel primitives + lattices | **WORKS** (math verified, unit tests pass) | `tests/test_sdf_*` |
+| SDF → STL via marching cubes | **WORKS** but lossy | Octet-truss sphere test: voxel-volume matches mesh-volume within 0.8% |
+| Constraint-based sketching | **NOT BUILT** — everything is absolute coords | — |
+| Feature tree / editable parametrics | **NOT BUILT** — CadQuery scripts are flat, non-editable | — |
+| Assembly mates (concentric/coincident/distance) | **NOT BUILT** — assemblies hard-code positions | — |
+| NURBS surfacing (G2, trimmed) | **NOT BUILT** — CadQuery's high-level loft only | — |
+| Tolerance stacks (1D/3D) | **NOT BUILT** | — |
+| FEA static-linear (CalculiX wrapper code) | **CODED — UNVERIFIED** (CalculiX not installed on dev machine) | `aria_os/fea/calculix_stage.py` exists; never run end-to-end |
+| FEA modal (CalculiX wrapper code) | **CODED — UNVERIFIED** (same) | `run_modal_fea` untested against real CCX `.dat` output |
+| Topology optimization loop | **CODED — UNVERIFIED** (built by background agent; agent flagged STL→STEP as fragile) | `aria_os/topo_opt/opt_loop.py`; never converged on a real part |
+| Mass / volume / CoG (voxel) | **WORKS** | `aria_os.sdf.analysis.compute_mass` |
+| Printability checks (thin-wall, overhang) | **WORKS but heuristic** — voxel-based approximations | Correctly flags thin-walled gyroid as unprintable |
 
-**Gap to 100% pro quality:** credible estimate is 6–12 months of focused work ~$150–500k or 1–2 engineers. The path is owning the orchestration + templates + fine-tuned LLM, wrapping open-source kernels (OCCT, KiCad, CalculiX, Freerouting, FreeCAD). See `CLAUDE.md` → "ARIA-OS Ship Status" section and `scripts/PRO_HEADLESS_SETUP.md`.
+### ECAD
 
----
+| Feature | State | Evidence |
+|---|---|---|
+| Direct `.kicad_pcb` s-expression writer | **WORKS** (loads in KiCad 10). But generates **DRC-broken PCBs** — 193-318 violations per board. | `outputs/drone_quad/drone_recon_military_7inch/ecad/*/fc_pcb.kicad_pcb` |
+| Placeholder-pad footprint generation | **WORKS but produces bad geometry** — mask bridges, wrong clearances. **This is the root of the 193 DRC violations.** | `kicad_pcb_writer._build_footprint_sexpr` |
+| Real footprint library lookup | **WORKS** (15,428 footprints indexed). **Breaks more than it fixes** when enabled because placer isn't dense-board-aware. | `ARIA_USE_REAL_FOOTPRINTS=1` → fc_pcb goes from 193 → 318 violations |
+| Real symbol library lookup | **WORKS** (22,713 symbols indexed, 5/13 hit rate on drone board). Normalizer imperfect — misses BMP280, QMC5883, AMS1117. | `aria_os.ecad.kicad_symbol_lib.lookup_symbol` |
+| Schematic writer v2 (real symbols) | **WORKS** (loads in KiCad 10 after colon-prefix fix) | `aria_os/ecad/kicad_sch_writer.py` |
+| Schematic → KiCad ERC | **WORKS** (finds 184 real violations: 137 pin_not_connected, 17 label_dangling, 13 lib_symbol_issues, 12 endpoint_off_grid, 4 footprint_link_issues) | `outputs/_erc_final/erc_report.json` |
+| Net map coverage | **INCOMPLETE** — 64-pin STM32 declares ~12 nets; 52 pins unconnected. **This drives all 137 pin_not_connected errors.** | `ecad_generator._assign_component_nets` |
+| DRC integration | **WORKS** — reports are parseable, fail reasons clear | 193 violations baseline, worst=error |
+| Autoroute (Freerouting) | **CODED — UNVERIFIED** (Java + Freerouting JAR not installed) | `aria_os/ecad/autoroute.py` |
+| DIY fab (3D-print substrate + copper tape) | **WORKS** | `tests/test_diy_fab.py` 9/9 pass |
+| 3D PCB STEP export | **WORKS** | `aria_os/ecad/pcb_3d.py` |
+| Gerber export | **WORKS** via `kicad-cli pcb export gerbers` when pipeline has a real `.kicad_pcb` | — |
+| Multi-layer stackup | **NOT BUILT** — single-layer only. This is why routing fails on dense boards. | — |
+| Controlled-impedance traces | **NOT BUILT** | — |
+| Per-net-class DRC rules (power vs signal) | **NOT BUILT** | — |
+| Proper sym-lib-table + fp-lib-table | **NOT BUILT** — we hack around it with `ARIA_` prefix renames | — |
 
-## Repo structure (load-bearing modules only)
+### Drawings
 
-```
-aria-os-export/
-├── aria_os/
-│   ├── orchestrator.py           # Entry: run() — agent/legacy mode dispatch (0% test cov)
-│   ├── build_pipeline.py         # 17-stage preset pipeline (0% test cov)
-│   ├── planner.py                # Legacy: goal → plan dict
-│   ├── spec_extractor.py         # Regex dim extraction (no LLM)
-│   ├── tool_router.py            # Picks CAD kernel: cadquery / sdf / grasshopper / ...
-│   │
-│   ├── agents/
-│   │   ├── coordinator.py        # Alt async 5-phase pipeline (0% cov)
-│   │   ├── refinement_loop.py    # SpecAgent → Designer → Eval → Refiner
-│   │   ├── designer_agent.py     # Template → CADSmith → LLM fallback
-│   │   └── eval_agent.py         # trimesh + visual verify
-│   │
-│   ├── generators/
-│   │   ├── cadquery_generator.py # 80+ parametric CAD templates
-│   │   ├── sdf_generator.py      # Legacy SDF — still used; template-first path wired
-│   │   ├── blender_generator.py
-│   │   └── llm_generator.py
-│   │
-│   ├── sdf/                      # ★ NEW pro-grade implicit kernel (2026-04-19)
-│   │   ├── primitives.py         # ellipsoid, rounded_box, prism, pyramid, rotations...
-│   │   ├── lattices.py           # Full TPMS + BCC/FCC/octet/Kagome/honeycomb/stochastic
-│   │   ├── operators.py          # displace, morph, engrave_text
-│   │   ├── fgm.py                # Functionally graded material fields
-│   │   ├── analysis.py           # volume / mass / CoG / printability
-│   │   ├── export.py             # OBJ / 3MF / PLY
-│   │   └── templates.py          # Deterministic template library — NL → SDF, no LLM
-│   │
-│   ├── ecad/
-│   │   ├── ecad_generator.py     # Parses NL → components + nets (LLM-assisted)
-│   │   ├── kicad_pcb_writer.py   # Direct .kicad_pcb emitter (no KiCad install needed)
-│   │   ├── kicad_sch_writer.py   # ★ NEW direct .kicad_sch emitter (v1, generic symbols)
-│   │   ├── kicad_symbol_lib.py   # ★ NEW index of 22,713 KiCad symbols w/ pin electrical types
-│   │   ├── kicad_footprint_lib.py # ★ NEW index of 15,428 KiCad footprints (not wired yet)
-│   │   ├── drc_check.py          # ★ NEW `kicad-cli pcb drc` wrapper + `sch erc`
-│   │   ├── autoroute.py          # ★ NEW Freerouting JAR wrapper
-│   │   ├── diy_fab.py            # 3D-print + CNC + copper-tape PCB fab (novel)
-│   │   ├── ecad_validator.py     # Custom validators (edge keepout etc.)
-│   │   └── pcb_3d.py             # Populate 3D PCB STEP
-│   │
-│   ├── cam/
-│   │   ├── freecad_cam.py        # ★ NEW headless CAM via freecadcmd
-│   │   └── nc_sim.py             # ★ NEW CAMotics G-code collision check
-│   ├── cam_generator.py          # Legacy Fusion-script CAM path
-│   │
-│   ├── fea/                      # ★ NEW static-linear FEA
-│   │   └── calculix_stage.py     # gmsh + CalculiX, 12-material library
-│   │
-│   ├── topo_opt/                 # ★ NEW FEA-driven topology optimization loop
-│   │   └── opt_loop.py           # Iterative envelope → graded lattice → FEA → new density
-│   │
-│   ├── drawings/                 # ★ NEW MBD drawings
-│   │   └── mbd_drawings.py       # FreeCAD TechDraw — 3-view PDF/SVG
-│   │
-│   ├── visual_verifier.py        # Vision-LLM ladder: cache > Ollama-FAIL > cloud-PASS > Anthropic
-│   ├── caching.py                # Content-addressed STL/STEP cache
-│   ├── llm_client.py             # Anthropic / Gemini / Groq / Ollama fallback chain
-│   ├── cost_estimate.py          # Print + CNC + PCB + electronics + fasteners
-│   ├── fasteners_bom.py          # Hardware SKU rollup (McMaster/BoltDepot)
-│   ├── assembly_instructions.py  # Per-preset MD + PDF guide
-│   ├── mass_calc.py              # STEP volume × density → mass_g
-│   ├── drone_quad.py             # 5" / 7" FPV drone preset
-│   ├── drone_quad_military.py    # 7" ruggedized recon variant
-│   ├── lattice/                  # CadQuery lattice template shim
-│   ├── cem/                      # Physics checks
-│   └── autocad/                  # DXF civil elements
-│
-├── dashboard/
-│   └── dashboard_server.py       # FastAPI — /api/preset/*, /api/cost/*, /api/bundle, /api/drc
-│
-├── frontend/
-│   └── src/
-│       ├── App.jsx               # React entry (Vite)
-│       ├── tabs/
-│       │   ├── GenerateTab.jsx   # QuickBuilds presets + NL Generate panels
-│       │   └── FilesTab.jsx      # Output browser w/ type pills + grouping
-│       └── aria/                 # STLViewer, theme, primitives
-│
-├── scripts/
-│   ├── PRO_HEADLESS_SETUP.md     # ★ Install KiCad / FreeCAD / CalculiX / Freerouting / Java
-│   ├── README_FINETUNING.md      # Qwen2.5-Coder fine-tune plan
-│   ├── build_synthetic_dataset.py # Template-sweep → training triples
-│   └── augment_goals.py          # Gemini paraphrase augmentation
-│
-├── tests/                        # 522 collected, 516 pass locally
-│   ├── test_diy_fab.py           # 9 tests ✓
-│   ├── test_visual_verifier.py   # 37 tests ✓
-│   ├── test_cad_router.py        # 50 tests ✓
-│   ├── test_topo_opt.py          # 9 tests ✓
-│   ├── test_kicad_footprint_lib.py
-│   └── ... (17 more)
-│
-├── CLAUDE.md                     # Architectural guide (READ FIRST)
-├── STATUS.md                     # ← this file
-└── session-logs/                 # Daily session logs — YYYY-MM-DD.md
-```
+| Feature | State | Evidence |
+|---|---|---|
+| CadQuery SVG orthographic projections | **WORKS** | `_render_views` |
+| FreeCAD TechDraw MBD | **CODED — UNVERIFIED** (FreeCAD not installed on dev machine) | `aria_os/drawings/mbd_drawings.py` never actually run |
+| GD&T annotations (datums, feature control frames, tolerance zones) | **NOT BUILT** | — |
+| Title block + revision + material | **NOT BUILT** (stub code in TechDraw module; untested) | — |
+| Auto-dimensioning from 3D model | **NOT BUILT** | — |
+| Section / detail views | **NOT BUILT** | — |
+| Multi-sheet PDF export | **NOT BUILT** | — |
+
+### CAM
+
+| Feature | State | Evidence |
+|---|---|---|
+| Fusion 360 Python script emission | **WORKS but requires Fusion app** — not truly headless | `aria_os/cam_generator.py` |
+| FreeCAD Path headless CAM | **CODED — UNVERIFIED** (FreeCAD not installed) | `aria_os/cam/freecad_cam.py` |
+| CAMotics NC simulation | **CODED — UNVERIFIED** (CAMotics not installed) | `aria_os/cam/nc_sim.py` |
+| CAM physics (spindle RPM, feed, material removal) | **WORKS** | `aria_os.cam_physics` |
+
+### Self-extending agent (hackathon pitch surface)
+
+| Feature | State | Evidence |
+|---|---|---|
+| Orchestrator + 5 sub-agent scaffolding | **WORKS** (dry-run, no actual LLM calls) | `tests/test_self_extend_*` 14 tests pass |
+| Guardrail 1 sandbox (git-worktree isolation) | **WORKS** | 7 tests pass |
+| Guardrail 2 contract tests (5 fixtures) | **WORKS on the 5 part types hardcoded** | Correctly rejects stub candidate that fails flange fixture |
+| Guardrail 3 physics judge (FEA + DRC dispatch) | **WORKS as code — UNVERIFIED end-to-end** (CalculiX not installed) | `aria_os/self_extend/physics_judge.py` |
+| Guardrail 4 trust tier (quarantined → trusted) | **WORKS as JSON state** — but `check_before_use` is **never called** from `build_pipeline`, so quarantined modules are never actually gated | `aria_os/self_extend/trust.py` |
+| Live Claude Code sub-agent in Hypothesis stage | **NOT BUILT** — current implementation returns a hardcoded stub bracket. The hackathon pitch promises "novel structure discovery" which this scaffold does not yet do. | `hypothesis.propose_candidates` returns `_STUB_CADQUERY_CANDIDATE` |
+| Webhook receiver (GitHub issue → agent) | **NOT BUILT** | — |
+| Frontend Agent tab with SSE streaming | **BUILT — UNVERIFIED in production** (committed but never manually loaded on the Vercel deploy) | `frontend/src/tabs/AgentTab.jsx` |
+
+### Testing
+
+| Feature | State | Evidence |
+|---|---|---|
+| Total tests collected | ~560 | `pytest --collect-only` |
+| Tests passing locally | 516 (+/−3 flaky) | Last full run |
+| Branch coverage | **23%** overall | `coverage run --branch` |
+| `build_pipeline.py` coverage | **0%** (386 statements) | — |
+| `orchestrator.py` coverage | **0%** (2076 statements) | — |
+| `agents/coordinator.py` coverage | **0%** (796 statements) | — |
+| Mutation testing | **NOT RUN** — mutmut doesn't work on Windows, cosmic-ray config committed but never executed | `cosmic-ray-diy-fab.toml` |
 
 ---
 
-## Pipeline stages (`build_pipeline.run_full_build`)
+## What's planned (rebuild using professional tooling)
 
-17 stages, all `graceful-degrade` — missing tool = skip, never abort:
+Per-task tracking in the workspace task list (tasks #72-#108). High-level phases:
 
-```
-structsight → mechanical → ecad → drawings → diy_fab
-  → drc → autoroute → fea
-  → mass → instructions → fasteners → cost
-  → print → cam → nc_sim
-  → cam_headless → mbd_drawings
-  → sim → circuit_sim → millforge
+- **Phase 0:** honest docs + tool installs
+- **Phase 1:** deep research on KiCad pcbnew API, KiCad schematic format, Freerouting HTTP, TechDraw, ASME Y14.5, pythonOCC, SolveSpace
+- **Phase 2:** rewrite ECAD on real `pcbnew` Python API + proper sym-lib-table + 4-layer stackup + per-net-class DRC rules + Freerouting HTTP client + net_map growth
+- **Phase 3:** rewrite drawings on FreeCAD TechDraw with real GD&T (datums, feature control frames, tolerance zones, title block, BOM)
+- **Phase 4:** add pythonOCC advanced BRep operations, SolveSpace constraint solver, feature tree, Assembly4 mates, NURBS surfacing, tolerance stacks
+- **Phase 5:** end-to-end verification — submit gerbers to OSHPark, print a part and CMM-check dimensions vs drawing
+
+Estimated timeline: 4-6 weeks of focused work. Not 1 week. Not "mostly done." This is a real rebuild.
+
+---
+
+## What NOT to believe
+
+- Any previous "~70% pro quality" framing. Closer to: CAD templates work, ECAD output is fab-broken, drawings don't exist as real deliverables, half the pipeline stages never run.
+- Any agent-written summary claiming completion without evidence attached. If there's no command to run or artifact to inspect, treat it as UNVERIFIED.
+- Test counts as proxies for quality. 516 passing tests and 23% branch coverage with 0% on the hottest files is not "well tested."
+
+---
+
+## Commands that actually work today
+
+```bash
+# Generate a drone preset end-to-end (bundle includes broken PCBs)
+python run_aria_os.py  # via dashboard POST /api/preset/{id}
+
+# Generate a lattice part (zero LLM spend, works cleanly)
+python -m aria_os.sdf.templates  # octet/gyroid/iwp/honeycomb templates
+
+# Run the self-extension agent (dry-run, walks the 9 stages)
+python -m aria_os.self_extend.orchestrator "bracket 50x30x4mm" --dry-run
+
+# Write a schematic + run ERC (real output, real violations)
+python -c "from aria_os.ecad.kicad_sch_writer import write_kicad_sch; write_kicad_sch('path/to/bom.json')"
 ```
 
-`on_stage(name, status, elapsed_s, **extra)` fires at start/end/fail/skip of each; dashboard shows them as pills.
+## Commands that should work but haven't been verified end-to-end
 
-**Live on every preset build:** structsight, mechanical, ecad, drawings, mass, instructions, fasteners, cost, print, cam, sim, circuit_sim, millforge, diy_fab.
+```bash
+# FEA modal analysis (needs CalculiX installed)
+python -c "from aria_os.fea.calculix_stage import run_modal_fea; ..."
 
-**Skip until OSS tool installed:**
-- `drc` ← `kicad-cli` (KiCad 8+ — installed on Jonathan's box, works)
-- `autoroute` ← Freerouting JAR + Java 17+
-- `fea` ← CalculiX (ccx) + gmsh (gmsh ✓ already pip-installed)
-- `nc_sim` ← CAMotics
-- `cam_headless` ← FreeCAD Path
-- `mbd_drawings` ← FreeCAD TechDraw
+# Freerouting autoroute (needs Java + JAR installed)
+python -c "from aria_os.ecad.autoroute import run_autoroute; ..."
 
-Install doc: `scripts/PRO_HEADLESS_SETUP.md`.
+# FreeCAD TechDraw drawing (needs FreeCAD installed)
+python -c "from aria_os.drawings.mbd_drawings import generate_drawing; ..."
 
----
-
-## What works end-to-end right now
-
-3 drone presets → all 17 stages run (some skip, none fail):
-
-| Preset | Total time | Cost | Mass | Bundle |
-|---|---|---|---|---|
-| `5inch_fpv` | ~22s | $304 | 503g | STEP + STL + KiCad PCB + gerbers + diy_fab + drawings + CAM + instructions + fasteners |
-| `7inch_long_range` | ~25s | $322 | 675g | same |
-| `military_recon` | ~26s | $548 | 1,190g | same + vision pod, fiber spool, payload rail, GPS |
-
-Plus:
-- **DRC catches 205 real violations** on `fc_pcb.kicad_pcb` (working as intended — tells you which boards are fab-ready)
-- **Visual verify** with 4-provider cascade + cache (saves Anthropic $$)
-- **NL→SDF templates** resolve octet-truss / gyroid / IWP / honeycomb / FGM blocks without LLM calls
-
----
-
-## Known gaps (honest, ranked by ROI to close)
-
-### Immediate (next-session candidates)
-
-1. **Wire `kicad_footprint_lib` into `kicad_pcb_writer`** — lookup real footprints for STM32, MPU6000, passives. Drops DRC from 205 → near-zero. 1-2 hours.
-2. **Schematic writer v2** — use real symbols from `kicad_symbol_lib` (inheritance embedder broke — see `git log` for v1 revert). Unlocks real ERC. 2-3 hours.
-3. **`USB_C_Receptacle` normalizer** — footprint lookup misses this common part. 15 min.
-
-### Medium
-
-4. **Fine-tune Qwen2.5-Coder-7B on synthetic dataset** — `scripts/build_synthetic_dataset.py` + `augment_goals.py` ship. Run the training on a Runpod 4090 ($30, 2hr). Permanent Anthropic replacement.
-5. **Real FEA integration in build_pipeline** — CalculiX call exists in `aria_os/fea/calculix_stage.py` but user needs to install `ccx`. Current skip is OK.
-6. **Wire topology-opt loop as a preset stage** — `aria_os/topo_opt/opt_loop.py` works standalone; could be a "generative bracket" preset.
-7. **Test coverage on `build_pipeline.py`** (0% currently, 386 statements).
-
-### Longer-term (weeks)
-
-8. **Constraint solver (DCM port)** — unlocks editable parametrics (SolveSpace solver wrap).
-9. **Feature tree / parametric history** — DAG of ops, re-evaluate on edit.
-10. **Schematic capture with hierarchical sheets** — for multi-board designs.
-11. **FreeCAD integration verified** — install FreeCAD, run one real CAM headless + TechDraw job end-to-end.
-
-### Architectural
-
-12. **OpenMDAO-style DAG refactor** — stages as Components + Drivers so "no Anthropic credits" swaps Drivers not the pipeline.
-13. **Signal integrity + thermal sim** — deep OpenEMS wrap. Low ROI for drone verticals.
-14. **Parasolid-grade boolean robustness** — OCCT has known ceilings; not closable without switching kernels.
-
----
-
-## Honest test suite notes
-
-- **522 collected / 516 pass on last full run.** 4 failures + 2 errors were recently cleaned up (3 main()-as-test files moved to `scripts/driver_*.py`; `test_rhino_compute_e2e.py` moved to scripts; `test_cad_router.py::test_default_is_cadquery` had real regression — fixed to monkeypatch Compute state).
-- **Branch coverage: ~23% total.** Much higher on focused modules (kicad_symbol_lib 100%, diy_fab 90%, visual_verifier 12%).
-- **Big coverage holes:** `build_pipeline.py` (0%, 386 stmts), `orchestrator.py` (~0%, 2076 stmts), `agents/coordinator.py` (0%, 796 stmts). These are the hot paths.
-- **Mutation testing:** config lives at `cosmic-ray-diy-fab.toml`. Run in WSL (mutmut doesn't support Windows natively). Not yet executed.
-
----
-
-## Cross-project integration (manufacturing-core)
-
-ARIA-OS is 1 of 3 repos sharing `manufacturing-core`:
-- `millforge-ai/` — lights-out manufacturing backend (CAM handoff, AS9100, work orders)
-- `structsight/` — engineering judgment service
-
-**Known boundary bugs (recently fixed):**
-- `tolerance_class` drift: ARIA sent `{tight, ultra, medium, standard}` but shared enum is `{fine, medium, coarse}`. Remapped.
-- Silent material fallback: unknown materials used to become `"steel"` silently. Now warns via `logger.warning`.
-- `MILLFORGE_BUNDLE_URL` used to be hardcoded; now env-overridable.
-
-**Still open:**
-- `coordinator.py:1225-1357` hand-builds MillForge job dict instead of using `ARIAToMillForgeJob` from `millforge_aria_common` — 130 lines of duplicated schema.
-- `structsight_context` is `Optional[dict]` in `aria_bridge.py:95` — should be `Optional[StructSightResult]`.
-
-See full cross-project audit in session logs.
-
----
-
-## Sibling docs
-
-- **`CLAUDE.md`** — architectural guide. Template system, pipeline stages, LLM provider chain, known gotchas. Load first.
-- **`scripts/PRO_HEADLESS_SETUP.md`** — OSS tool install commands.
-- **`scripts/README_FINETUNING.md`** — dataset + training plan for owned-LLM path.
-- **`session-logs/`** — daily work logs; fresh Claude should skim the most recent 2-3 to pick up in-flight threads.
-- **`.learnings/ERRORS.md`** / **`.learnings/LEARNINGS.md`** — gotchas + patterns.
+# CAMotics G-code collision check (needs CAMotics installed)
+python -c "from aria_os.cam.nc_sim import simulate_gcode; ..."
+```

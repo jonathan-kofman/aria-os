@@ -220,3 +220,21 @@ The false positive concern was: if the default is stale (e.g., `params.get("od_m
 - **Root cause**: `__init__.py` imported directly from `aria_os.orchestrator` at module load time. orchestrator imported from generators which imported optional heavy deps unconditionally. One missing package brought down the whole package import.
 - **Fix**: Changed `__init__.py` to lazy imports — nothing is imported at module load. Sub-modules import their own deps; missing optional deps are caught locally with try/except.
 - **Rule**: Any Python package that mixes optional heavy deps (computer vision libs, Rhino, Blender bindings) must use lazy imports in `__init__.py`. Never import from orchestrator or generator modules at package level.
+
+
+## [2026-04-19] "Failed to load schematic" from kicad-cli on self-generated files
+- **Symptom**: Every `.kicad_sch` we wrote failed to parse in `kicad-cli sch erc` with the single useless error message "Failed to load schematic". No hint about WHAT was wrong.
+- **Root cause**: The schematic's `lib_symbols` block used names with colons (e.g. `(symbol "aria:GenericN" ...)`) which KiCad 10 treats as references into a sym-lib-table. Without a sidecar sym-lib-table file, KiCad refuses to load the schematic — even though the inline definition is right there.
+- **Fix**: Replaced colon prefixes with underscore: `ARIA_GenericN`, `ARIA_STM32F405RGTx`, etc. Schematic now loads cleanly in KiCad 10 and `kicad-cli sch erc` parses it.
+- **Real pro fix (pending)**: Emit a real `sym-lib-table` alongside the `.kicad_sch` and use the proper KiCad `LibName:SymName` format. That's task #83 (Phase 2 ECAD.1).
+
+## [2026-04-19] run_erc reported 0 violations regardless of input
+- **Symptom**: `run_erc` in `drc_check.py` returned `n_violations: 0` on schematics that actually had 184 real violations (confirmed by direct JSON parse of the same report file).
+- **Root cause**: The parser only read top-level `data["violations"]` — but KiCad 10 ERC puts violations per-sheet under `data["sheets"][i]["violations"]`. The parser was looking in the wrong key.
+- **Fix**: Walk both top-level AND each sheet's violations; combine into one list. Also added `n_errors` separate from `n_violations` so the caller can gate on errors-only.
+
+## [2026-04-19] NameError: os not defined (ecad_generator)
+- **Symptom**: Every military_recon build's ECAD stage failed silently with `NameError: name 'os' is not defined`. No board files generated; downstream DRC / ERC stages ran against empty data.
+- **Root cause**: Added `if os.environ.get("ARIA_USE_REAL_FOOTPRINTS") == "1":` guard earlier in the session without adding `import os` at module top.
+- **Fix**: Added `import os` to ecad_generator imports.
+- **Rule**: When adding code that references stdlib modules, grep the existing imports first. Don't assume they're already present.
