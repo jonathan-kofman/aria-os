@@ -51,3 +51,8 @@ frontend/dist/
 .vercel
 .coverage
 diy-fab-session.sqlite
+
+# Local audit + tooling
+.audit/
+.tools/
+candidate.step

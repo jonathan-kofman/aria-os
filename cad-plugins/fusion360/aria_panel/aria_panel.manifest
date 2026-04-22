@@ -1,0 +1,15 @@
+{
+  "autodeskProduct": "Fusion360",
+  "type": "addin",
+  "id": "9b8c4a10-6c5e-4c1a-9f3d-aria-os-panel",
+  "author": "ARIA-OS",
+  "description": {
+    "default": "ARIA-OS generative CAD panel — natural-language part generation + live agent trace inside Fusion 360."
+  },
+  "version": "0.1.0",
+  "runOnStartup": true,
+  "supportedOS": "windows|mac",
+  "editEnabled": true,
+  "iconFilename": "resources/aria-icon.svg",
+  "public": true
+}

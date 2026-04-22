@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net7.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>AriaPanel</AssemblyName>
+    <RootNamespace>AriaPanel</RootNamespace>
+    <!--
+      Rhino 8 ships with .NET 7 on Windows. The RhinoCommon SDK NuGet below
+      pulls in the correct RhinoCommon.dll reference so you do NOT need to
+      point at a local Rhino install during CI builds. On dev boxes the
+      RhinoCommon NuGet is enough — Rhino supplies the real one at runtime.
+    -->
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- RhinoCommon SDK (Rhino 8 / .NET 7) -->
+    <PackageReference Include="RhinoCommon" Version="8.*" />
+    <!-- WebView2 runtime binding -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.*" />
+    <!-- Newtonsoft for clean JSON round-trip -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.*" />
+  </ItemGroup>
+
+</Project>

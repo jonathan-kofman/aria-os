@@ -44,7 +44,41 @@ class EvalAgent:
         elif self.domain == "assembly":
             self._eval_assembly(state)
 
-        state.eval_passed = len(state.failures) == 0
+        # Skill-adaptive validation gating. The eval ran in full either
+        # way — this only decides whether failures count as BLOCKERS or
+        # warnings. Novice = any failure blocks (safety first). Veteran
+        # = warnings are surfaced but never block (they know what they're
+        # doing and want to iterate).
+        prof = getattr(state, "skill_profile", None)
+        if prof is not None and state.failures:
+            # Heuristic severity: "critical" for solid/watertight/geometry
+            # issues (the part is broken), "error" for dimension or
+            # spec-mismatch (part exists but wrong), "warning" for
+            # everything else (cosmetics / advisories).
+            def _severity(msg: str) -> str:
+                m = msg.lower()
+                if any(k in m for k in ("solid_count", "watertight", "not a valid",
+                                         "no geometry", "file_exists")):
+                    return "critical"
+                if any(k in m for k in ("dimension", "bbox", "mismatch",
+                                         "spec", "out of tolerance")):
+                    return "error"
+                return "warning"
+            worst = max((_severity(f) for f in state.failures),
+                        key=lambda s: {"warning": 0, "error": 1, "critical": 2}[s])
+            if not prof.should_block_on_validation_failure(worst):
+                # Advisory mode: record failures but mark eval passed so
+                # the refinement loop doesn't burn iterations on issues
+                # the operator explicitly accepts.
+                state.eval_passed = True
+                print(f"  [{self.name}] {len(state.failures)} advisory issue(s) "
+                      f"(skill={prof.level.value}, worst={worst}) — not blocking")
+                for f in state.failures:
+                    print(f"    ~ {f}")
+                return
+            state.eval_passed = False
+        else:
+            state.eval_passed = len(state.failures) == 0
 
         tag = "PASS" if state.eval_passed else f"FAIL ({len(state.failures)} issues)"
         print(f"  [{self.name}] {tag}")

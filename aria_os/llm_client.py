@@ -328,8 +328,17 @@ def get_ollama_status() -> dict[str, Any]:
 # Internal backends
 # ---------------------------------------------------------------------------
 
-def _try_anthropic(prompt: str, system: str, repo_root: "Path | None" = None) -> "str | None":
-    """Try Anthropic API. Returns text response or None on any failure."""
+def _try_anthropic(prompt: str, system: str, repo_root: "Path | None" = None,
+                    *, model_tier: str = "premium") -> "str | None":
+    """Try Anthropic API. Returns text response or None on any failure.
+
+    `model_tier`:
+      - "premium"   → claude-sonnet-4-6 (current default, highest cost)
+      - "fast"      → claude-haiku-4-5 (5-10× cheaper, sufficient for
+                       spec extraction, route decisions, short answers)
+    Overloaded (529) retries are capped at 1 — Gemini fallback in the
+    caller handles it faster than repeated Anthropic billing.
+    """
     api_key = get_anthropic_key(repo_root)
     if not api_key:
         return None
@@ -347,10 +356,13 @@ def _try_anthropic(prompt: str, system: str, repo_root: "Path | None" = None) ->
         }
         if system:
             kwargs["system"] = system
-        # Try current model, fall back to older on model-not-found errors
+        if model_tier == "fast":
+            models = ("claude-haiku-4-5-20251001", "claude-3-5-haiku-20241022")
+        else:
+            models = ("claude-sonnet-4-6", "claude-3-5-sonnet-20241022")
         import time as _time
-        for model in ("claude-sonnet-4-6", "claude-3-5-sonnet-20241022"):
-            for _retry in range(3):
+        for model in models:
+            for _retry in range(1):  # no backoff retry — fall through to Gemini
                 try:
                     msg = client.messages.create(model=model, **kwargs)
                     text = "".join(
@@ -372,10 +384,8 @@ def _try_anthropic(prompt: str, system: str, repo_root: "Path | None" = None) ->
                     if "model" in exc_str:
                         break  # try next model
                     if "overloaded" in exc_str or "529" in exc_str:
-                        wait = 5 * (2 ** _retry)  # 5s, 10s, 20s
-                        print(f"[LLM] anthropic overloaded, retry in {wait}s...")
-                        _time.sleep(wait)
-                        continue
+                        print(f"[LLM] anthropic overloaded, falling through")
+                        return None  # let Gemini handle it
                     raise
     except Exception as exc:
         print(f"[LLM] anthropic failed: {exc}")
@@ -867,59 +877,65 @@ def call_llm(
     system: str = "",
     *,
     repo_root: Path | None = None,
+    quality: str = "balanced",
 ) -> str | None:
     """
-    Call the best available LLM backend for code generation tasks.
+    Call the best available LLM backend with tier-based cost control.
 
-    Priority: Anthropic Claude → Gemini 2.5 Flash → Gemma 4 31B (Ollama) → Ollama default → None
+    `quality` tiers (2026-04-20 rewrite to stop Anthropic credit bleed):
 
-    Cloud models are tried first for code generation quality.
+      - "fast"      : Gemini flash → Ollama (Gemma/qwen) → Claude Haiku
+                       → None. Use for spec extraction, route decisions,
+                       one-liners, classification — anywhere a premium
+                       model is overkill. ~5-10× cheaper than premium.
 
-    Parameters
-    ----------
-    prompt     : user message / prompt
-    system     : system prompt (optional)
-    repo_root  : repo root for .env lookup (optional)
+      - "balanced"  : Gemini 2.0 flash → Gemma 4 (remote GPU) →
+                       Claude Sonnet → local Ollama → None. DEFAULT.
+                       Use for code generation where Gemini produces
+                       acceptable CadQuery/Rhino code and Sonnet is
+                       reserved for actual retries.
 
-    Returns
-    -------
-    Response text, or None if all backends unavailable.
-    Never raises.
+      - "premium"   : Claude Sonnet → Gemini → Gemma → Ollama → None.
+                       Use ONLY when caller explicitly needs top-tier
+                       quality (final CAD refinement, complex assembly
+                       generation). Burns credits fast.
+
+    Never raises. Returns None if all backends unavailable.
     """
-    # 1. Try Anthropic (best code quality)
-    try:
-        result = _try_anthropic(prompt, system, repo_root)
-        if result is not None:
-            return result
-    except Exception as exc:
-        print(f"[LLM] anthropic unexpected error: {exc}")
+    if quality == "premium":
+        chain = [
+            (lambda: _try_anthropic(prompt, system, repo_root, model_tier="premium"),
+             "anthropic/sonnet"),
+            (lambda: _try_gemini(prompt, system, repo_root), "gemini"),
+            (lambda: _try_gemma(prompt, system), "gemma"),
+            (lambda: _try_ollama(prompt, system), "ollama"),
+        ]
+    elif quality == "fast":
+        chain = [
+            (lambda: _try_gemini(prompt, system, repo_root), "gemini"),
+            (lambda: _try_gemma(prompt, system), "gemma"),
+            (lambda: _try_ollama(prompt, system), "ollama"),
+            (lambda: _try_anthropic(prompt, system, repo_root, model_tier="fast"),
+             "anthropic/haiku"),
+        ]
+    else:  # balanced (default)
+        chain = [
+            (lambda: _try_gemini(prompt, system, repo_root), "gemini"),
+            (lambda: _try_gemma(prompt, system), "gemma"),
+            (lambda: _try_anthropic(prompt, system, repo_root, model_tier="premium"),
+             "anthropic/sonnet"),
+            (lambda: _try_ollama(prompt, system), "ollama"),
+        ]
 
-    # 2. Try Gemini (fast, good code gen)
-    try:
-        result = _try_gemini(prompt, system, repo_root)
-        if result is not None:
-            return result
-    except Exception as exc:
-        print(f"[LLM] gemini unexpected error: {exc}")
+    for fn, label in chain:
+        try:
+            r = fn()
+            if r is not None:
+                return r
+        except Exception as exc:
+            print(f"[LLM] {label} unexpected error: {exc}")
 
-    # 3. Try Gemma 4 31B via Ollama (strong local code gen)
-    try:
-        result = _try_gemma(prompt, system)
-        if result is not None:
-            return result
-    except Exception as exc:
-        print(f"[LLM] gemma unexpected error: {exc}")
-
-    # 4. Try Ollama default model
-    try:
-        result = _try_ollama(prompt, system)
-        if result is not None:
-            return result
-    except Exception as exc:
-        print(f"[LLM] ollama unexpected error: {exc}")
-
-    # 5. All backends down
-    print("[LLM] no backend available — returning None")
+    print(f"[LLM] no backend available (quality={quality}) — returning None")
     return None
 
 

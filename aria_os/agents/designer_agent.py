@@ -160,11 +160,32 @@ class DesignerAgent(BaseAgent):
 
         prompt = "\n".join(prompt_parts)
 
-        # Store iteration so _call_llm can route correctly
+        # Store iteration + state so _call_llm can route correctly (reads
+        # state.skill_profile to pick the LLM quality tier).
         self._current_iteration = state.iteration
+        self._current_state = state
+
+        # Emit a start-event so the feature tree doesn't go silent during
+        # the slow LLM call (typical 20-60s for Claude/Gemini). Lazy import
+        # so CLI/test paths that don't have the bus don't fail.
+        try:
+            from .. import event_bus as _eb
+            _eb.emit("agent",
+                     f"DesignerAgent: calling LLM for code ({len(prompt)} chars prompt)",
+                     {"iteration": state.iteration, "prompt_chars": len(prompt)})
+        except Exception:
+            pass
 
         # Call the LLM
         response = self.run(prompt, state)
+
+        try:
+            from .. import event_bus as _eb
+            _eb.emit("agent",
+                     f"DesignerAgent: LLM returned {len(response or '')} chars",
+                     {"iteration": state.iteration})
+        except Exception:
+            pass
 
         if not response:
             # LLM failed — try Zoo.dev text-to-CAD before giving up
@@ -235,36 +256,42 @@ class DesignerAgent(BaseAgent):
     def _call_llm(self, prompt: str) -> str | None:
         """Override: for CAD code generation, use cloud LLMs (local 7b too unreliable).
 
-        Iteration 1 — Anthropic first (highest quality for initial generation).
-        Iteration 2+ — Gemini first (faster/cheaper for refinement; Claude as fallback).
-        Gemma 4 31B is tried last if both cloud providers fail.
+        Tier resolution (2026-04-20 skill-profile wiring):
+          - state.skill_profile.level == "veteran"       → `premium` tier
+            (Anthropic Sonnet first, best code quality)
+          - state.skill_profile.level == "novice"|"intermediate" → `fast` tier
+            (Gemini first, Haiku as cloud fallback, cheap)
+          - state.skill_profile.level == "advanced" / no profile / refinement
+            iteration → `balanced` tier (Gemini first, Sonnet as fallback)
+          - iteration >= 2 falls back to `balanced` regardless of skill so
+            refinement passes don't repeatedly burn premium credit.
         """
         if self._prefer_cloud and self.domain == "cad":
             iteration = getattr(self, "_current_iteration", 1)
-            from ..llm_client import _try_anthropic, _try_gemini, _try_gemma
+            state = getattr(self, "_current_state", None)
+            prof = getattr(state, "skill_profile", None) if state else None
 
-            if iteration <= 1:
-                # Iter 1: best quality matters most — Claude first
-                providers = [
-                    ("Anthropic", lambda: _try_anthropic(prompt, self.system_prompt)),
-                    ("Gemini",    lambda: _try_gemini(prompt, self.system_prompt)),
-                    ("Gemma4",    lambda: _try_gemma(prompt, self.system_prompt)),
-                ]
+            # Pick quality tier from skill + iteration
+            if iteration >= 2:
+                quality = "balanced"  # refinement never uses premium
+            elif prof is not None:
+                lv = getattr(prof.level, "value", str(prof.level))
+                if lv == "veteran":
+                    quality = "premium"
+                elif lv in ("novice", "intermediate"):
+                    quality = "fast"
+                else:  # advanced
+                    quality = "balanced"
             else:
-                # Iter 2+: refinement — Gemini is faster and cheaper, Claude as backup
-                providers = [
-                    ("Gemini",    lambda: _try_gemini(prompt, self.system_prompt)),
-                    ("Anthropic", lambda: _try_anthropic(prompt, self.system_prompt)),
-                    ("Gemma4",    lambda: _try_gemma(prompt, self.system_prompt)),
-                ]
+                quality = "balanced"  # default when no profile
 
-            for name, fn in providers:
-                try:
-                    response = fn()
-                    if response:
-                        return response
-                except Exception:
-                    pass
+            from ..llm_client import call_llm
+            try:
+                response = call_llm(prompt, self.system_prompt, quality=quality)
+                if response:
+                    return response
+            except Exception as exc:
+                print(f"  [{self.name}] call_llm failed: {exc}")
 
             print(f"  [{self.name}] All cloud LLMs unavailable — falling back to template")
             return None

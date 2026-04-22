@@ -18,13 +18,29 @@ import pytest
 class TestComponentCatalog:
     def test_catalog_nonempty(self):
         from aria_os.components import catalog
-        assert len(catalog) > 100
+        total = len(catalog)
+        assert total > 100
+        # Spot-check that known entries are present
+        assert catalog.get("M6x20_12.9") is not None
+        assert catalog.get("6205") is not None
+        assert catalog.get("NEMA17-48mm-5mm") is not None
 
     def test_five_categories_populated(self):
         from aria_os.components import catalog
-        for cat in ("fastener", "bearing", "motor", "coupling", "hardware"):
+        expected_minimums = {
+            "fastener": 10,
+            "bearing": 5,
+            "motor": 3,
+            "coupling": 2,
+            "hardware": 2,
+        }
+        for cat, min_count in expected_minimums.items():
             items = catalog.list_category(cat)
-            assert len(items) > 0, f"No components in category '{cat}'"
+            assert len(items) >= min_count, (
+                f"Category '{cat}' has {len(items)} items, expected >= {min_count}"
+            )
+            # Each item must have the correct category field
+            assert all(i.category == cat for i in items), f"Category mismatch in '{cat}'"
 
     def test_lookup_bolt(self):
         from aria_os.components import catalog
@@ -62,6 +78,14 @@ class TestComponentCatalog:
         from aria_os.components import catalog
         results = catalog.search("M6")
         assert len(results) > 0
+        # Every returned component must have "M6" in its designation
+        for spec in results:
+            assert "M6" in spec.designation, (
+                f"search('M6') returned '{spec.designation}' which has no 'M6'"
+            )
+        # The fastener category must dominate M6 results
+        categories = [s.category for s in results]
+        assert "fastener" in categories
 
     def test_generate_bolt_produces_step(self, tmp_path):
         from aria_os.components import catalog

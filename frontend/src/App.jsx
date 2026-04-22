@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
+import { api } from "./aria/apiConfig";
 import { useViewport, spacing, viewContainer } from "./responsive.js";
 import { T } from "./aria/theme.js";
 import { NAV, SUB_TABS } from "./aria/nav.js";
@@ -228,7 +229,7 @@ function ValidateDrawings({ parts }) {
     setDownloading(true);
     setDlError(null);
     try {
-      const res = await fetch(`/api/parts/${selectedPart.id}/drawing`);
+      const res = await fetch(api(`/parts/${selectedPart.id}/drawing`));
       if (res.status === 404) { setDlError("Drawing generation not available for this part."); return; }
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       const blob = await res.blob();
@@ -608,7 +609,7 @@ function RunsRecent() {
 
   useEffect(() => {
     // /api/parts returns the learning log — use as run history
-    fetch("/api/parts")
+    fetch(api("/parts"))
       .then(r => r.ok ? r.json() : { parts: [] })
       .then(data => {
         const arr = Array.isArray(data) ? data : (data.parts || []);
@@ -692,8 +693,8 @@ function RunsHealth() {
 
   useEffect(() => {
     Promise.all([
-      fetch("/api/sessions").then(r => r.ok ? r.json() : { sessions: [] }).catch(() => ({ sessions: [] })),
-      fetch("/api/parts").then(r => r.ok ? r.json() : { parts: [] }).catch(() => ({ parts: [] })),
+      fetch(api("/sessions")).then(r => r.ok ? r.json() : { sessions: [] }).catch(() => ({ sessions: [] })),
+      fetch(api("/parts")).then(r => r.ok ? r.json() : { parts: [] }).catch(() => ({ parts: [] })),
     ]).then(([sessData, partsData]) => {
       setSessions((sessData.sessions || []).slice(0, 10));
       const arr = Array.isArray(partsData) ? partsData : (partsData.parts || []);
@@ -1124,7 +1125,7 @@ export default function App() {
   }, []);
 
   const refreshParts = useCallback(() => {
-    fetch("/api/parts")
+    fetch(api("/parts"))
       .then((r) => (r.ok ? r.json() : { parts: [] }))
       .then((d) => {
         const arr = Array.isArray(d) ? d : (d?.parts || []);
@@ -1135,7 +1136,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/parts")
+    fetch(api("/parts"))
       .then(r => r.ok ? r.json() : { parts: [] })
       .then(data => {
         const arr = Array.isArray(data) ? data : (data?.parts || []);
@@ -1146,7 +1147,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/cem")
+    fetch(api("/cem"))
       .then(r => r.ok ? r.json() : null)
       .then(data => data && setCemData(data))
       .catch(() => {});
@@ -1212,7 +1213,7 @@ export default function App() {
 
   const handleGenerate = useCallback((goal, maxAttempts) => {
     appendPipelineLog(`>>> Starting: ${goal}`);
-    return streamRun(() => fetch("/api/generate", {
+    return streamRun(() => fetch(api("/generate"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ goal, max_attempts: maxAttempts }),

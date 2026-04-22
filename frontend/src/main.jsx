@@ -1,6 +1,35 @@
-import { Component, StrictMode } from "react";
+import { Component, StrictMode, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.jsx";
+
+// When the page is loaded inside a CAD plugin panel, render the chat-style
+// ChatPanel instead of the full dashboard. Detection: `?host=fusion|rhino|
+// onshape|solidworks` query param OR `window.ARIA_HOST_HINT` injected by
+// the host C#/Python code before navigating.
+const ChatPanel = lazy(() => import("./panels/ChatPanel.jsx"));
+
+function _isHostedPanel() {
+  try {
+    const q = new URLSearchParams(window.location.search);
+    if (["fusion", "rhino", "onshape", "solidworks", "chat"].includes(
+        (q.get("host") || "").toLowerCase())) return true;
+    if (typeof window.ARIA_HOST_HINT === "string" &&
+        window.ARIA_HOST_HINT.length > 0) return true;
+    if (window.fusionJavaScriptHandler) return true;
+    return false;
+  } catch { return false; }
+}
+
+function Root() {
+  if (_isHostedPanel()) {
+    return (
+      <Suspense fallback={<div style={{padding:20,fontFamily:"Inter,sans-serif"}}>Loading…</div>}>
+        <ChatPanel />
+      </Suspense>
+    );
+  }
+  return <App />;
+}
 
 class ErrorBoundary extends Component {
   state = { error: null, info: null };
@@ -147,7 +176,7 @@ class ErrorBoundary extends Component {
 createRoot(document.getElementById("root")).render(
   <StrictMode>
     <ErrorBoundary>
-      <App />
+      <Root />
     </ErrorBoundary>
   </StrictMode>
 );

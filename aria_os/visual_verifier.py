@@ -1468,18 +1468,32 @@ def verify_visual(
         print(f"[VISUAL] {result['reason']}")
         return result
 
+    # Lazy event-bus import so CLI/test usage without the bus still works.
+    try:
+        from . import event_bus as _eb
+    except Exception:
+        class _eb:  # type: ignore
+            @staticmethod
+            def emit(*_a, **_kw): pass
+
     # --- Step 1: Render views -----------------------------------------------
     screenshot_dir = repo_root / "outputs" / "screenshots"
+    _eb.emit("visual", "Rendering 3 orthographic views",
+             {"stl": Path(stl_path).name})
     try:
         paths, view_labels = _render_views(stl_path, goal, screenshot_dir)
         result["screenshots"] = paths
         print(f"[VISUAL] rendered {len(paths)} views to {screenshot_dir}")
+        _eb.emit("visual", f"Rendered {len(paths)} views",
+                 {"view_labels": view_labels[:3]})
     except Exception as exc:
         result["reason"] = f"rendering failed: {exc}"
         print(f"[VISUAL] {result['reason']}")
+        _eb.emit("error", f"View rendering failed: {exc}")
         return result
 
     # --- Step 2: Geometry pre-check (deterministic, no LLM) -----------------
+    _eb.emit("visual", "Geometry precheck: bbox + watertight vs spec")
     precheck_results = _geometry_precheck(stl_path, spec or {})
     if precheck_results:
         n_pre_pass = sum(1 for c in precheck_results if c.get("found", False))
@@ -1494,9 +1508,17 @@ def verify_visual(
     # --- Step 3: Build visual checklist -------------------------------------
     checks = _build_checklist(goal, spec or {})
     print(f"[VISUAL] built {len(checks)} feature checks from goal + spec")
+    _eb.emit("visual", f"Calling vision LLM with {len(checks)} feature checks",
+             {"n_checks": len(checks)})
 
     # --- Step 4: Send to vision API -----------------------------------------
     vision_result = _call_vision(paths, view_labels, goal, checks, repo_root, spec=spec)
+    if vision_result is not None:
+        _vr_conf = vision_result.get("confidence", 0.0)
+        _vr_match = vision_result.get("overall_match", False)
+        _eb.emit("visual",
+                 f"Vision result: {'PASS' if _vr_match else 'FAIL'} @ {float(_vr_conf):.0%}",
+                 {"overall": bool(_vr_match), "confidence": float(_vr_conf)})
 
     if vision_result is None:
         result["reason"] = "vision API unavailable"

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { api } from "../aria/apiConfig";
 import { useViewport, layout, spacing, viewContainer } from "../responsive.js";
 import { T } from "../aria/theme.js";
 import { Panel, Badge } from "../aria/uiPrimitives.jsx";
@@ -79,7 +80,7 @@ function FilesBrowse() {
 
   useEffect(() => {
     setLoading(true);
-    fetch("/api/outputs")
+    fetch(api("/outputs"))
       .then(r => r.json())
       .then(d => setFiles(d.files || []))
       .catch(() => setFiles([]))
@@ -380,7 +381,7 @@ function FilesUpload() {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const r = await fetch("/api/upload", { method: "POST", body: fd });
+      const r = await fetch(api("/upload"), { method: "POST", body: fd });
       if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
       const d = await r.json();
       setUploaded({
@@ -576,7 +577,7 @@ function KiCadPcbPreview({ file, url }) {
     setBoardName(label);
 
     // Look up sibling artifacts via the existing /api/outputs listing
-    fetch("/api/outputs")
+    fetch(api("/outputs"))
       .then(r => r.json())
       .then(d => {
         const files = (d.files || []).map(f =>

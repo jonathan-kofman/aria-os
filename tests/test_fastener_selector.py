@@ -56,8 +56,15 @@ class TestSelectFastener:
 
     def test_returns_mcmaster_pn(self):
         f = select_fastener(load_n=2000, material="steel")
-        assert f["mcmaster_pn"] is not None
-        assert len(f["mcmaster_pn"]) > 0
+        pn = f["mcmaster_pn"]
+        assert pn is not None
+        assert len(pn) > 0
+        # McMaster-Carr PNs follow pattern like "91290A111" (digits + letter + digits)
+        assert any(c.isdigit() for c in pn), f"PN '{pn}' contains no digits"
+        assert any(c.isalpha() for c in pn), f"PN '{pn}' contains no letters"
+        # For a 2000 N load the selector must pick at least M3 12.9
+        assert f["size"] in ("M3", "M4", "M5", "M6")
+        assert f["grade"] == "12.9"
 
     def test_returns_torque_spec(self):
         f = select_fastener(load_n=2000, material="steel")

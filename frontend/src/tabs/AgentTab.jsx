@@ -12,6 +12,7 @@
  * pill + elapsed + stage-specific metadata.
  */
 import { useState, useEffect, useRef } from "react";
+import { api } from "../aria/apiConfig";
 import { useViewport, spacing } from "../responsive.js";
 import { T } from "../aria/theme.js";
 import { Panel } from "../aria/uiPrimitives.jsx";
@@ -160,7 +161,7 @@ function LiveRunPanel() {
     setResult(null);
     setStatus("running");
     try {
-      const r = await fetch("/api/extend", {
+      const r = await fetch(api("/extend"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ goal, dry_run: dryRun }),
@@ -315,7 +316,7 @@ function TrustPanel() {
   useEffect(() => {
     async function load() {
       try {
-        const r = await fetch("/api/extend/trust/list");
+        const r = await fetch(api("/extend/trust/list"));
         const d = await r.json();
         setRecords(d.modules || []);
       } catch {}
@@ -327,7 +328,7 @@ function TrustPanel() {
 
   async function approve(path) {
     try {
-      await fetch("/api/extend/trust/approve", {
+      await fetch(api("/extend/trust/approve"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ module_path: path }),
@@ -393,7 +394,7 @@ function HistoryPanel() {
   useEffect(() => {
     async function load() {
       try {
-        const r = await fetch("/api/extend");
+        const r = await fetch(api("/extend"));
         const d = await r.json();
         setRuns(d.runs || []);
       } catch {}

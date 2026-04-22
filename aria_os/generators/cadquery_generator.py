@@ -5224,6 +5224,169 @@ print(f"BBOX:{{bb.xlen:.3f}},{{bb.ylen:.3f}},{{bb.zlen:.3f}}")
 # Public API
 # ---------------------------------------------------------------------------
 
+def _emit_cad_features(code: str, part_id: str, eb) -> None:
+    """Parse a generated CadQuery script and emit one event per CAD operation
+    so the panel's feature tree reads like a real CAD history.
+
+    Heuristic regex-based parse. Resolves numeric constants defined at the
+    top of the script so dimensions appear in human form (e.g. "Extrude
+    25mm" instead of "Extrude H"). Silently skips operations it can't
+    confidently classify.
+    """
+    import re as _re
+    # --- Step 1: collect top-level numeric constants ---
+    # Handles patterns like "OD = 120.0", "HUB_R  = 14.4", "N = 6"
+    consts: dict[str, float] = {}
+    for m in _re.finditer(
+            r"^(?P<name>[A-Z_][A-Z0-9_]*)\s*=\s*(?P<val>-?\d+(?:\.\d+)?)\s*$",
+            code, flags=_re.MULTILINE):
+        try:
+            consts[m.group("name")] = float(m.group("val"))
+        except ValueError:
+            pass
+
+    def _resolve(expr: str) -> str:
+        """Turn 'HUB_R' or 'OD/2' into a human dimension string if possible."""
+        e = expr.strip()
+        # Bare identifier
+        if e in consts:
+            v = consts[e]
+            return f"{v:g}"
+        # Simple 'NAME / 2' or 'NAME * 2'
+        m = _re.fullmatch(r"([A-Z_][A-Z0-9_]*)\s*([*/])\s*(\d+(?:\.\d+)?)", e)
+        if m and m.group(1) in consts:
+            base = consts[m.group(1)]
+            factor = float(m.group(3))
+            v = base / factor if m.group(2) == "/" else base * factor
+            return f"{v:g}"
+        # Plain number
+        m = _re.fullmatch(r"-?\d+(?:\.\d+)?", e)
+        if m:
+            return e
+        # Fall back to the raw expression
+        return e
+
+    # --- Step 2: scan for CadQuery operations in source order ---
+    # Each rule: (regex pattern, label builder(match) -> (phase, label))
+    rules: list[tuple[str, Any]] = [
+        # Workplane / sketch plane
+        (r'cq\.Workplane\(\s*["\'](?P<p>XY|YZ|XZ|front|top|right)["\']\s*\)',
+         lambda m: ("Sketch", f"New sketch on {m.group('p')} plane")),
+        # Primitive 2D shapes
+        (r'\.circle\(\s*([^)]+?)\s*\)',
+         lambda m: ("Sketch",
+                     f"Circle r={_resolve(m.group(1))} "
+                     f"(Ø{_fmt_dia(_resolve(m.group(1)))})")),
+        (r'\.rect\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)',
+         lambda m: ("Sketch",
+                     f"Rectangle {_resolve(m.group(1))}×{_resolve(m.group(2))}")),
+        (r'\.polygon\(\s*(\d+)\s*,\s*([^)]+?)\s*\)',
+         lambda m: ("Sketch",
+                     f"{m.group(1)}-sided polygon, r={_resolve(m.group(2))}")),
+        (r'\.slot2D\(\s*([^,]+?)\s*,\s*([^,]+?)\s*',
+         lambda m: ("Sketch",
+                     f"Slot {_resolve(m.group(1))}×{_resolve(m.group(2))}")),
+        # Extrusion / revolve / loft / sweep
+        (r'\.extrude\(\s*([^)]+?)\s*\)',
+         lambda m: ("Extrude", f"Extrude {_resolve(m.group(1))}mm")),
+        (r'\.revolve\(\s*([^)]*)\s*\)',
+         lambda _: ("Revolve", "Revolve about axis")),
+        (r'\.loft\(',
+         lambda _: ("Loft", "Loft between profiles")),
+        (r'\.sweep\(',
+         lambda _: ("Sweep", "Sweep along path")),
+        # Booleans & cuts
+        (r'\.cutThruAll\(\s*\)',
+         lambda _: ("Cut", "Cut through all")),
+        (r'\.cutBlind\(\s*([^)]+?)\s*\)',
+         lambda m: ("Cut", f"Blind cut {_resolve(m.group(1))}mm")),
+        (r'\.cut\(',
+         lambda _: ("Cut", "Boolean cut")),
+        (r'\.union\(',
+         lambda _: ("Union", "Boolean union")),
+        (r'\.intersect\(',
+         lambda _: ("Boolean", "Boolean intersect")),
+        # Holes
+        (r'\.cboreHole\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^,]+?)\s*',
+         lambda m: ("Hole",
+                     f"Counterbore Ø{_resolve(m.group(1))} × "
+                     f"cbore Ø{_resolve(m.group(2))}×{_resolve(m.group(3))}")),
+        (r'\.cskHole\(\s*([^,]+?)\s*,\s*([^,]+?)\s*',
+         lambda m: ("Hole",
+                     f"Countersink Ø{_resolve(m.group(1))} / Ø{_resolve(m.group(2))}")),
+        (r'\.hole\(\s*([^)]+?)\s*\)',
+         lambda m: ("Hole", f"Hole Ø{_resolve(m.group(1))}mm")),
+        # Finishing
+        (r'\.fillet\(\s*([^)]+?)\s*\)',
+         lambda m: ("Finish", f"Fillet r={_resolve(m.group(1))}mm")),
+        (r'\.chamfer\(\s*([^)]+?)\s*\)',
+         lambda m: ("Finish", f"Chamfer {_resolve(m.group(1))}mm")),
+        (r'\.shell\(\s*([^)]+?)\s*\)',
+         lambda m: ("Finish", f"Shell wall {_resolve(m.group(1))}mm")),
+        (r'\.mirror\(',
+         lambda _: ("Mirror", "Mirror")),
+        # Patterns
+        (r'\.polarArray\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*(\d+)',
+         lambda m: ("Pattern",
+                     f"Polar pattern of {m.group(4)} about r={_resolve(m.group(1))}")),
+        (r'\.rarray\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*(\d+)\s*,\s*(\d+)',
+         lambda m: ("Pattern",
+                     f"Rect array {m.group(3)}×{m.group(4)} "
+                     f"({_resolve(m.group(1))}×{_resolve(m.group(2))} spacing)")),
+    ]
+    compiled = [(_re.compile(p), fn) for p, fn in rules]
+
+    # Detect python `for ... in range(N):` loops that wrap CadQuery operations
+    # and label them as patterns (e.g. "Blade 1 of 6").
+    loop_pattern = _re.compile(
+        r"for\s+\w+\s+in\s+range\(\s*([A-Z_][A-Z0-9_]*|\d+)\s*\)\s*:")
+
+    # Walk the source in line order — emit in the order operations appear.
+    lines = code.splitlines()
+    pos = 0
+    pending_loop_n: Optional[int] = None
+    for ln in lines:
+        stripped = ln.strip()
+        if not stripped or stripped.startswith("#"):
+            pos += 1
+            continue
+        # Track an active for-range loop so we can tag its ops as a pattern
+        lm = loop_pattern.search(stripped)
+        if lm:
+            name = lm.group(1)
+            try:
+                pending_loop_n = int(name) if name.isdigit() \
+                                    else int(consts.get(name, 0))
+            except Exception:
+                pending_loop_n = 0
+            if pending_loop_n > 1:
+                eb.emit("cad_op",
+                        f"Pattern loop: {pending_loop_n}× repeat",
+                        {"part_id": part_id, "phase": "Pattern",
+                         "count": pending_loop_n})
+            pos += 1
+            continue
+
+        # Match each rule against this line (multiple hits allowed per line)
+        for rx, fn in compiled:
+            for m in rx.finditer(stripped):
+                try:
+                    phase, label = fn(m)
+                except Exception:
+                    continue
+                eb.emit("cad_op", label,
+                        {"part_id": part_id, "phase": phase, "line": pos + 1})
+        pos += 1
+
+
+def _fmt_dia(r_str: str) -> str:
+    """Best-effort: turn a radius string into a diameter dimension."""
+    try:
+        return f"{float(r_str) * 2:g}"
+    except Exception:
+        return f"2·{r_str}"
+
+
 def write_cadquery_artifacts(
     plan: dict[str, Any],
     goal: str,
@@ -5249,11 +5412,27 @@ def write_cadquery_artifacts(
     part_id = plan.get("part_id", "custom_part") or "custom_part"
     params  = plan.get("params", {}) or {}
 
+    # Emit — give the feature tree a row for each sub-stage of generation.
+    # We import event_bus lazily so CLI/test contexts don't need it.
+    try:
+        from aria_os import event_bus as _eb
+    except Exception:
+        class _Noop:
+            @staticmethod
+            def emit(*a, **k): pass
+        _eb = _Noop()
+
     # --- Pick template (exact or keyword) or LLM/description fallback ---
     template_fn = _find_template_fn(part_id)
     if template_fn:
+        _eb.emit("step", f"Template matched: {template_fn.__name__}",
+                  {"part_id": part_id, "via": "template"})
         cq_code = template_fn(params)
+        _eb.emit("step", f"Template code emitted ({len(cq_code)} chars)",
+                  {"part_id": part_id})
     else:
+        _eb.emit("step", f"No template for '{part_id}' — trying CEM / LLM path",
+                  {"part_id": part_id})
         # Before falling back to LLM: try deterministic CEM-to-geometry path
         # when physics params have been injected into the plan.
         cq_code = None
@@ -5302,6 +5481,20 @@ print(f"EXPORTED STL: {{_stl}}")
 """
     full_script = cq_code.rstrip() + "\n" + export_footer
     script_path.write_text(full_script, encoding="utf-8")
+    _eb.emit("step", f"Script written ({len(full_script)} chars)",
+              {"path": str(script_path), "part_id": part_id})
+
+    # Feature-tree view: parse the generated CadQuery code and emit one
+    # event per detected CAD operation (sketch plane, extrude, cut, hole,
+    # fillet, pattern, etc.) so the panel's feature tree reads like a real
+    # CAD history. This is a heuristic pass — it reads chained `.method()`
+    # calls, resolves numeric constants where possible, and labels each.
+    try:
+        _emit_cad_features(cq_code, part_id, _eb)
+    except Exception as _fe:
+        # Parser is best-effort; don't let it break the pipeline.
+        _eb.emit("warning", f"Feature-tree parse skipped: {_fe}",
+                  {"part_id": part_id})
 
     # --- Execute in-process ---
     result_step = ""
@@ -5312,6 +5505,8 @@ print(f"EXPORTED STL: {{_stl}}")
     try:
         import cadquery as cq  # noqa: F401
         from cadquery import exporters  # noqa: F401
+        _eb.emit("step", "Executing CadQuery in sandbox",
+                  {"part_id": part_id})
 
         # --- Sandboxed exec: allow cadquery/math only, block os/subprocess/socket ---
         _ALLOWED_MODULES = frozenset({"cadquery", "math", "cadquery.exporters"})
@@ -5348,9 +5543,16 @@ print(f"EXPORTED STL: {{_stl}}")
                 error = (f"Degenerate bbox {bb.xlen:.3f}×{bb.ylen:.3f}×{bb.zlen:.3f} mm"
                          " — geometry invalid, skipping export")
             else:
+                _eb.emit("step",
+                          f"Geometry valid: bbox {bb.xlen:.1f}×{bb.ylen:.1f}×{bb.zlen:.1f}mm",
+                          {"part_id": part_id, "bbox": bbox})
                 exporters.export(geom, step_path, exporters.ExportTypes.STEP)
+                _eb.emit("step", "STEP exported",
+                          {"path": step_path, "part_id": part_id})
                 exporters.export(geom, stl_path,  exporters.ExportTypes.STL,
                                  tolerance=0.01)   # finer mesh for smooth preview
+                _eb.emit("step", "STL exported",
+                          {"path": stl_path, "part_id": part_id})
                 result_step = step_path
                 result_stl  = stl_path
 

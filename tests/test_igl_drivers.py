@@ -34,9 +34,11 @@ def test_drivers_instantiate_without_backends():
 
 def test_is_available_never_raises():
     """is_available() must return bool, not raise, for every driver."""
-    for cls in (CadQueryDriver, FreeCADDriver, OnshapeDriver, RhinoDriver):
-        result = cls().is_available()
-        assert isinstance(result, bool)
+    # CadQuery is bundled — must report True; the rest are optional and may be False.
+    results = {cls.__name__: cls().is_available() for cls in (CadQueryDriver, FreeCADDriver, OnshapeDriver, RhinoDriver)}
+    for name, result in results.items():
+        assert isinstance(result, bool), f"{name}.is_available() returned {type(result)} not bool"
+    assert results["CadQueryDriver"] is True, "CadQuery is a required dep; is_available() must be True"
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +125,15 @@ def test_manager_blacklist_skips_driver(monkeypatch):
     assert statuses["freecad"]["blacklisted"] is True
     assert statuses["onshape"]["blacklisted"] is True
     assert statuses["cadquery"]["blacklisted"] is False
+    # rhino is NOT in the blacklist — must be False not missing
+    assert statuses["rhino"]["blacklisted"] is False
+    # Blacklisted drivers must not be selected as best driver
+    from core.igl_pipeline import load_example
+    data = load_example("simple_block")
+    best = mgr.get_best_driver(data)
+    assert best.name not in ("freecad", "onshape"), (
+        f"Blacklisted driver '{best.name}' was still selected"
+    )
 
 
 def test_list_candidates_returns_full_priority_order():
@@ -198,12 +209,17 @@ def test_run_igl_produces_files(tmp_path):
 
 def test_should_use_igl_defaults_to_false(monkeypatch):
     monkeypatch.delenv("ARIA_GENERATION_MODE", raising=False)
-    assert should_use_igl() is False
+    result = should_use_igl()
+    assert result is False, f"Expected False with no env var, got {result!r}"
 
 
 def test_should_use_igl_reads_env(monkeypatch):
     monkeypatch.setenv("ARIA_GENERATION_MODE", "igl")
-    assert should_use_igl() is True
+    result = should_use_igl()
+    assert result is True, f"Expected True when ARIA_GENERATION_MODE=igl, got {result!r}"
+    # Non-igl values must not enable it
+    monkeypatch.setenv("ARIA_GENERATION_MODE", "legacy")
+    assert should_use_igl() is False
 
 
 def test_driver_status_returns_structured_list():

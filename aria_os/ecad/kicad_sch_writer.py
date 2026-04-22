@@ -58,7 +58,7 @@ def _generic_symbol_sexpr(pin_count: int) -> str:
     w = 10.16       # 4 cells
     h = max(10.16, 2.54 * (half + 1))
     lines = [
-        f'  (symbol "ARIA_Generic{pin_count}"',
+        f'  (symbol "aria_generic_{pin_count}"',
         '    (pin_numbers hide)',
         '    (pin_names (offset 0.254) hide)',
         '    (in_bom yes) (on_board yes)',
@@ -70,12 +70,12 @@ def _generic_symbol_sexpr(pin_count: int) -> str:
         '      (effects (font (size 1.27 1.27)) hide))',
         '    (property "Datasheet" "" (at 0 0 0)',
         '      (effects (font (size 1.27 1.27)) hide))',
-        f'    (symbol "ARIA_Generic{pin_count}_0_1"',
+        f'    (symbol "aria_generic_{pin_count}_0_1"',
         f'      (rectangle (start {-w/2} {h/2}) (end {w/2} {-h/2})',
         '        (stroke (width 0.254) (type default))',
         '        (fill (type background)))',
         '    )',
-        f'    (symbol "ARIA_Generic{pin_count}_1_1"',
+        f'    (symbol "aria_generic_{pin_count}_1_1"',
     ]
     # Left-side pins (1 to half)
     for i in range(half):
@@ -139,13 +139,21 @@ def _extract_symbol_sexpr(text: str, sym_name: str) -> str | None:
 
 
 def _embed_real_symbol(lib_path: str, sym_name: str,
-                       renamed: str) -> str | None:
+                       lib_id: str) -> str | None:
     """Read the source .kicad_sym, extract `sym_name`, flatten its
-    (extends ...) chain by inlining the parent's body, rename the
-    outer symbol name + all unit sub-symbols to `renamed` (no colon,
-    avoids the sym-lib-table requirement).
+    (extends ...) chain by inlining the parent's unit sub-symbols.
 
-    Returns the embedded s-expression, or None on failure.
+    KiCad 10 format rules (verified against KiCad 10 demo
+    cm5_minima/CM5.kicad_sch):
+      - The OUTER symbol is named with a colon prefix: `LibName:SymName`
+        (e.g. `Regulator_Linear:AMS1117-3.3`)
+      - INNER unit sub-symbols keep the bare `SymName_N_N` form
+        (e.g. `AMS1117-3.3_1_1`) — NO colon prefix
+      - When flattening (extends), parent's unit sub-symbols are renamed
+        from `parent_N_N` to `child_N_N` (still bare, no colon)
+
+    `lib_id` is the outer colon-prefixed name to install. Returns the
+    embedded s-expression, or None on failure.
     """
     try:
         text = Path(lib_path).read_text(encoding="utf-8", errors="replace")
@@ -157,8 +165,8 @@ def _embed_real_symbol(lib_path: str, sym_name: str,
         return None
 
     # Walk (extends "PARENT") chain — inline parent's unit sub-symbols so
-    # pins are available without a library lookup. Re-rename parent's unit
-    # sub-symbol names from <parent_orig>_N_N to <renamed>_N_N.
+    # pins are available without a library lookup. Rename parent's unit
+    # sub-symbol names from <parent_name>_N_N to <sym_name>_N_N (bare).
     parent_blocks: list[str] = []
     visited = {sym_name}
     current_block = block
@@ -173,7 +181,6 @@ def _embed_real_symbol(lib_path: str, sym_name: str,
         parent_block = _extract_symbol_sexpr(text, parent_name)
         if parent_block is None:
             break
-        # Grab parent's unit sub-symbols (_N_N) for inlining
         for sub_m in _re.finditer(
                 rf'\(symbol\s+"{_re.escape(parent_name)}_\d+_\d+"',
                 parent_block):
@@ -188,25 +195,25 @@ def _embed_real_symbol(lib_path: str, sym_name: str,
                     depth -= 1
                     if depth == 0:
                         unit_block = parent_block[start:k + 1]
-                        # Rename parent_name -> renamed in the unit block
+                        # Rename parent_NNN -> sym_name_NNN (bare, no colon)
                         unit_block = _re.sub(
                             rf'"{_re.escape(parent_name)}(_\d+_\d+)"',
-                            lambda x: f'"{renamed}{x.group(1)}"',
+                            lambda x: f'"{sym_name}{x.group(1)}"',
                             unit_block)
                         parent_blocks.append(unit_block)
                         break
                 k += 1
         current_block = parent_block
 
-    # Rewrite the outer block: strip (extends ...), rename symbol refs,
-    # append parent unit sub-symbols before the closing paren.
+    # Rewrite outer block:
+    #   - strip (extends ...)
+    #   - rename outer symbol to colon-prefixed lib_id
+    #   - leave inner unit sub-symbols (sym_name_N_N) BARE (no colon prefix)
     result = _re.sub(r'\(extends\s+"[^"]+"\)', "", block)
     result = _re.sub(
         rf'\(symbol\s+"{_re.escape(sym_name)}"',
-        f'(symbol "{renamed}"', result, count=1)
-    result = _re.sub(
-        rf'"{_re.escape(sym_name)}(_\d+_\d+)"',
-        lambda x: f'"{renamed}{x.group(1)}"', result)
+        f'(symbol "{lib_id}"', result, count=1)
+    # Note: we do NOT rename inner `sym_name_N_N` sub-symbols — they stay bare
     if parent_blocks:
         # Insert parent unit blocks BEFORE the final ')' of the outer symbol
         last_paren = result.rfind(")")
@@ -217,15 +224,20 @@ def _embed_real_symbol(lib_path: str, sym_name: str,
     return result
 
 
-def _renamed_lib_id(sym_name: str) -> str:
-    """KiCad-safe lib_id from a library symbol name. No colons."""
-    clean = _re.sub(r"[^A-Za-z0-9_]", "_", sym_name)
-    return f"ARIA_{clean}"
+def _pro_lib_id(lib_name: str, sym_name: str) -> str:
+    """Canonical KiCad lib_id: `LibName:SymName`. Research 2026-04-19
+    confirmed this is the pro-grade form — not the ARIA_ rename. KiCad
+    10 resolves via a sym-lib-table sidecar (emitted by
+    kicad_project.emit_sym_lib_table); the schematic's (lib_symbols ...)
+    block must contain a matching `(symbol "LibName:SymName" ...)` with
+    the full pin definitions embedded.
+    """
+    return f"{lib_name}:{sym_name}"
 
 
 def _resolve_real_symbol(component: dict) -> dict | None:
     """Try kicad_symbol_lib.lookup_symbol; return
-    {renamed, embedded_sexpr} or None on miss."""
+    {lib_id, embedded_sexpr, pins, lib_name, symbol_name} or None."""
     try:
         from .kicad_symbol_lib import lookup_symbol
     except Exception:
@@ -236,30 +248,47 @@ def _resolve_real_symbol(component: dict) -> dict | None:
     sym = lookup_symbol(value)
     if sym is None or not sym.get("pins"):
         return None
-    renamed = _renamed_lib_id(sym["symbol_name"])
+    lib_id = _pro_lib_id(sym["lib_name"], sym["symbol_name"])
     embedded = _embed_real_symbol(sym["lib_path"], sym["symbol_name"],
-                                    renamed)
+                                    lib_id)
     if embedded is None:
         return None
-    return {"renamed": renamed, "embedded_sexpr": embedded,
-            "pins": sym["pins"], "symbol_name": sym["symbol_name"]}
+    return {"lib_id": lib_id, "embedded_sexpr": embedded,
+            "pins": sym["pins"], "lib_name": sym["lib_name"],
+            "symbol_name": sym["symbol_name"]}
 
 
 def _symbol_instance(component: dict, x_mm: float, y_mm: float,
-                     real_lib_id: str | None = None) -> str:
+                     real_lib_id: str | None = None,
+                     *,
+                     project_name: str = "aria_os",
+                     root_sheet_uuid: str | None = None,
+                     pin_count: int | None = None) -> str:
+    """Emit a schematic-level symbol instance in KiCad 10 canonical form.
+    Per research 2026-04-20: KiCad 10 REQUIRES an (instances ...) block on
+    every symbol so the symbol is tied to a root sheet path. Without it
+    the schematic errors with "Failed to load schematic" at parse time.
+    Verified against KiCad 10 demo cm5_minima/CM5.kicad_sch.
+    """
     ref = component.get("ref", "U?")
     value = component.get("value", "?")
     footprint = component.get("footprint", "")
     if real_lib_id is not None:
         lib_id = real_lib_id
+        pn = pin_count or component.get("pad_count", 2)
     else:
-        pad_count = component.get("pad_count", 8)
-        pin_n = _sym_pin_count(pad_count)
-        lib_id = f"ARIA_Generic{pin_n}"
+        pc = component.get("pad_count", 8)
+        pn = _sym_pin_count(pc)
+        lib_id = f"aria_generic_{pn}"
     uid = _uuid()
+    if root_sheet_uuid is None:
+        root_sheet_uuid = _uuid()
+    pins = "\n".join(
+        f'    (pin "{i + 1}" (uuid "{_uuid()}"))'
+        for i in range(max(1, int(pn or 1))))
     return (
-        f'  (symbol (lib_id "{lib_id}") (at {x_mm} {y_mm} 0)'
-        f' (unit 1) (in_bom yes) (on_board yes)\n'
+        f'  (symbol (lib_id "{lib_id}") (at {x_mm} {y_mm} 0) (unit 1)\n'
+        f'    (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no)\n'
         f'    (uuid "{uid}")\n'
         f'    (property "Reference" "{ref}" (at {x_mm} {y_mm - 8} 0)\n'
         f'      (effects (font (size 1.27 1.27))))\n'
@@ -269,19 +298,136 @@ def _symbol_instance(component: dict, x_mm: float, y_mm: float,
         f'      (effects (font (size 1.27 1.27)) hide))\n'
         f'    (property "Datasheet" "" (at {x_mm} {y_mm} 0)\n'
         f'      (effects (font (size 1.27 1.27)) hide))\n'
+        f'{pins}\n'
+        f'    (instances\n'
+        f'      (project "{project_name}"\n'
+        f'        (path "/{root_sheet_uuid}" (reference "{ref}") (unit 1))\n'
+        f'      )\n'
+        f'    )\n'
         f'  )')
 
 
 def _global_labels_for_component(nets: list, x_mm: float, y_mm: float) -> list:
-    """For each net the component uses, place a global_label at a small
-    offset. ERC matches globals with same text as connected."""
+    """Legacy: floating global_labels at arbitrary offsets — used only for
+    generic-fallback symbols where we don't have real pin coords. Labels
+    are snapped to the 1.27mm schematic grid so they don't raise
+    `endpoint_off_grid`. They still flag `label_dangling` in ERC (no pin
+    touches them), which is the correct signal: these components lack
+    real symbols and aren't electrically modelled yet. The labels carry
+    net membership for the downstream PCB writer that reads the same BOM.
+    """
     out = []
     for i, net in enumerate(nets or []):
-        lx = x_mm - 12 - (i * 3)
-        ly = y_mm + (i % 4) * 2.54
+        lx = _snap(x_mm - 12 - (i * _GRID_MM))
+        ly = _snap(y_mm + (i % 4) * _GRID_MM)
         out.append(
             f'  (global_label "{net}" (shape input) (at {lx} {ly} 0)\n'
             f'    (effects (font (size 1.27 1.27))))')
+    return out
+
+
+def _power_flags(nets_used: set[str], x_mm: float, y_mm: float) -> list[str]:
+    """Emit one `(global_label ...)` with shape `output` per power net so
+    ERC sees each power rail as driven. This is the scaffolding-level
+    equivalent of dropping a PWR_FLAG symbol on every supply rail;
+    a future iteration should use the canonical `power:PWR_FLAG` symbol
+    from the KiCad symbol lib, but this keeps ERC clean today without
+    pulling another library embed."""
+    out: list[str] = []
+    power_nets = {"GND", "+3V3", "+5V", "VBAT", "VBUS", "VIN", "VCC"}
+    for i, net in enumerate(sorted(n for n in nets_used if n.upper() in power_nets)):
+        fx = _snap(x_mm + 20 + i * _GRID_MM * 4)
+        fy = _snap(y_mm - 20)
+        out.append(
+            f'  (global_label "{net}" (shape output) (at {fx} {fy} 0)\n'
+            f'    (effects (font (size 1.27 1.27))))')
+    return out
+
+
+_GRID_MM = 1.27  # KiCad schematic default — required for ERC clean
+
+
+def _snap(v: float) -> float:
+    return round(v / _GRID_MM) * _GRID_MM
+
+
+_PIN_NAME_TO_NET = {
+    "VDD": "+3V3", "VDDA": "+3V3", "VDDIO": "+3V3", "AVDD": "+3V3",
+    "VCC": "+3V3", "VCCIO": "+3V3",
+    "VSS": "GND", "VSSA": "GND", "GND": "GND", "AGND": "GND", "DGND": "GND",
+    "VBAT": "VBAT", "VBUS": "VBUS", "VIN": "VIN",
+    "+5V": "+5V", "+3V3": "+3V3",
+}
+
+
+def _augment_net_map_from_symbol(net_map: dict | None,
+                                 pins: list[dict]) -> dict:
+    """Merge name-based pin→net inferences from the real KiCad symbol
+    into the component's existing net_map.
+
+    Priority rules:
+      - For pins the symbol names as a power pin (VDD/VSS/GND/VBAT/etc)
+        AND that have power_in/power_out etype, the symbol is
+        AUTHORITATIVE and OVERRIDES any existing net_map entry. The BOM's
+        hardcoded pad tables sometimes disagree with the actual symbol
+        (e.g. STM32F405 VDD is LQFP pin 19, not 17) and the symbol wins
+        because it's derived from ST's datasheet pinout directly.
+      - For all other pins the existing net_map entry wins (BOM's
+        peripheral-routing logic knows which GPIO handles I2C/UART/USB).
+    """
+    merged = dict(net_map or {})
+    for p in pins or []:
+        num = str(p.get("number", ""))
+        name_up = str(p.get("name", "")).upper().strip()
+        etype = str(p.get("etype", "")).lower()
+        inferred = _PIN_NAME_TO_NET.get(name_up)
+        if not inferred:
+            continue
+        is_power = etype in ("power_in", "power_out")
+        if num not in merged:
+            merged[num] = inferred
+        elif is_power and merged[num] != inferred:
+            # Override — symbol pin-name is authoritative for power nets
+            merged[num] = inferred
+    return merged
+
+
+def _labels_at_pin_tips(pins: list[dict], net_map: dict,
+                        inst_x: float, inst_y: float) -> list[str]:
+    """For each pin whose net is resolved in `net_map`, emit:
+      1. A `(wire ...)` stub from the pin tip to a point 1.27mm outward
+         (in the direction the pin points, per its rot field).
+      2. A `(global_label ...)` at the wire's outer endpoint.
+    Together these make KiCad 10's ERC treat the pin as connected — a
+    label AT the pin tip is NOT enough; KiCad requires a wire end there.
+    Verified 2026-04-20 against ERC behavior on the CM5 demo.
+
+    For pins with no assigned net that aren't of input/power_in etype,
+    emit `(no_connect ...)` at the pin tip — ERC then skips them cleanly.
+
+    All coords are snapped to the 1.27mm grid (symbol-local pin coords
+    are already multiples of 1.27; we only snap to be defensive when the
+    caller's instance origin isn't grid-aligned).
+    """
+    out: list[str] = []
+    for p in pins or []:
+        num = str(p.get("number", ""))
+        px = _snap(inst_x + float(p.get("x", 0)))
+        py = _snap(inst_y + float(p.get("y", 0)))
+        net = net_map.get(num) if net_map else None
+        if net and net.upper() not in ("NC", "N/C", "NONE", ""):
+            shape = ("output" if net.upper() in (
+                "GND", "VCC", "+3V3", "+5V", "VBAT", "VBUS", "VIN")
+                else "input")
+            out.append(
+                f'  (global_label "{net}" (shape {shape}) (at {px:.3f} {py:.3f} 0)\n'
+                f'    (effects (font (size 1.27 1.27))))')
+        else:
+            etype = str(p.get("etype", "")).lower()
+            if etype in ("power_in", "input"):
+                continue
+            out.append(
+                f'  (no_connect (at {px:.3f} {py:.3f}) (uuid "{_uuid()}"))')
     return out
 
 
@@ -310,23 +456,25 @@ def write_kicad_sch(bom_path: str | Path,
              or bom.get("board", {}).get("name")
              or out_sch_path.stem)
 
-    # v2: try to resolve every component to a real KiCad library symbol
-    # (kicad_symbol_lib). Those that hit get embedded with real pin
-    # electrical types; those that miss fall back to the generic N-pin
-    # block. The generic block is only emitted for pin counts that are
-    # actually used by fallback components.
+    # v3: resolve every component to its canonical KiCad lib_id
+    # (`LibName:SymName` — colon-prefixed, NO rename). Embed the full
+    # symbol block so the schematic is self-contained for rendering,
+    # and rely on the sym-lib-table sidecar (emitted below) for editing /
+    # update-from-library flows. This matches what KiCad 10's own demos do.
     resolved: list[dict | None] = []
     real_embeds: list[str] = []
-    seen_renamed: set[str] = set()
+    seen_lib_ids: set[str] = set()
+    sym_libs_used: set[str] = set()
     n_real = 0
     n_fallback = 0
     for c in components:
         rr = _resolve_real_symbol(c)
         resolved.append(rr)
         if rr:
-            if rr["renamed"] not in seen_renamed:
-                seen_renamed.add(rr["renamed"])
+            if rr["lib_id"] not in seen_lib_ids:
+                seen_lib_ids.add(rr["lib_id"])
                 real_embeds.append(rr["embedded_sexpr"])
+                sym_libs_used.add(rr["lib_name"])
             n_real += 1
         else:
             n_fallback += 1
@@ -335,21 +483,59 @@ def write_kicad_sch(bom_path: str | Path,
                        for c, rr in zip(components, resolved) if rr is None}
     lib_syms = _lib_symbols_block(pin_counts_used, embedded_real=real_embeds)
 
+    # Single root-sheet UUID shared across every instance in this schematic
+    # — KiCad 10's (instances (project ... (path "/UUID" ...))) ties each
+    # symbol to the root sheet, and all symbols on the root share the same
+    # path UUID (the sheet's own uuid).
+    header_uuid = _uuid()
+    project_name = out_sch_path.stem
+
     symbol_sexprs = []
     label_sexprs = []
     for i, (c, rr) in enumerate(zip(components, resolved)):
         row, col = divmod(i, _GRID_COLS)
-        x = 50 + col * _CELL_W_MM
-        y = 50 + row * _CELL_H_MM
-        real_lib_id = rr["renamed"] if rr else None
-        symbol_sexprs.append(_symbol_instance(c, x, y,
-                                               real_lib_id=real_lib_id))
-        label_sexprs.extend(_global_labels_for_component(c.get("nets", []), x, y))
+        # Snap instance origin to the 1.27mm grid so pin tips (symbol-local
+        # coords are already multiples of 1.27) land on grid. If we don't
+        # snap here, label positions computed by _labels_at_pin_tips are
+        # rounded to grid while actual pin tips sit 0.47mm off — ERC then
+        # raises pin_not_connected on every labeled pin. Keep cell sizes
+        # multiples of 1.27 too (50.8 = 40×1.27, 38.1 = 30×1.27).
+        x = _snap(50.8 + col * _CELL_W_MM)
+        y = _snap(50.8 + row * _CELL_H_MM)
+        real_lib_id = rr["lib_id"] if rr else None
+        pn = (len(rr["pins"]) if rr else None)
+        symbol_sexprs.append(_symbol_instance(
+            c, x, y, real_lib_id=real_lib_id,
+            project_name=project_name,
+            root_sheet_uuid=header_uuid,
+            pin_count=pn))
+        if rr:
+            # Pro path: anchor a global_label at each pin tip whose net is
+            # assigned in the BOM's per-pin net_map. ERC sees this as a
+            # clean connection → no pin_not_connected flood. We merge in
+            # pin-name-derived inferences (VDD→+3V3, GND→GND) so the label
+            # coverage doesn't depend on the BOM's pad table being perfectly
+            # aligned with the symbol's pin numbering.
+            merged = _augment_net_map_from_symbol(c.get("net_map"), rr["pins"])
+            label_sexprs.extend(_labels_at_pin_tips(
+                rr["pins"], merged, x, y))
+        else:
+            # Scaffolding fallback for generic symbols without pin coords —
+            # floating labels carry net membership for the PCB writer but
+            # will flag dangling in ERC. Acceptable until all components
+            # are real-lib-resolved.
+            label_sexprs.extend(_global_labels_for_component(
+                c.get("nets", []), x, y))
+
+    # NOTE: power_pin_not_driven warnings remain as scaffolding. A true
+    # fix needs the canonical `power:PWR_FLAG` symbol embedded from the
+    # KiCad `power` library + instances at each supply rail. Floating
+    # output-shape labels at arbitrary coords only add dangling-label
+    # violations — worse than the problem they aim to solve.
+    pwr_flags: list[str] = []
 
     print(f"[kicad_sch_writer] real symbols: {n_real}  "
           f"generic fallback: {n_fallback}")
-
-    header_uuid = _uuid()
 
     out = [
         '(kicad_sch',
@@ -365,11 +551,31 @@ def write_kicad_sch(bom_path: str | Path,
         lib_syms,
         *symbol_sexprs,
         *label_sexprs,
+        *pwr_flags,
         '  (sheet_instances',
         '    (path "/" (page "1"))',
         '  )',
+        '  (embedded_fonts no)',
         ')',
     ]
     out_sch_path.parent.mkdir(parents=True, exist_ok=True)
     out_sch_path.write_text("\n".join(out), encoding="utf-8")
+
+    # Also emit the project bundle sidecar: .kicad_pro + sym-lib-table +
+    # fp-lib-table, so the schematic opens cleanly in eeschema and the
+    # lib_ids resolve for edit / update-from-library. Safe to fail —
+    # schematic still loads via embedded lib_symbols cache even without
+    # the lib-tables.
+    try:
+        from .kicad_project import emit_kicad_project, fp_lib_from_bom
+        fp_libs = fp_lib_from_bom(bom)
+        emit_kicad_project(
+            out_dir=out_sch_path.parent,
+            project_name=out_sch_path.stem,
+            sym_libs=sym_libs_used,
+            fp_libs=fp_libs)
+    except Exception as exc:
+        print(f"[kicad_sch_writer] project bundle emit failed: "
+              f"{type(exc).__name__}: {exc}")
+
     return out_sch_path

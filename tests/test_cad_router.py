@@ -137,7 +137,11 @@ class TestCADRouter:
 
     def test_rationale_non_empty(self):
         result = CADRouter.route("ARIA housing 260mm OD", dry_run=True)
-        assert len(result["rationale"]) > 0
+        rationale = result["rationale"]
+        assert len(rationale) > 0
+        # Rationale must name the backend and mention a dimension or reason
+        assert result["backend"] in rationale or "Routing" in rationale
+        assert "260" in rationale or "od_mm" in rationale
 
 
 # ---------------------------------------------------------------------------

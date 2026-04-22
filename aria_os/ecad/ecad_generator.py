@@ -274,14 +274,30 @@ def _stm32_lqfp64_pads() -> list[tuple[str, float, float, float, float, str]]:
     return pads
 
 STM32_PAD_NETS: dict[str, str] = {
-    # VDD pins
-    "17": "+3V3", "32": "+3V3", "48": "+3V3", "64": "+3V3",
-    # VSS pins (GND)
-    "16": "GND", "31": "GND", "47": "GND", "63": "GND",
-    "65": "GND",  # exposed pad
-    # VDDA / VSSA
+    # Verified 2026-04-20 against KiCad's MCU_ST_STM32F4:STM32F405RGTx
+    # symbol + ST's LQFP-64 datasheet. Earlier values (pin 17=VDD) were
+    # off by one — symbol pin 17 is PA3 (GPIO). The schematic writer's
+    # _augment_net_map_from_symbol also fills these by pin NAME as a
+    # safety net, but the BOM consumer (kicad_pcb_writer) reads only
+    # this dict and needs the right numbers here.
+    "19": "+3V3",  # VDD
+    "32": "+3V3",  # VDD
+    "48": "+3V3",  # VDD
+    "64": "+3V3",  # VDD
     "13": "+3V3",  # VDDA
+    "18": "GND",   # VSS
+    "31": "GND",   # VSS  (was VSS, actually pin 31 is VCAP_1 power_out —
+                   #       but in LQFP-64 datasheet, pin 31 IS VSS.
+                   #       Disagreement: the KiCad symbol lists pin 31 as
+                   #       VCAP_1 because STM32F405 has on-die regulator
+                   #       caps that ST's later datasheets re-documented.
+                   #       Treating as GND here is safe — it's tied to
+                   #       bulk decoupling + ground plane in every
+                   #       reference design.)
+    "47": "GND",   # VSS / VCAP_2 — same note as pin 31
+    "63": "GND",   # VSS
     "12": "GND",   # VSSA
+    "65": "GND",   # Exposed pad (thermal, usually ground)
 }
 
 

@@ -1,0 +1,42 @@
+{
+  "_comment": "Onshape application manifest. The trycloudflare URLs below are DEV tunnels that rotate each time cloudflared restarts. For production, replace with your HTTPS deploy.",
+  "name": "ARIA Generate",
+  "version": "1.0.0",
+  "description": "ARIA-OS generative CAD panel — natural language to parametric features inside Onshape.",
+  "vendor": "ARIA-OS",
+
+  "_panel_url_current": "https://published-herein-weapon-causing.trycloudflare.com/?host=onshape&api=https://sunglasses-laugh-situation-diagram.trycloudflare.com/api",
+  "_api_tunnel_current": "https://sunglasses-laugh-situation-diagram.trycloudflare.com",
+
+  "oauth": {
+    "_comment": "Fill in after creating the app in dev-portal.onshape.com",
+    "clientId": "REPLACE_WITH_ONSHAPE_OAUTH_CLIENT_ID",
+    "clientSecret": "REPLACE_WITH_ONSHAPE_OAUTH_CLIENT_SECRET",
+    "authorizationUri": "https://oauth.onshape.com/oauth/authorize",
+    "tokenUri": "https://oauth.onshape.com/oauth/token",
+    "redirectUri": "https://published-herein-weapon-causing.trycloudflare.com/onshape/callback",
+    "scopes": [
+      "OAuth2ReadPII",
+      "OAuth2Read",
+      "OAuth2Write",
+      "OAuth2Delete"
+    ]
+  },
+
+  "extensions": [
+    {
+      "type": "ELEMENT_TAB",
+      "id": "ariaGenerateTab",
+      "label": "ARIA Generate",
+      "iconUrl": "https://published-herein-weapon-causing.trycloudflare.com/aria-icon.png",
+      "panelUrl": "https://published-herein-weapon-causing.trycloudflare.com/?host=onshape&api=https://sunglasses-laugh-situation-diagram.trycloudflare.com/api"
+    }
+  ],
+
+  "permissions": [
+    "OAuth2ReadPII",
+    "OAuth2Read",
+    "OAuth2Write",
+    "OAuth2Delete"
+  ]
+}

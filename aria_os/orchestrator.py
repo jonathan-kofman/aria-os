@@ -2,6 +2,7 @@
 import os
 import sys as _sys
 from pathlib import Path
+from typing import Any
 from .context_loader import load_context
 from .planner import plan as planner_plan
 from .exporter import get_output_paths, get_meta_path
@@ -109,13 +110,19 @@ def _lazy_stages_enabled() -> bool:
     return os.environ.get("ARIA_LAZY_STAGES", "").strip() in ("1", "true", "yes")
 
 
-def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, preview: bool = False, auto_draw: bool = False, agent_mode: bool | None = None, max_agent_iterations: int = 3, teaching: bool = False, teaching_level: str = "intermediate", teaching_interactive: bool = False):
+def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, preview: bool = False, auto_draw: bool = False, agent_mode: bool | None = None, max_agent_iterations: int = 3, teaching: bool = False, teaching_level: str = "intermediate", teaching_interactive: bool = False, skill_profile: Any | None = None):
     """Run the ARIA-OS pipeline: plan -> route -> generate artifacts -> validate -> log.
 
     agent_mode: None = auto (use agents if Ollama available), True = force, False = disable.
     teaching: if True, enable the teaching layer (proactive narration of decisions).
     teaching_level: "beginner", "intermediate", or "expert".
     teaching_interactive: if True, pause after each major phase for interactive Q&A (implies teaching=True).
+    skill_profile: optional SkillProfile (aria_os.skill_profile.SkillProfile) — when
+        provided, agents read `.max_llm_autocomplete_params`,
+        `.should_block_on_validation_failure`, and `.show_code_preview` to
+        adapt spec autocompletion aggressiveness, validation strictness,
+        and per-iteration verbosity. None = pipeline runs with
+        intermediate-tier defaults (no behavior change from pre-skill runs).
     """
     if repo_root is None:
         repo_root = Path(__file__).resolve().parent.parent
@@ -202,6 +209,7 @@ def run(goal: str, repo_root: Path | None = None, max_attempts: int = 3, *, prev
                 domain=_agent_domain,
                 max_iterations=max_agent_iterations,
                 teaching_engine=_teaching_engine,
+                skill_profile=skill_profile,   # agents read .level and knobs
             )
             _agent_state = run_agent_loop(_agent_state)
 

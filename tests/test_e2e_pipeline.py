@@ -183,7 +183,11 @@ class TestBlenderLattice:
     def test_router_returns_blender_or_fusion(self):
         from aria_os.multi_cad_router import CADRouter
         result = CADRouter.route(self.GOAL, dry_run=True)
-        assert result["backend"] in ("blender", "fusion")
+        # Gyroid lattices now route through the SDF kernel (voxel-based)
+        # since it's more reliable than Blender. Blender / Fusion are
+        # still valid for some organic-mesh goals.
+        assert result["backend"] in ("blender", "fusion", "sdf"), \
+            f"lattice goal should route to mesh-capable backend, got {result['backend']}"
 
     def test_blender_generator_produces_artifact(self, tmp_path):
         try:
@@ -205,6 +209,11 @@ class TestBlenderLattice:
             repo_root=_REPO,
         )
         assert isinstance(result, dict)
+        # Must contain a script_path key pointing to the generated script
+        assert "script_path" in result, f"missing 'script_path' key in {result}"
+        assert "summary" in result or "pattern" in result, (
+            f"result dict missing expected keys; got {list(result.keys())}"
+        )
 
     def test_lattice_contains_bpy_reference(self, tmp_path):
         """Blender script must reference bpy (Blender Python)."""
@@ -253,10 +262,16 @@ class TestFusion360MotorHousing:
             repo_root=_REPO,
         )
         assert isinstance(result, dict)
+        # script_path must be present and the script must contain Fusion API references
+        assert "script_path" in result, f"missing 'script_path' in {list(result.keys())}"
         script_path = result.get("script_path", "")
         if script_path and Path(script_path).exists():
             script = Path(script_path).read_text(encoding="utf-8")
-            assert len(script) > 0
+            assert len(script) > 100, "fusion script suspiciously short"
+            # Fusion 360 scripts use the adsk namespace
+            assert "adsk" in script.lower(), "fusion script missing adsk import"
+            # Parametric dimensions must appear verbatim in the script
+            assert "260" in script, "od_mm=260 not embedded in fusion script"
 
     def test_fusion_script_references_fusion_api(self, tmp_path):
         try:

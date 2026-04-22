@@ -64,12 +64,126 @@ _LAYERS_2L = """\
     )"""
 
 
+# 4-layer stack (SIG1 / GND / PWR / SIG2) — industry-standard controlled-
+# impedance stackup for signal-integrity-sensitive designs (USB, DDR,
+# high-speed digital). Matches JLCPCB/OSHPark 4-layer templates.
+_LAYERS_4L = """\
+    (layers
+        (0 "F.Cu" signal)
+        (1 "In1.Cu" power "GND")
+        (2 "In2.Cu" power "PWR")
+        (31 "B.Cu" signal)
+        (32 "B.Adhes" user "B.Adhesive")
+        (33 "F.Adhes" user "F.Adhesive")
+        (34 "B.Paste" user)
+        (35 "F.Paste" user)
+        (36 "B.SilkS" user "B.Silkscreen")
+        (37 "F.SilkS" user "F.Silkscreen")
+        (38 "B.Mask" user)
+        (39 "F.Mask" user)
+        (40 "Dwgs.User" user "User.Drawings")
+        (41 "Cmts.User" user "User.Comments")
+        (42 "Eco1.User" user "User.Eco1")
+        (43 "Eco2.User" user "User.Eco2")
+        (44 "Edge.Cuts" user)
+        (45 "Margin" user)
+        (46 "B.CrtYd" user "B.Courtyard")
+        (47 "F.CrtYd" user "F.Courtyard")
+        (48 "B.Fab" user)
+        (49 "F.Fab" user)
+    )"""
+
+
+# Net-class table: (class_name) -> (trace_width_mm, clearance_mm, via_dia_mm, via_drill_mm).
+# Widths derived from IPC-2221 for typical 4-layer 0.5 oz copper
+# (external) + 1 oz (internal). 20°C ambient, 10°C rise.
+#   Power:  10A @ 20°C rise ~= 0.5mm (2mil) — wide traces carry supply currents
+#   Signal: <100mA default — standard 0.2mm (8mil) for ease of routing
+#   HS:    differential-pair-capable 0.15mm/0.2mm with 0.1mm clearance
+#   GND/net 0: same as power for safety; pour is separate
+_NET_CLASS_DEFAULTS = {
+    "Power":   {"width": 0.5,  "clearance": 0.2,  "via_dia": 0.8,  "via_drill": 0.4},
+    "Signal":  {"width": 0.2,  "clearance": 0.15, "via_dia": 0.6,  "via_drill": 0.3},
+    "HS_Diff": {"width": 0.15, "clearance": 0.1,  "via_dia": 0.45, "via_drill": 0.2},
+    "Default": {"width": 0.25, "clearance": 0.2,  "via_dia": 0.6,  "via_drill": 0.3},
+}
+
+# Keyword → net class. Matched in order; first hit wins.
+_NET_CLASS_PATTERNS: list[tuple[tuple[str, ...], str]] = [
+    (("GND", "AGND", "DGND", "SHLD", "SHIELD"),            "Power"),
+    (("VBAT", "VIN", "VBUS", "+3V3", "+5V", "+12V",
+      "VCC", "VDD", "+VCC", "+VDD", "-5V", "-12V"),         "Power"),
+    (("USB_DP", "USB_DM", "USB+", "USB-",
+      "CLK", "XTAL", "HSE", "LSE",
+      "MIPI_", "HDMI_", "PCIE_", "DDR_"),                    "HS_Diff"),
+]
+
+
+def _classify_net(name: str) -> str:
+    """Map a net name to a net class. Unknown nets fall through to 'Signal'."""
+    up = name.upper().strip()
+    for patterns, cls in _NET_CLASS_PATTERNS:
+        for p in patterns:
+            if up == p or up.startswith(p) or p in up:
+                return cls
+    return "Signal"
+
+
+def _net_classes_sexpr(nets: list[str]) -> str:
+    """Emit per-class net_class declarations inside (setup). Each class
+    lists the nets that belong to it — KiCad DRC applies the class's
+    trace width + clearance when checking those nets."""
+    by_class: dict[str, list[str]] = {}
+    for n in nets:
+        by_class.setdefault(_classify_net(n), []).append(n)
+
+    # KiCad 7+ uses `(net_class "name" "descr" (clearance X) (trace_width Y) ...)`.
+    # Emit "Default" class first even if empty (KiCad requires it).
+    blocks: list[str] = []
+    # Default goes first
+    d = _NET_CLASS_DEFAULTS["Default"]
+    default_nets = by_class.get("Default", [])
+    block = [
+        '    (net_class "Default" "generic nets"',
+        f'      (clearance {d["clearance"]})',
+        f'      (trace_width {d["width"]})',
+        f'      (via_dia {d["via_dia"]})',
+        f'      (via_drill {d["via_drill"]})',
+        f'      (uvia_dia {d["via_dia"]})',
+        f'      (uvia_drill {d["via_drill"]})',
+    ]
+    for n in default_nets:
+        block.append(f'      (add_net "{n}")')
+    block.append("    )")
+    blocks.append("\n".join(block))
+
+    for cls in ("Power", "HS_Diff", "Signal"):
+        members = by_class.get(cls, [])
+        if not members: continue
+        d = _NET_CLASS_DEFAULTS[cls]
+        block = [
+            f'    (net_class "{cls}" "{cls} nets"',
+            f'      (clearance {d["clearance"]})',
+            f'      (trace_width {d["width"]})',
+            f'      (via_dia {d["via_dia"]})',
+            f'      (via_drill {d["via_drill"]})',
+            f'      (uvia_dia {d["via_dia"]})',
+            f'      (uvia_drill {d["via_drill"]})',
+        ]
+        for n in members:
+            block.append(f'      (add_net "{n}")')
+        block.append("    )")
+        blocks.append("\n".join(block))
+    return "\n".join(blocks)
+
+
 def write_kicad_pcb(
     bom_path: str | Path,
     out_pcb_path: str | Path | None = None,
     *,
     board_name: str | None = None,
     pcb_thk_mm: float = 1.6,
+    n_layers: int = 2,
 ) -> Path:
     """Write a real .kicad_pcb file (s-expression format) from a BOM JSON.
 
@@ -176,8 +290,9 @@ def write_kicad_pcb(
         (company "ARIA-OS")
         (comment 1 "Generated by aria_os/ecad/kicad_pcb_writer.py")
     )
-{_LAYERS_2L}
+{(_LAYERS_4L if n_layers >= 4 else _LAYERS_2L)}
     (setup
+{_net_classes_sexpr(nets)}
         (pad_to_mask_clearance 0.051)
         (solder_mask_min_width 0.05)
         (pcbplotparams

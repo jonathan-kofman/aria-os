@@ -51,6 +51,14 @@ class DesignState:
     # ── Teaching engine (optional) ──────────────────────────────────────
     teaching_engine: TeachingEngine | None = field(default=None, repr=False)
 
+    # ── Skill profile (optional) ────────────────────────────────────────
+    # Passed through from the CLI's --skill flag / auto-detect. Agents
+    # read this to decide: how much to autocomplete missing spec params,
+    # whether to block on validation warnings, how verbose the output is.
+    # Import kept lazy (lives in aria_os.skill_profile) so this module
+    # doesn't pull skill_profile at every DesignState instantiation.
+    skill_profile: Any = field(default=None, repr=False)
+
     # ── Loop tracking ────────────────────────────────────────────────────
     iteration: int = 0
     max_iterations: int = 3

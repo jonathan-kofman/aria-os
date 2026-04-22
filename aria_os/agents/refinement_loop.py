@@ -68,6 +68,8 @@ def run_agent_loop(state: DesignState) -> DesignState:
     _total_known = _n_spec_dims + _goal_dims + _goal_counts
     if _total_known < 3:
         print(f"\n  [research] Gathering reference information from the web...")
+        event_bus.emit("agent", "ResearchAgent: searching for prior art",
+                       {"goal": state.goal[:120]})
         try:
             researcher.research(state)
             event_bus.emit("agent", "ResearchAgent done", {
@@ -76,11 +78,18 @@ def run_agent_loop(state: DesignState) -> DesignState:
             print(f"  [research] Skipped: {_re}")
     else:
         print(f"\n  [research] Skipped — {_total_known} dimensions/counts already in goal")
+        event_bus.emit("agent",
+                       f"ResearchAgent skipped — {_total_known} dims already in goal")
 
     # Phase 1: Spec extraction (runs once)
     print(f"\n  [iter 0] SpecAgent extracting constraints...")
+    event_bus.emit("agent", "SpecAgent: extracting constraints from goal")
     spec_agent.extract(state)
-    event_bus.emit("agent", "SpecAgent done", {"spec": state.spec})
+    # Summarize spec in the event so the feature tree shows actual params
+    _spec_keys = [k for k in state.spec.keys() if state.spec.get(k) is not None][:6]
+    event_bus.emit("agent",
+                   f"SpecAgent done — {len(_spec_keys)} params: {', '.join(_spec_keys)}",
+                   {"spec": state.spec})
 
     # Interactive pause after spec extraction
     if _engine and getattr(_engine, "interactive", False):
@@ -97,6 +106,9 @@ def run_agent_loop(state: DesignState) -> DesignState:
 
         # Design
         print(f"\n  [iter {iteration}/{state.max_iterations}] DesignerAgent generating...")
+        event_bus.emit("agent",
+                       f"DesignerAgent: generating code (iter {iteration}/{state.max_iterations})",
+                       {"iteration": iteration})
         designer.generate(state)
 
         if state.generation_error and not state.output_path:
@@ -116,6 +128,8 @@ def run_agent_loop(state: DesignState) -> DesignState:
 
         # Evaluate
         print(f"  [iter {iteration}] EvalAgent validating...")
+        event_bus.emit("agent", f"EvalAgent: validating geometry (iter {iteration})",
+                       {"iteration": iteration})
         evaluator.evaluate(state)
         state.record_iteration()
 

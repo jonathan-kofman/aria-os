@@ -31,7 +31,9 @@ class TestLinearMotion:
         from aria_os.components import catalog
         spec = catalog.get("MGN12H_block")
         assert spec is not None
-        assert spec.dynamic_load_n is not None
+        assert spec.dynamic_load_n == pytest.approx(2800.0)
+        assert spec.subcategory == "linear_carriage"
+        assert spec.dimensions["carriage_width_mm"] == 27
 
     def test_gt2_pulley(self):
         from aria_os.components import catalog
@@ -101,6 +103,11 @@ class TestComposites:
         assert "IM7/5320-1" in MATERIALS
         assert "T800S/3900-2" in MATERIALS
         assert len(MATERIALS) >= 5
+        # Verify actual material property fields are populated
+        im7 = MATERIALS["IM7/5320-1"]
+        assert im7.E1_gpa > 100, "IM7 fibre-direction modulus should exceed 100 GPa"
+        assert im7.E2_gpa > 0
+        assert 0 < im7.cured_ply_thickness_mm < 1.0
 
     def test_quasi_iso_is_symmetric_and_balanced(self):
         from aria_os.composites import quasi_isotropic_8ply
@@ -193,14 +200,24 @@ class TestComposites:
 class TestExpandedStandards:
     def test_aerospace_standards_present(self):
         from manufacturing_core.knowledge.standards import get_standard
-        assert get_standard("as9100") is not None
-        assert get_standard("mil_std_810") is not None
-        assert get_standard("far_part_23_25") is not None
+        as9100 = get_standard("as9100")
+        assert as9100 is not None
+        assert "configuration_management" in as9100.common_clauses
+        mil = get_standard("mil_std_810")
+        assert mil is not None
+        assert "method_514" in mil.common_clauses  # vibration method
+        far = get_standard("far_part_23_25")
+        assert far is not None
+        assert "limit_load_factor" in far.common_clauses
 
     def test_automotive_standards_present(self):
         from manufacturing_core.knowledge.standards import get_standard
-        assert get_standard("fmvss") is not None
-        assert get_standard("fia_f1_technical") is not None
+        fmvss = get_standard("fmvss")
+        assert fmvss is not None
+        assert "208_occupant_crash" in fmvss.common_clauses
+        fia = get_standard("fia_f1_technical")
+        assert fia is not None
+        assert "survival_cell" in fia.common_clauses
 
     def test_itar_standard_present(self):
         from manufacturing_core.knowledge.standards import get_standard
@@ -259,8 +276,10 @@ class TestDynamics:
 
     def test_pinocchio_availability_is_bool(self):
         from aria_os.dynamics import pinocchio_available
-        # Whether or not it's installed, the function should return bool
-        assert isinstance(pinocchio_available(), bool)
+        result = pinocchio_available()
+        # Whether or not it's installed, the function must return a Python bool (not truthy int)
+        assert isinstance(result, bool)
+        assert result in (True, False)
 
 
 # ---------------------------------------------------------------------------
@@ -324,8 +343,10 @@ class TestExportControl:
     def test_millforge_destination_ok_for_clean(self):
         from aria_os.export_control import ExportControlReport, check_millforge_destination_ok
         report = ExportControlReport(overall_classification="EAR99", is_itar=False, is_controlled=False)
-        ok, _ = check_millforge_destination_ok(report, "https://anywhere.com")
-        assert ok
+        ok, reason = check_millforge_destination_ok(report, "https://anywhere.com")
+        assert ok is True
+        # EAR99 clean parts should never trigger a refusal — reason string is empty
+        assert "ITAR" not in reason and "allow-list" not in reason
 
     def test_millforge_destination_localhost_allowed_for_itar_default(self):
         from aria_os.export_control import ExportControlReport, check_millforge_destination_ok
@@ -334,8 +355,12 @@ class TestExportControl:
             flagged_components=["itar_part"],
         )
         # localhost is in the default allow-list
-        ok, _ = check_millforge_destination_ok(report, "http://localhost:8000")
-        assert ok
+        ok, reason = check_millforge_destination_ok(report, "http://localhost:8000")
+        assert ok is True
+        # A random external host must still be refused
+        blocked_ok, blocked_reason = check_millforge_destination_ok(report, "https://external.example.com")
+        assert blocked_ok is False
+        assert "ITAR" in blocked_reason
 
     def test_millforge_destination_env_allowlist(self, monkeypatch):
         from aria_os.export_control import ExportControlReport, check_millforge_destination_ok
@@ -378,8 +403,10 @@ class TestExportControl:
     def test_cloud_llm_ok_for_ear99(self):
         from aria_os.export_control import ExportControlReport, check_cloud_llm_ok
         report = ExportControlReport(overall_classification="EAR99", is_itar=False, is_controlled=False)
-        ok, _ = check_cloud_llm_ok(report)
-        assert ok
+        ok, reason = check_cloud_llm_ok(report)
+        assert ok is True
+        # EAR99 content has no cloud restriction — reason must be empty (no refusal message)
+        assert reason == "" or reason is None
 
     def test_bom_annotated_with_export_control(self):
         from aria_os.assembly_bom import generate_bom

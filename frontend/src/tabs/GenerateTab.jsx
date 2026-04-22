@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, Fragment } from "react";
+import { api } from "../aria/apiConfig";
 import { useViewport, layout, spacing, viewContainer } from "../responsive.js";
 import { T } from "../aria/theme.js";
 import { Panel, StatCard, Badge } from "../aria/uiPrimitives.jsx";
@@ -27,7 +28,7 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
   const loggedPresetStagesRef = useRef(0);
 
   useEffect(() => {
-    fetch("/api/presets")
+    fetch(api("/presets"))
       .then(r => r.json())
       .then(d => setPresets(d.presets || {}))
       .catch(() => setPresets({}));
@@ -39,7 +40,7 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
     if (!running) return;
     const id = setInterval(async () => {
       try {
-        const r = await fetch(`/api/preset/run/${running.run_id}`);
+        const r = await fetch(api(`/preset/run/${running.run_id}`));
         if (!r.ok) return;
         const d = await r.json();
         const stages = d.stages || [];
@@ -81,7 +82,7 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
     const rid = result.run_id;
     if (!rid) return;
     let cancelled = false;
-    fetch(`/api/cost/build/${rid}`)
+    fetch(api(`/cost/build/${rid}`))
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (!cancelled && d?.ready) setCost(d); })
       .catch(() => {});
@@ -92,7 +93,7 @@ function QuickBuildsPanel({ appendPipelineLog, setPipelineStatus, refreshParts }
     setError(null); setResult(null); setProgress(null); setCost(null);
     loggedPresetStagesRef.current = 0;
     try {
-      const r = await fetch(`/api/preset/${preset_id}`, { method: "POST" });
+      const r = await fetch(api(`/preset/${preset_id}`), { method: "POST" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       const label = presets[preset_id]?.label || preset_id;
@@ -647,7 +648,7 @@ function GenerateImage({ pipelineStatus, logLines, appendPipelineLog, streamRun 
     form.append("image", imageFile);
     form.append("goal", goal);
     const runId = await streamRun(() =>
-      fetch("/api/generate-from-image", { method: "POST", body: form })
+      fetch(api("/generate-from-image"), { method: "POST", body: form })
     );
     if (!runId) setError("Image pipeline failed to start. Check server logs.");
   };
@@ -740,7 +741,7 @@ function GenerateAssembly({ pipelineStatus, logLines, appendPipelineLog, streamR
     if (valid.length === 0 || !streamRun) return;
     const description = valid.map(p => p.description ? `${p.name} (${p.description})` : p.name).join(", ");
     appendPipelineLog?.(`>>> Assembly: ${description}`);
-    await streamRun(() => fetch("/api/run", {
+    await streamRun(() => fetch(api("/run"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ command: "assembly", goal: description }),
@@ -824,7 +825,7 @@ function GenerateTerrain({ pipelineStatus, logLines, appendPipelineLog, streamRu
     const extra = goal.trim();
     const g = `${style} terrain ${width}x${depth}mm ${height}mm elevation, ${resolution}px resolution${extra ? `, ${extra}` : ""}`;
     appendPipelineLog?.(`>>> Terrain: ${g}`);
-    await streamRun(() => fetch("/api/run", {
+    await streamRun(() => fetch(api("/run"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ command: "terrain", goal: g }),
@@ -1047,7 +1048,7 @@ function GenerateRefine({ parts, pipelineStatus, logLines, appendPipelineLog, st
     const scriptPath = selectedPart.script_path;
     if (scriptPath) {
       appendPipelineLog?.(`>>> Refine ${selectedPart.part_name || selectedPart.id}: ${modification}`);
-      await streamRun(() => fetch("/api/run", {
+      await streamRun(() => fetch(api("/run"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ command: "refine", goal: `${scriptPath} ${modification}` }),
@@ -1055,7 +1056,7 @@ function GenerateRefine({ parts, pipelineStatus, logLines, appendPipelineLog, st
     } else {
       const goal = `${selectedPart.goal || selectedPart.part_name || selectedPart.id} — MODIFY: ${modification}`;
       appendPipelineLog?.(`>>> Refine (regenerate): ${goal}`);
-      await streamRun(() => fetch("/api/generate", {
+      await streamRun(() => fetch(api("/generate"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ goal, max_attempts: 3 }),

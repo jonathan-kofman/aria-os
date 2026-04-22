@@ -1010,16 +1010,142 @@ def _run_check() -> None:
         sys.exit(1)
 
 
+def _voice_if_requested(stage: str, fallback: str,
+                         *, max_seconds: int = 30) -> str:
+    """If the user passed --voice, record mic audio, transcribe it, and
+    ask the user to confirm the transcript before feeding it into the
+    pipeline (downstream costs API credits). On any failure or decline
+    returns the fallback string. `stage` must be one of the 3 pipeline
+    stages: "goal", "refine", "modify".
+
+    Flags:
+      --voice          -> record + transcribe
+      --auto-confirm   -> skip the y/n/r prompt (for scripting / CI)
+      --yes            -> alias for --auto-confirm
+
+    If stdin isn't a TTY, the confirmation prompt is skipped automatically
+    (can't read keyboard), so voice input still works under the dashboard
+    subprocess wrapper without hanging forever.
+    """
+    if "--voice" not in sys.argv:
+        return fallback
+    try:
+        from aria_os.speech_to_text import voice_input
+    except Exception as exc:
+        print(f"[stt] module load failed, using typed input: {exc}")
+        return fallback
+
+    auto_confirm = "--auto-confirm" in sys.argv or "--yes" in sys.argv
+    interactive = sys.stdin.isatty()
+    last = ""
+    for attempt in range(3):
+        r = voice_input(stage, max_seconds=max_seconds)
+        if not r or not r.strip():
+            print("[stt] voice capture empty; using typed input fallback")
+            return fallback
+        r = r.strip()
+        last = r
+        if auto_confirm or not interactive:
+            return r
+        print()
+        print(f"[stt] transcript ({stage}): {r}")
+        print("[stt] use this? [Y]es / [n]o, cancel / [r]etry: ", end="", flush=True)
+        try:
+            choice = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[stt] cancelled")
+            sys.exit(0)
+        if choice in ("", "y", "yes"):
+            return r
+        if choice in ("r", "retry"):
+            print("[stt] retrying...")
+            continue
+        print("[stt] cancelled by user")
+        sys.exit(0)
+    print("[stt] max retries reached; proceeding with last transcript")
+    return last
+
+
+def _strip_voice_from_argv_list(argv_slice: list[str]) -> list[str]:
+    """Remove --voice / --auto-confirm / --yes from a tokenized argv slice
+    so the remaining args can be joined into a plain goal/modification."""
+    drop = {"--voice", "--auto-confirm", "--yes"}
+    return [a for a in argv_slice if a not in drop]
+
+
+def _run_voice_cmd() -> int:
+    """--voice-cmd: dictate an agent-control command; print the parsed
+    VoiceCommand so the caller (shell / dashboard) can dispatch it. Also
+    prints a suggested `python run_aria_os.py ...` line for common verbs
+    so the operator can see exactly what will run before it executes.
+    """
+    from aria_os.speech_to_text import voice_input
+    from aria_os.voice_commands import interpret_command
+    text = voice_input("command", max_seconds=20)
+    if not text:
+        print("[voice-cmd] no transcript")
+        return 1
+    cmd = interpret_command(text)
+    print(json.dumps(cmd, indent=2))
+    # Best-effort suggestion — "run the DFM agent on the bracket" ->
+    #   python run_aria_os.py --modify outputs/.../bracket.py "run DFM"
+    a = cmd.get("action")
+    if a == "export_step":
+        print("[hint] to execute: python run_aria_os.py --view <step_file>")
+    elif a == "run_dfm":
+        print("[hint] to execute: python run_aria_os.py --verify <path>")
+    elif a == "run_fea":
+        print("[hint] to execute: python run_aria_os.py --analyze-part <step_file>")
+    elif a == "run_cam":
+        print("[hint] to execute: python run_aria_os.py --cam <step_file>")
+    elif a == "generate_drawing":
+        print("[hint] to execute: python run_aria_os.py --draw <step_file>")
+    elif a in ("modify", "regenerate"):
+        print("[hint] to execute: python run_aria_os.py --refine \"" + text + "\"")
+    return 0
+
+
+def _run_voice_note(part_path: str) -> int:
+    """--voice-note <part_file>: dictate a design-intent note and attach
+    it to <part_file>.intent.json for downstream agents to read."""
+    from aria_os.speech_to_text import voice_input
+    from aria_os.voice_commands import annotate_part
+    if not Path(part_path).exists():
+        print(f"[voice-note] warning: {part_path} does not exist — "
+              "sidecar will still be written at that path.")
+    text = voice_input("note", max_seconds=30)
+    if not text:
+        print("[voice-note] no transcript — nothing written")
+        return 1
+    data = annotate_part(part_path, text)
+    sidecar = Path(part_path).with_suffix(Path(part_path).suffix + ".intent.json")
+    print(f"[voice-note] appended to {sidecar}")
+    print(json.dumps(data["notes"][-1], indent=2))
+    return 0
+
+
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "--check":
         _run_check()
         return
 
-    if len(sys.argv) >= 2 and sys.argv[1] == "--full":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--voice-cmd":
+        sys.exit(_run_voice_cmd())
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "--voice-note":
         if len(sys.argv) < 3:
-            print("Usage: python run_aria_os.py --full \"part description\"")
+            print("Usage: python run_aria_os.py --voice-note <part_file>")
+            sys.exit(2)
+        sys.exit(_run_voice_note(sys.argv[2]))
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "--full":
+        _rest = _strip_voice_from_argv_list(sys.argv[2:])
+        _typed_goal = " ".join(_rest)
+        _full_goal = _voice_if_requested("goal", _typed_goal)
+        if not _full_goal:
+            print("Usage: python run_aria_os.py --full \"part description\"  "
+                  "(or pass --voice to dictate)")
             sys.exit(1)
-        _full_goal = " ".join(sys.argv[2:])
         _run_full(_full_goal)
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "--list":
@@ -1047,29 +1173,62 @@ def main():
             verify_all()
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "--modify":
-        if len(sys.argv) < 4:
-            print("Usage: python run_aria_os.py --modify <path_to_.py> \"modification description\"")
+        _rest = _strip_voice_from_argv_list(sys.argv[2:])
+        if len(_rest) < 1:
+            print("Usage: python run_aria_os.py --modify <path_to_.py> "
+                  "\"modification description\"  (or pass --voice to dictate)")
             sys.exit(1)
-        base_part_path = sys.argv[2]
-        modification = " ".join(sys.argv[3:])
+        base_part_path = _rest[0]
+        _typed_mod = " ".join(_rest[1:]) if len(_rest) > 1 else ""
+        modification = _voice_if_requested("modify", _typed_mod)
+        if not modification:
+            print("Usage: python run_aria_os.py --modify <path_to_.py> "
+                  "\"modification description\"  (or pass --voice to dictate)")
+            sys.exit(1)
         run_modify(base_part_path, modification)
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "--refine":
         # --refine "changes"                     -- auto-finds most recent script
         # --refine <stub_or_path> "changes"      -- explicit target
+        # --refine [target] --voice              -- dictate "changes"
         from aria_os.modifier import PartModifier
         mod = PartModifier(repo_root=ROOT)
-        args = sys.argv[2:]
-        if len(args) == 0:
-            print("Usage: python run_aria_os.py --refine \"changes\"")
+        args = _strip_voice_from_argv_list(sys.argv[2:])
+        _voice_on = "--voice" in sys.argv
+        if len(args) == 0 and not _voice_on:
+            print("Usage: python run_aria_os.py --refine \"changes\"  (or add --voice)")
             print("       python run_aria_os.py --refine <script_or_keyword> \"changes\"")
             sys.exit(1)
-        elif len(args) == 1:
-            modification = args[0]
+        elif len(args) == 0 and _voice_on:
+            modification = _voice_if_requested("refine", "")
+            if not modification:
+                print("[refine] voice capture empty, nothing to refine")
+                sys.exit(1)
             script = mod.find_latest_script()
             if script is None:
                 print("No generated scripts found in outputs/cad/generated_code/")
                 sys.exit(1)
+        elif len(args) == 1:
+            if _voice_on:
+                # args[0] is the target; dictate the change
+                stub = args[0]
+                modification = _voice_if_requested("refine", "")
+                if not modification:
+                    sys.exit(1)
+                candidate = Path(stub)
+                if not candidate.is_absolute():
+                    candidate = (ROOT / stub).resolve()
+                script = candidate if candidate.exists() \
+                         else mod.find_latest_script(keyword=stub)
+                if script is None:
+                    print(f"No script found matching: {stub!r}")
+                    sys.exit(1)
+            else:
+                modification = args[0]
+                script = mod.find_latest_script()
+                if script is None:
+                    print("No generated scripts found in outputs/cad/generated_code/")
+                    sys.exit(1)
         else:
             # Could be a path/stub or a keyword — if last arg looks like a sentence, treat it as modification
             modification = args[-1]
@@ -1947,6 +2106,9 @@ def main():
         print("       python run_aria_os.py --reconstruct <catalog_id>  # regenerate parametric CAD from scan features")
         print("       python run_aria_os.py --scan-dir <directory> [--material X] [--tags tag1,tag2]  # batch scan all meshes")
         print('       python run_aria_os.py --catalog-search "75x45x12 bracket with 4 holes"  # similarity search')
+        print("       python run_aria_os.py --voice                  # dictate the goal (stage 1)")
+        print("       python run_aria_os.py --modify <file.py> --voice  # dictate change (stage 2)")
+        print("       python run_aria_os.py --refine --voice          # dictate refinement (stage 3)")
         print("Example: python run_aria_os.py \"generate the ARIA housing shell\"")
         sys.exit(1)
 
@@ -1963,6 +2125,7 @@ def main():
     _teach_mode = "--teach" in _args or _teach_interactive
     _teach_level = "intermediate"
     _max_agent_iter = 3
+    _skill_cli: str | None = None
     for i, a in enumerate(_args):
         if a == "--max-agent-iterations" and i + 1 < len(_args):
             try:
@@ -1971,9 +2134,13 @@ def main():
                 pass
         if a == "--teach-level" and i + 1 < len(_args):
             _teach_level = _args[i + 1]
+        if a == "--skill" and i + 1 < len(_args):
+            _skill_cli = _args[i + 1]
     _strip_flags = {"--preview", "--fea", "--cfd", "--render",
                     "--no-agent", "--agent-mode", "--coordinator", "--max-agent-iterations",
-                    "--teach", "--teach-interactive", "--teach-level"}
+                    "--teach", "--teach-interactive", "--teach-level",
+                    "--voice", "--auto-confirm", "--yes",
+                    "--skill"}
     _args_clean = []
     _skip_next = False
     for a in _args:
@@ -1981,11 +2148,53 @@ def main():
             _skip_next = False
             continue
         if a in _strip_flags:
-            if a in ("--max-agent-iterations", "--teach-level"):
+            if a in ("--max-agent-iterations", "--teach-level", "--skill"):
                 _skip_next = True
             continue
         _args_clean.append(a)
     goal = " ".join(_args_clean)
+
+    # Resolve the skill profile: --skill wins, then persisted, then auto-detect.
+    # Adapts output verbosity, default autocompletion, validation strictness,
+    # and error phrasing at every downstream stage (see aria_os/skill_profile.py).
+    try:
+        from aria_os.skill_profile import SkillProfile, SkillLevel
+        _skill_cli_enum: SkillLevel | None = None
+        if _skill_cli:
+            try:
+                _skill_cli_enum = SkillLevel(_skill_cli.lower())
+            except ValueError:
+                print(f"[skill] unknown level '{_skill_cli}'. "
+                      "Use: novice | intermediate | advanced | veteran")
+                _skill_cli_enum = None
+        _persisted = SkillProfile.load_persisted()
+        _skill = SkillProfile.from_context(
+            goal, cli_override=_skill_cli_enum, persisted=_persisted)
+        print(f"[skill] {_skill.level.value} ({_skill.source})"
+              + ("" if _skill.source == "cli" else
+                 "  — override with --skill novice|intermediate|advanced|veteran"))
+        if _skill.source == "cli":
+            _skill.persist()  # remember explicit choices
+        # If the user is a novice and didn't explicitly ask for teaching,
+        # turn it on automatically. Novices WANT the narration; expecting
+        # them to discover --teach defeats the purpose of the skill tier.
+        if (_skill.level.value == "novice"
+                and not _teach_mode and not _teach_interactive):
+            _teach_mode = True
+            _teach_level = "beginner"
+            print("[skill] novice — auto-enabling teach mode "
+                  "(use --skill advanced or higher to suppress)")
+        # Inverse: veteran suppresses teaching even if it was implicitly set
+        # by teach-level defaults. Veterans want signal, not explanation.
+        if _skill.level.value == "veteran" and not _teach_interactive:
+            if _teach_mode and "--teach" not in sys.argv:
+                _teach_mode = False
+    except Exception as _exc:
+        print(f"[skill] profile init failed (non-fatal): {_exc}")
+        _skill = None
+    # Stage 1 of the 3-stage voice pipeline: initial goal. If --voice is set,
+    # record + transcribe and use that instead of (or alongside) typed text.
+    goal = _voice_if_requested("goal", goal)
 
     # Determine agent mode: --agent-mode forces on, --no-agent forces off, else auto
     _agent_mode = None  # auto
@@ -2022,7 +2231,8 @@ def main():
         session = run(goal, repo_root=ROOT, preview=_preview,
                       agent_mode=_agent_mode, max_agent_iterations=_max_agent_iter,
                       teaching=_teach_mode, teaching_level=_teach_level,
-                      teaching_interactive=_teach_interactive)
+                      teaching_interactive=_teach_interactive,
+                      skill_profile=_skill)
     except ConnectionRefusedError:
         print("\nERROR: Cannot connect to Ollama.")
         print("  Start it with:  ollama serve")
@@ -2036,9 +2246,17 @@ def main():
         print("\nInterrupted.")
         sys.exit(130)
     except Exception as _e:
-        print(f"\nERROR: Pipeline failed — {_e}")
-        print("  Run with --check to validate your environment.")
-        print("  For details run:  python run_aria_os.py --check")
+        # Skill-adaptive error message — novice gets plain-English, veteran
+        # gets type + message + traceback. Falls through to the default
+        # phrasing if the profile couldn't be resolved.
+        if _skill is not None:
+            try:
+                print("\n" + _skill.format_error(
+                    _e, hint="Run with --check to validate your environment."))
+            except Exception:
+                print(f"\nERROR: Pipeline failed — {_e}")
+        else:
+            print(f"\nERROR: Pipeline failed — {_e}")
         if os.environ.get("ARIA_DEBUG"):
             raise
         sys.exit(1)
@@ -2100,6 +2318,31 @@ def main():
             print(f"[PHYSICS] {_result['analysis_type']}  SF={_sf_val:.2f}  {'PASS' if _result['passed'] else 'FAIL'}")
         else:
             print(f"[PHYSICS] {_result['analysis_type']}  {'PASS' if _result['passed'] else 'FAIL'}")
+
+    # Skill-adaptive final summary: novice gets plain "done", veteran gets
+    # the full result dict. Piggybacks on the same session dict the run
+    # manifest consumed. Failing gracefully here matters because the
+    # pipeline may have produced partial output that the user still wants
+    # to see printed in their preferred verbosity.
+    if _skill is not None and isinstance(session, dict):
+        try:
+            _summary_result = {
+                "part_id": session.get("part_id") or session.get("spec", {}).get("part_id"),
+                "passed": bool(session.get("step_path") and
+                                 Path(session.get("step_path", "")).exists()),
+                "bbox_mm": session.get("bbox") or session.get("bbox_mm"),
+                "material": session.get("material"),
+                "cad_tool": session.get("cad_tool") or session.get("tool"),
+                "session_id": session.get("session_id"),
+                "run_id": _run_id,
+                "n_iterations": session.get("agent_iterations"),
+                "visual_confidence": session.get("visual_confidence"),
+                "llm_calls": session.get("llm_calls"),
+            }
+            print("\n" + _skill.format_summary(_summary_result))
+        except Exception as _se:
+            if os.environ.get("ARIA_DEBUG"):
+                print(f"[skill] summary formatter error: {_se}")
 
     # Exit code 1 if no geometry was produced (orchestrator already printed the reason)
     if isinstance(session, dict):

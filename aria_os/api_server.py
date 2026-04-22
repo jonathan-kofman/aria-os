@@ -22,6 +22,7 @@ from typing import Any, Optional
 try:
     from fastapi import FastAPI, HTTPException
     from fastapi.responses import JSONResponse
+    from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel, field_validator
     _HAS_FASTAPI = True
 except ImportError:
@@ -47,6 +48,22 @@ app = FastAPI(
     description="Generate mechanical CAD from natural-language descriptions.",
     version="1.0.0",
 )
+
+# CORS — required so the React panel loaded under a CAD plugin's WebView
+# (or a separate Vite dev server on a different port) can reach the API.
+# Allow all origins in dev; tighten via ARIA_CORS_ORIGINS env var in prod.
+if _HAS_FASTAPI:
+    _cors_raw = os.environ.get("ARIA_CORS_ORIGINS", "*").strip()
+    _origins = ["*"] if _cors_raw == "*" else [
+        o.strip() for o in _cors_raw.split(",") if o.strip()
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_credentials=False,  # "*" forbids credentials
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # ---------------------------------------------------------------------------
 # In-memory run log
