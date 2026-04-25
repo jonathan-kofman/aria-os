@@ -296,6 +296,7 @@ namespace AriaPanel
                 "sweep"           => OpSweep(doc, p),
                 "loft"            => OpLoft(doc, p),
                 "helix"           => OpHelix(doc, p),
+                "coil"            => OpCoil(doc, p),
                 "shell"           => OpShell(doc, p),
                 "threadFeature"   => OpThread(doc, p),
                 // W3: SDF mesh-import bridge
@@ -865,6 +866,71 @@ namespace AriaPanel
             return new { ok = true, id = alias, kind = "helix",
                           pitch_mm = pitch, height_mm = height, diameter_mm = dia,
                           turns };
+        }
+
+        // Coil: helix path + swept profile in one op. Used by helical
+        // spring plans where `section` references a previously-created
+        // sketch holding the wire profile (typically a small circle).
+        private static object OpCoil(RhinoDoc doc, JObject p)
+        {
+            var axisDir = ResolveAxisDir(p["axis"]?.ToString());
+            double pitch = p["pitch"]?.ToObject<double>()
+                           ?? throw new ArgumentException("coil requires pitch");
+            double dia = p["diameter"]?.ToObject<double>()
+                         ?? throw new ArgumentException("coil requires diameter");
+            int turns = p["turns"]?.ToObject<int>()
+                        ?? throw new ArgumentException("coil requires turns");
+            string sectionAlias = p["section"]?.ToString()
+                                  ?? throw new ArgumentException(
+                                      "coil requires section sketch alias");
+            if (!_sketchCurves.TryGetValue(sectionAlias, out var section)
+                || section == null)
+                throw new ArgumentException(
+                    $"No curve for coil section sketch {sectionAlias}");
+
+            string op = p["operation"]?.ToString() ?? "new";
+            string alias = p["alias"]?.ToString()
+                           ?? $"coil_{_featureRegistry.Count + 1}";
+
+            // Build the helix path. Radius point lives perpendicular to
+            // the axis so the spiral starts on the chosen radial vector.
+            var perp = Vector3d.CrossProduct(axisDir,
+                axisDir == Vector3d.ZAxis ? Vector3d.XAxis : Vector3d.ZAxis);
+            perp.Unitize();
+            var radiusPt = Point3d.Origin + perp * (dia / 2.0);
+            var spiral = NurbsCurve.CreateSpiral(
+                Point3d.Origin, axisDir, radiusPt,
+                pitch, turns, dia / 2.0, dia / 2.0);
+            if (spiral == null)
+                throw new InvalidOperationException(
+                    "Coil: CreateSpiral returned null");
+
+            // Move the section sketch onto a frame at the spiral start,
+            // perpendicular to the spiral tangent. Without this the
+            // sweep tries to use a section in the wrong plane and fails.
+            var sectionMoved = section.DuplicateCurve();
+            var startFrame = new Plane(spiral.PointAtStart,
+                spiral.TangentAtStart);
+            sectionMoved.Transform(
+                Transform.PlaneToPlane(Plane.WorldXY, startFrame));
+
+            var swept = Brep.CreateFromSweep(
+                spiral, sectionMoved,
+                closed: sectionMoved.IsClosed,
+                tolerance: doc.ModelAbsoluteTolerance);
+            if (swept == null || swept.Length == 0)
+                throw new InvalidOperationException(
+                    "Coil: sweep produced no result");
+            var brep = swept[0];
+            if (sectionMoved.IsClosed)
+                brep = brep.CapPlanarHoles(doc.ModelAbsoluteTolerance) ?? brep;
+
+            var newId = CommitBody(doc, brep, alias, op);
+            _featureRegistry[alias] = newId;
+            doc.Views.Redraw();
+            return new { ok = true, id = alias, kind = "coil",
+                          turns, pitch_mm = pitch, diameter_mm = dia,
+                          operation = op };
         }
 
         private static object OpShell(RhinoDoc doc, JObject p)

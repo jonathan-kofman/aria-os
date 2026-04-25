@@ -131,6 +131,38 @@ def _run_onshape(plan: Path, did: str, wid: str, eid: str,
     }
 
 
+def _run_rhino(plan: Path, rhino_exe: str, out_dir: Path) -> dict:
+    """Invoke Rhino headlessly with the AriaIntegrate command pre-armed.
+
+    Strategy: launch a fresh Rhino instance per plan with env vars set.
+    The plug-in's IntegrationRunnerCommand reads ARIA_INTEGRATION_PLAN /
+    ARIA_INTEGRATION_OUT at command time and writes summary.json.
+
+    `-runscript="-_AriaIntegrate _Exit"` runs the command (leading `-`
+    suppresses dialogs) and then closes Rhino so the subprocess returns.
+    """
+    plan_out = out_dir / "rhino" / plan.stem
+    plan_out.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "ARIA_INTEGRATION_PLAN": str(plan),
+        "ARIA_INTEGRATION_OUT":  str(plan_out),
+    }
+    cmd = [rhino_exe, "-nosplash",
+           "-runscript=-_AriaIntegrate _Exit"]
+    try:
+        subprocess.run(cmd, cwd=REPO_ROOT, env=env,
+                       capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return {"plan_id": plan.stem, "status": "timeout",
+                "elapsed_total_s": 600}
+    summary_path = plan_out / "summary.json"
+    if summary_path.is_file():
+        return json.loads(summary_path.read_text(encoding="utf-8"))
+    return {"plan_id": plan.stem, "status": "no_summary",
+            "n_ops": 0, "n_passed": 0, "n_failed": 0}
+
+
 def _stub_unavailable(host: str, reason: str) -> dict:
     return {
         "host":   host,
@@ -248,13 +280,40 @@ def main():
             plan_record["results"]["onshape"] = _stub_unavailable(
                 "onshape", host_status["onshape"]["reason"])
 
+        # Rhino — fully scriptable via -nosplash + -runscript. Launches
+        # a fresh Rhino per plan; ~10-15s overhead each but no manual
+        # clicking required.
+        if rhino_path:
+            print(f"[rhino]   {plan.name}...")
+            res = _run_rhino(plan, rhino_path, out_dir)
+            plan_record["results"]["rhino"] = {
+                "n_ops": res.get("n_ops", 0),
+                "n_passed": res.get("n_passed", 0),
+                "n_failed": res.get("n_failed", 0),
+                "failed_at": res.get("failed_at", -1),
+                "elapsed_total_s": res.get("elapsed_total_s", 0),
+            }
+            per_host_agg["rhino"]["n_plans"] += 1
+            per_host_agg["rhino"]["n_ops"] += res.get("n_ops", 0)
+            per_host_agg["rhino"]["n_passed"] += res.get("n_passed", 0)
+            per_host_agg["rhino"]["n_failed"] += res.get("n_failed", 0)
+            for op in (res.get("ops") or []):
+                if not op.get("ok"):
+                    first_failures.append({
+                        "host": "rhino", "plan_id": plan.stem,
+                        "op_seq": op.get("seq"), "op_kind": op.get("kind"),
+                        "error": (op.get("error") or "")[:300],
+                    })
+                    break
+        else:
+            plan_record["results"]["rhino"] = _stub_unavailable(
+                "rhino", host_status["rhino"]["reason"])
+
         # Fusion — needs the user to click "Run" inside the app for now.
-        # The aggregator writes the env hint file + waits up to 5min for
-        # summary.json to appear. CI / unattended path is W12.5 follow-up.
+        # Fusion's headless mode requires Manufacturing extension licensing
+        # we don't have; CI path is a W13 follow-up.
         plan_record["results"]["fusion"] = _stub_unavailable(
             "fusion", "manual: click Run on integration_runner inside Fusion")
-        plan_record["results"]["rhino"] = _stub_unavailable(
-            "rhino", "manual: !AriaIntegrate command inside Rhino")
         per_plan_results.append(plan_record)
 
     # Aggregate

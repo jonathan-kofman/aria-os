@@ -45,7 +45,13 @@ if ($Clean) {
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "OK Build succeeded." -ForegroundColor Green
-    Write-Host "   Plug-in installed at: $env:LOCALAPPDATA\AriaPanel\Rhino8\AriaPanel.rhp" -ForegroundColor Green
+    if ($DebugConfig) {
+        Write-Host "   Debug build at: bin\Debug\net7.0-windows\AriaPanel.rhp" -ForegroundColor Green
+        Write-Host "   (NOT auto-installed -- load manually for debugging, or use Release for normal use.)" -ForegroundColor DarkGray
+    } else {
+        Write-Host "   Plug-in installed at: $env:LOCALAPPDATA\AriaPanel\Rhino8\AriaPanel.rhp" -ForegroundColor Green
+        Write-Host "   Tip: type AriaReload in Rhino to refresh the WebView without rebuilding." -ForegroundColor DarkGray
+    }
 } else {
     Write-Host "ERR Build failed (exit $LASTEXITCODE)." -ForegroundColor Red
     exit $LASTEXITCODE

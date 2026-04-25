@@ -52,20 +52,48 @@ namespace AriaPanel
                 "ARIA_INTEGRATION_PLAN");
             if (string.IsNullOrEmpty(planPath) || !File.Exists(planPath))
             {
-                RhinoApp.WriteLine(
-                    $"[AriaIntegrate] ARIA_INTEGRATION_PLAN unset or not "
-                    + $"a file: {planPath}");
-                return Result.Failure;
+                // Interactive fallback: when env var unset, pop a file
+                // dialog so the dev can pick a plan JSON without
+                // restarting Rhino. Skipped in script-runmode so the
+                // automated cross-host runner still fails fast on
+                // misconfiguration instead of hanging on a dialog.
+                if (mode == RunMode.Interactive)
+                {
+                    var dlg = new Rhino.UI.OpenFileDialog
+                    {
+                        Title = "AriaIntegrate: choose plan JSON",
+                        Filter = "JSON plans (*.json)|*.json|All files (*.*)|*.*",
+                    };
+                    if (dlg.ShowOpenDialog())
+                    {
+                        planPath = dlg.FileName;
+                    }
+                    else
+                    {
+                        RhinoApp.WriteLine(
+                            "[AriaIntegrate] cancelled — no plan selected.");
+                        return Result.Cancel;
+                    }
+                }
+                else
+                {
+                    RhinoApp.WriteLine(
+                        $"[AriaIntegrate] ARIA_INTEGRATION_PLAN unset or not "
+                        + $"a file: {planPath}");
+                    return Result.Failure;
+                }
             }
 
             var outDir = Environment.GetEnvironmentVariable(
                 "ARIA_INTEGRATION_OUT");
             if (string.IsNullOrEmpty(outDir))
             {
+                // Rhino's default cwd is the install dir (read-only),
+                // so default to a writable per-user location.
                 var ts = DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ");
                 outDir = Path.Combine(
-                    Directory.GetCurrentDirectory(),
-                    "outputs", "integration", ts, "rhino");
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "AriaPanel", "integration", ts, "rhino");
             }
             Directory.CreateDirectory(outDir);
 

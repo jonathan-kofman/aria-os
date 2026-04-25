@@ -155,6 +155,41 @@ function _rhinoCall(action, payload = {}) {
 
 
 // --------------------------------------------------------------------
+// Onshape iframe adapter — postMessage to window.parent with _id reply
+// correlation. The outer iframe runs bridge-host.js (the host shell)
+// which receives messages, calls Onshape REST API, and posts replies
+// back as { _id, result } or { _id, error }.
+// --------------------------------------------------------------------
+
+function _onshapeCall(action, payload = {}) {
+  return new Promise((resolve, reject) => {
+    const id = `os_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const handler = (e) => {
+      try {
+        const data = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
+        if (!data || data._id !== id) return;
+        window.removeEventListener("message", handler);
+        if (data.error) reject(Object.assign(new Error(data.error), { code: "host" }));
+        else resolve(data.result);
+      } catch (err) { reject(err); }
+    };
+    window.addEventListener("message", handler);
+    try {
+      window.parent.postMessage({ action, _id: id, ...payload }, "*");
+    } catch (err) {
+      window.removeEventListener("message", handler);
+      reject(err);
+      return;
+    }
+    setTimeout(() => {
+      window.removeEventListener("message", handler);
+      reject(Object.assign(new Error("Onshape bridge timeout"), { code: "timeout" }));
+    }, 30000);
+  });
+}
+
+
+// --------------------------------------------------------------------
 // Public bridge surface — dispatches to whichever host was detected
 // --------------------------------------------------------------------
 
@@ -163,13 +198,7 @@ const _kind = detectHost();
 function _dispatch(action, payload = {}) {
   if (_kind === "fusion") return _fusionCall(action, payload);
   if (_kind === "rhino" || _kind === "solidworks") return _rhinoCall(action, payload);
-  if (_kind === "onshape") {
-    return new Promise((resolve, reject) => {
-      window.parent.postMessage({ action, ...payload }, "*");
-      // Onshape replies via a message event; minimal no-op resolver
-      resolve({ pending: true, host: "onshape" });
-    });
-  }
+  if (_kind === "onshape") return _onshapeCall(action, payload);
   return Promise.reject(NO_HOST_ERR());
 }
 

@@ -456,6 +456,89 @@ class OnshapeExecutor:
                  "pitch_mm": pitch, "height_mm": height,
                  "diameter_mm": dia, "onshape_id": fid}
 
+    def _op_coil(self, p: dict) -> dict:
+        """Coil = helix curve + sweep with section in one op.
+
+        Few-shot helical_spring uses this with `section` referencing a
+        previously-created sketch holding the wire profile (small circle).
+        Decomposes into a helix feature + a sweep feature internally so
+        the result is a single solid spring.
+        """
+        section_sk = self.sketches.get(p["section"])
+        if not section_sk:
+            raise ValueError(f"coil section sketch {p['section']!r} not found")
+        axis = (p.get("axis") or "Z").upper()
+        axis_id = {"X": "JCE", "Y": "JCD", "Z": "JCC"}.get(axis, "JCC")
+        pitch = float(p["pitch"])
+        turns = int(p["turns"])
+        height = pitch * turns
+        dia = float(p["diameter"])
+        alias = p.get("alias") or f"coil_{len(self.features) + 1}"
+
+        # Step 1: post the helix feature, get its fid for the sweep path.
+        helix_alias = f"_{alias}_path"
+        helix_feature = {
+            "btType": "BTMFeature-134",
+            "featureType": "helix",
+            "name": helix_alias,
+            "parameters": [
+                {"btType": "BTMParameterQueryList-148",
+                 "parameterId": "axis",
+                 "queries": [{
+                     "btType": "BTMIndividualQuery-138",
+                     "deterministicIds": [axis_id]}]},
+                {"btType": "BTMParameterEnum-145",
+                 "parameterId": "helixType",
+                 "enumName": "HelixType", "namespace": "",
+                 "value": "PITCH_HEIGHT"},
+                {"btType": "BTMParameterQuantity-147",
+                 "parameterId": "pitch",
+                 "expression": f"{pitch} mm",
+                 "value": pitch * _MM_TO_M, "units": "meter",
+                 "isInteger": False},
+                {"btType": "BTMParameterQuantity-147",
+                 "parameterId": "height",
+                 "expression": f"{height} mm",
+                 "value": height * _MM_TO_M, "units": "meter",
+                 "isInteger": False},
+                {"btType": "BTMParameterQuantity-147",
+                 "parameterId": "diameter",
+                 "expression": f"{dia} mm",
+                 "value": dia * _MM_TO_M, "units": "meter",
+                 "isInteger": False},
+            ],
+        }
+        helix_fid = self._add_feature(helix_feature, helix_alias)
+
+        # Step 2: sweep the section sketch along the helix.
+        op_enum = self._op_enum(p.get("operation", "new"))
+        sweep_feature = {
+            "btType": "BTMFeature-134",
+            "featureType": "sweep",
+            "name": alias,
+            "parameters": [
+                {"btType": "BTMParameterQueryList-148",
+                 "parameterId": "profiles",
+                 "queries": [{
+                     "btType": "BTMIndividualSketchRegionQuery-140",
+                     "featureId": section_sk["feature_id"]}]},
+                {"btType": "BTMParameterQueryList-148",
+                 "parameterId": "path",
+                 "queries": [{
+                     "btType": "BTMIndividualQuery-138",
+                     "deterministicIds": [helix_fid]}]},
+                {"btType": "BTMParameterEnum-145",
+                 "parameterId": "operationType",
+                 "enumName": "NewBodyOperationType", "namespace": "",
+                 "value": op_enum},
+            ],
+        }
+        fid = self._add_feature(sweep_feature, alias)
+        return {"id": alias, "kind": "coil",
+                "turns": turns, "pitch_mm": pitch, "diameter_mm": dia,
+                "operation": p.get("operation", "new"),
+                "onshape_id": fid, "helix_id": helix_fid}
+
     def _op_shell(self, p: dict) -> dict:
         body_alias = p["body"]
         body_fid = self.features.get(body_alias)

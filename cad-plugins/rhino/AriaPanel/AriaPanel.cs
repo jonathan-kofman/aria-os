@@ -40,12 +40,18 @@ namespace AriaPanel
         private AriaBridge? _bridge;
         private bool _webViewReady;
 
+        // Most-recently-constructed panel instance — used by AriaReload
+        // command to find the live WebView2 without going through Rhino's
+        // panel registry (which requires a doc-serial parameter).
+        internal static AriaPanelHost? Current { get; private set; }
+
         // -----------------------------------------------------------------
         // Construction
         // -----------------------------------------------------------------
 
         public AriaPanelHost()
         {
+            Current = this;
             InitView();
         }
 
@@ -70,12 +76,31 @@ namespace AriaPanel
         {
             try
             {
-                await WebView!.EnsureCoreWebView2Async();
+                // WebView2's default user-data folder lives next to the host
+                // executable. For Rhino that's C:\Program Files\Rhino 8\...
+                // which is read-only without admin → E_ACCESSDENIED. Point
+                // it at a writable per-user dir instead.
+                var userDataFolder = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "AriaPanel", "WebView2");
+                System.IO.Directory.CreateDirectory(userDataFolder);
+                var env = await CoreWebView2Environment.CreateAsync(
+                    browserExecutableFolder: null,
+                    userDataFolder: userDataFolder,
+                    options: null);
+                await WebView!.EnsureCoreWebView2Async(env);
 
                 var core = WebView.CoreWebView2;
 
-                // Disable context menu to keep the panel clean.
+                // Disable context menu in Release; keep it on for Debug
+                // so devs get right-click → Reload / Inspect element.
+#if DEBUG
+                core.Settings.AreDefaultContextMenusEnabled = true;
+                core.Settings.AreDevToolsEnabled = true;
+#else
                 core.Settings.AreDefaultContextMenusEnabled = false;
+                core.Settings.AreDevToolsEnabled = false;
+#endif
                 core.Settings.IsStatusBarEnabled = false;
 
                 // Inject ARIA_HOST_HINT so bridge.js confirms "rhino".
@@ -104,6 +129,25 @@ namespace AriaPanel
         /// Post a JSON message back to the WebView2 content.
         /// Must be called on the UI thread or via dispatcher.
         /// </summary>
+        /// <summary>
+        /// Reload the WebView2 content (re-fetches the dev-server URL).
+        /// Called by AriaReload command — useful when bridge.js or React
+        /// changed but the C# plug-in didn't, so a full Rhino restart is
+        /// overkill.
+        /// </summary>
+        internal void ReloadWebView()
+        {
+            if (!_webViewReady || WebView?.CoreWebView2 == null) return;
+            try
+            {
+                Dispatcher.Invoke(() => WebView.CoreWebView2.Reload());
+            }
+            catch (Exception ex)
+            {
+                RhinoApp.WriteLine($"[ARIA] Reload failed: {ex.Message}");
+            }
+        }
+
         internal void PostReply(string json)
         {
             if (!_webViewReady || WebView?.CoreWebView2 == null) return;
@@ -143,6 +187,33 @@ namespace AriaPanel
             RhinoDoc doc, Rhino.Commands.RunMode mode)
         {
             Panels.OpenPanel(typeof(AriaPanelHost).GUID);
+            return Rhino.Commands.Result.Success;
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // AriaReload — reloads the WebView2 content without rebuilding the
+    // .rhp. Useful when iterating on the React frontend or bridge.js
+    // and the C# plug-in itself didn't change.
+    // -----------------------------------------------------------------
+
+    [System.Runtime.InteropServices.Guid("4e8c1a52-9b3d-4f7e-a6c2-8d1e5b0f3a91")]
+    public class AriaReloadCommand : Rhino.Commands.Command
+    {
+        public override string EnglishName => "AriaReload";
+
+        protected override Rhino.Commands.Result RunCommand(
+            RhinoDoc doc, Rhino.Commands.RunMode mode)
+        {
+            var host = AriaPanelHost.Current;
+            if (host == null)
+            {
+                RhinoApp.WriteLine(
+                    "[ARIA] No panel open — run AriaGenerate first.");
+                return Rhino.Commands.Result.Failure;
+            }
+            host.ReloadWebView();
+            RhinoApp.WriteLine("[ARIA] Panel reloaded.");
             return Rhino.Commands.Result.Success;
         }
     }

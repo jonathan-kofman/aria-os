@@ -2528,14 +2528,18 @@ export default function ChatPanel() {
  */
 function EmptyState() {
   const suggestions = [
-    { icon: "◎", title: "Flange",   hint: "100mm OD, 4 M6 bolts on 80mm PCD, 6mm thick",
+    { icon: "◎", title: "Flange",
       prompt: "flange 100mm OD, 4 M6 holes on 80mm PCD, 6mm thick, 6061 aluminum" },
-    { icon: "⌐", title: "Bracket",  hint: "L-shape, 4 mounting holes, aluminum",
+    { icon: "⌐", title: "Bracket",
       prompt: "L-bracket 80x60x40mm, 5mm wall, 4 M5 mounting holes" },
-    { icon: "✷", title: "Gear",     hint: "involute tooth, keyed bore",
+    { icon: "✷", title: "Gear",
       prompt: "involute gear 30 tooth, module 1.5, 10mm bore with keyway" },
-    { icon: "❋", title: "Impeller", hint: "backward-curved blades, open face",
+    { icon: "❋", title: "Impeller",
       prompt: "impeller 120mm OD, 6 backward-curved blades, 20mm bore" },
+    { icon: "◴", title: "Shaft",
+      prompt: "stepped shaft 200mm long, 20mm dia center, 12mm dia ends, keyway" },
+    { icon: "⬡", title: "Housing",
+      prompt: "rectangular housing 120x80x40mm, 3mm wall, lid with M4 screw bosses" },
   ];
 
   const fillInput = (text) => {
@@ -2550,16 +2554,18 @@ function EmptyState() {
 
   return (
     <div style={{
-      marginTop: "12vh",
       textAlign: "center",
       padding: "0 8px",
+      // No vh-offset — let parent flex centering position this. The
+      // earlier `marginTop: 12vh` collided with the parent's
+      // justifyContent:center and pushed content off-screen in shorter
+      // iframes (Onshape Element tab).
     }}>
-      {/* Centered serif heading — the soul of Claude's page */}
       <h1 style={{
-        margin: "0 0 36px",
-        fontSize: "clamp(26px, 4vw, 38px)",
+        margin: "0 0 28px",
+        fontSize: "clamp(22px, 3.2vw, 32px)",
         fontWeight: 400,
-        fontStyle: "italic",                  // claude.ai's headline italic
+        fontStyle: "italic",
         color: THEME.text,
         letterSpacing: "-0.02em",
         lineHeight: 1.15,
@@ -2570,53 +2576,48 @@ function EmptyState() {
         {bridge.isHosted ? `, ${bridge.kind}?` : "?"}
       </h1>
 
-      {/* 2×2 suggestion grid — icon + title + muted hint */}
+      {/* Horizontal pill chips — wrap to multiple rows on narrow panels.
+          Each chip is icon + label, single line, low visual weight so
+          the prompt input stays the focal point. */}
       <div style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-        gap: 10,
-        maxWidth: 620,
+        display: "flex",
+        flexWrap: "wrap",
+        justifyContent: "center",
+        gap: 8,
+        maxWidth: 560,
         margin: "0 auto",
-        textAlign: "left",
       }}>
         {suggestions.map((s, i) => (
           <button key={i}
             onClick={() => fillInput(s.prompt)}
+            title={s.prompt}
             style={{
-              display: "flex", alignItems: "flex-start", gap: 12,
-              padding: "14px 16px",
+              display: "inline-flex", alignItems: "center", gap: 8,
+              padding: "7px 14px 7px 12px",
               background: THEME.bgRaised,
               border: `1px solid ${THEME.border}`,
-              borderRadius: 14,
+              borderRadius: 100,
               color: THEME.text, cursor: "pointer",
               fontFamily: "inherit",
-              boxShadow: THEME.shadowXs,
-              transition: "border-color 0.15s, transform 0.12s, box-shadow 0.15s",
+              fontSize: 13,
+              transition: "border-color 0.15s, background 0.15s, transform 0.12s",
             }}
             onMouseEnter={e => {
               e.currentTarget.style.borderColor = THEME.borderHi;
-              e.currentTarget.style.boxShadow = THEME.shadowSm;
+              e.currentTarget.style.background = THEME.bgCode;
             }}
             onMouseLeave={e => {
               e.currentTarget.style.borderColor = THEME.border;
-              e.currentTarget.style.boxShadow = THEME.shadowXs;
+              e.currentTarget.style.background = THEME.bgRaised;
             }}
-            onMouseDown={e => { e.currentTarget.style.transform = "scale(0.985)"; }}
+            onMouseDown={e => { e.currentTarget.style.transform = "scale(0.97)"; }}
             onMouseUp={e => { e.currentTarget.style.transform = "none"; }}
           >
             <span style={{
-              fontSize: 22, lineHeight: 1, color: THEME.accent,
-              flexShrink: 0, marginTop: 2, fontFamily: FONT_SERIF,
+              fontSize: 14, lineHeight: 1, color: THEME.accent,
+              flexShrink: 0, fontFamily: FONT_SERIF,
             }}>{s.icon}</span>
-            <span style={{ flex: 1, minWidth: 0 }}>
-              <div style={{
-                fontWeight: 500, fontSize: 15, marginBottom: 3,
-                color: THEME.text,
-              }}>{s.title}</div>
-              <div style={{
-                fontSize: 13, color: THEME.muted, lineHeight: 1.4,
-              }}>{s.hint}</div>
-            </span>
+            <span style={{ fontWeight: 500 }}>{s.title}</span>
           </button>
         ))}
       </div>
