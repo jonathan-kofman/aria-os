@@ -49,9 +49,10 @@ import traceback
 import webbrowser
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse, Response
 from pydantic import BaseModel
+import httpx
 import uvicorn
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -75,12 +76,29 @@ def _lazy_imports():
 PANEL_URL = os.environ.get("ARIA_PANEL_URL",
                            "http://localhost:5173/?host=onshape")
 
+# Where the ARIA planner backend (dashboard/aria_server.py) lives.
+# We proxy /api/* (other than /api/onshape/*) to this base so the
+# panel's fetches go through our same origin -- no CORS, no broken
+# absolute URLs inside the cloudflared iframe.
+ARIA_API_BASE = os.environ.get("ARIA_API_BASE", "http://127.0.0.1:8000")
+
 
 # -----------------------------------------------------------------------
 # FastAPI app
 # -----------------------------------------------------------------------
 
 app = FastAPI(title="ARIA Onshape App Server")
+
+# CORS: the React panel runs at localhost:5173 (Vite dev) but its
+# fetches need to reach this server (which holds the proxy + the
+# Onshape exec endpoints). For a personal-dev tool we allow all
+# origins. Production would lock this to the tunnel URL only.
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=False,
+    allow_methods=["*"], allow_headers=["*"],
+)
 
 # Per-(did,wid,eid) executor cache so feature alias registries persist
 # across calls within a session. Bridge-host.js sends did/wid/eid on
@@ -139,6 +157,74 @@ def onshape_reset(req: ExecRequest):
     n = _reset_studio(client, req.did, req.wid, req.eid)
     _executor_cache.pop((req.did, req.wid, req.eid), None)
     return {"ok": True, "deleted": n}
+
+
+# -----------------------------------------------------------------------
+# Proxy: forward /api/* (except /api/onshape/*) to the ARIA backend.
+# The React panel calls /api/generate, /api/run, /api/parts, /api/log/stream
+# etc. -- they all live in dashboard/aria_server.py on port 8000 by default.
+# Streaming responses (SSE on /api/generate, /api/run/{id}/stream) flow
+# through unbuffered so the panel sees native_op events live.
+# -----------------------------------------------------------------------
+
+# One async client kept for the lifetime of the server. timeout=None lets
+# SSE connections hang as long as the upstream wants.
+_proxy_client = httpx.AsyncClient(timeout=None)
+
+
+@app.api_route("/api/{path:path}",
+               methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+async def proxy_aria_api(path: str, request: Request):
+    # Onshape-specific endpoints handled inline above; reject here so we
+    # don't accidentally double-route them via this catch-all.
+    if path.startswith("onshape/"):
+        raise HTTPException(404, f"Not found: /api/{path}")
+
+    target = f"{ARIA_API_BASE}/api/{path}"
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+
+    # Drop hop-by-hop headers and host so httpx sets its own.
+    skip = {"host", "connection", "keep-alive", "proxy-authenticate",
+            "proxy-authorization", "te", "trailers", "transfer-encoding",
+            "upgrade", "content-length"}
+    fwd_headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in skip}
+
+    body = await request.body()
+
+    # Build the upstream request and stream its response. For SSE this
+    # keeps the connection open and pumps chunks back unbuffered.
+    upstream_req = _proxy_client.build_request(
+        request.method, target,
+        headers=fwd_headers,
+        content=body if body else None)
+
+    try:
+        upstream_resp = await _proxy_client.send(upstream_req, stream=True)
+    except httpx.ConnectError:
+        raise HTTPException(502,
+            f"ARIA backend unreachable at {ARIA_API_BASE}. Is "
+            f"`python dashboard/aria_server.py` running?")
+
+    # Strip headers that would conflict with FastAPI's own framing.
+    resp_headers = {k: v for k, v in upstream_resp.headers.items()
+                    if k.lower() not in
+                    {"content-encoding", "content-length",
+                     "transfer-encoding", "connection"}}
+
+    async def body_stream():
+        try:
+            async for chunk in upstream_resp.aiter_raw():
+                yield chunk
+        finally:
+            await upstream_resp.aclose()
+
+    return StreamingResponse(
+        body_stream(),
+        status_code=upstream_resp.status_code,
+        headers=resp_headers,
+        media_type=upstream_resp.headers.get("content-type"))
 
 
 # -----------------------------------------------------------------------
@@ -266,8 +352,16 @@ OUTER_HTML_TEMPLATE = """\
   // Pass host=onshape so bridge.js detects the iframe context.
   // Pass DID/WID/EID as query so bridge-host (this script) has them
   // when it forwards executeFeature calls.
-  frame.src = "__PANEL_URL__" +
-    (window.location.search ? "&" + window.location.search.slice(1) : "");
+  // Tell the inner panel to fetch all /api/* through THIS origin so
+  // the proxy can forward to the ARIA backend. Without this the panel
+  // would call localhost:5173/api/... which doesn't exist.
+  const apiBase = window.location.origin + "/api";
+  const sep = "__PANEL_URL__".includes("?") ? "&" : "?";
+  let innerSrc = "__PANEL_URL__" + sep + "api=" + encodeURIComponent(apiBase);
+  if (window.location.search) {
+    innerSrc += "&" + window.location.search.slice(1);
+  }
+  frame.src = innerSrc;
 
   // --- 3. Bridge-host: receive postMessage from panel, proxy to backend ---
   async function dispatch(action, payload) {
