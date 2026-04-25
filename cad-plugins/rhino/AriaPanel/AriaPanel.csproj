@@ -26,7 +26,36 @@
       RhinoCommon NuGet is enough — Rhino supplies the real one at runtime.
     -->
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <!-- Canonical Rhino 8 plug-in package directory. Every build
+         syncs the .rhp + its deps here so Rhino auto-discovers
+         the latest version on next launch — no drag-drop, no
+         "ID already in use" duplication. -->
+    <RhinoPluginInstallDir>$(APPDATA)\McNeel\Rhinoceros\packages\8.0\AriaPanel</RhinoPluginInstallDir>
   </PropertyGroup>
+
+  <!-- Post-build sync: copy the entire output dir to the Rhino
+       package location AND delete the bin/Release/.rhp so there
+       is only ever ONE AriaPanel.rhp on disk. Runs only on Release
+       (Debug builds stay in bin/Debug for IDE debugging). -->
+  <Target Name="SyncToRhinoPackages"
+          AfterTargets="Build"
+          Condition="'$(Configuration)' == 'Release' AND '$(OS)' == 'Windows_NT'">
+    <ItemGroup>
+      <_RhinoOutputs Include="$(OutputPath)**\*" />
+    </ItemGroup>
+    <MakeDir Directories="$(RhinoPluginInstallDir)" />
+    <RemoveDir Directories="$(RhinoPluginInstallDir)\runtimes"
+               ContinueOnError="true" />
+    <Delete Files="$(RhinoPluginInstallDir)\AriaPanel.rhp;$(RhinoPluginInstallDir)\AriaPanel.pdb;$(RhinoPluginInstallDir)\AriaPanel.deps.json;$(RhinoPluginInstallDir)\Newtonsoft.Json.dll;$(RhinoPluginInstallDir)\Microsoft.Web.WebView2.Core.dll;$(RhinoPluginInstallDir)\Microsoft.Web.WebView2.WinForms.dll;$(RhinoPluginInstallDir)\Microsoft.Web.WebView2.Wpf.dll"
+            ContinueOnError="true" />
+    <Copy SourceFiles="@(_RhinoOutputs)"
+          DestinationFiles="@(_RhinoOutputs->'$(RhinoPluginInstallDir)\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true"
+          OverwriteReadOnlyFiles="true" />
+    <Delete Files="$(OutputPath)AriaPanel.rhp" ContinueOnError="true" />
+    <Message Importance="high"
+             Text="✓ AriaPanel.rhp synced to: $(RhinoPluginInstallDir)" />
+  </Target>
 
   <ItemGroup>
     <!-- RhinoCommon SDK (Rhino 8 / .NET 7).

@@ -7,9 +7,12 @@ using System.Runtime.InteropServices;
 using Rhino.PlugIns;
 
 // Unique plugin id — must match what Rhino uses to identify the plugin.
-// Real random UUIDv4 (was a placeholder UUIDv7 pattern that some
-// loaders reject when validating version bits).
-[assembly: Guid("cb47750c-49dd-442e-a5f4-53217755539a")]
+// Real random UUIDv4. Bumped 2x: first from a placeholder UUIDv7
+// pattern, then again because Rhino had cached the previous GUID
+// from a failed-load attempt with stale path metadata. If you change
+// this again you MUST first disable+remove the old AriaPanel entry
+// from Rhino's Plug-ins manager (Tools → Options → Plug-ins).
+[assembly: Guid("6a1966a7-be24-4814-8066-47393d3c1806")]
 
 // PlugInDescription fills the "About" box in Rhino's plugin manager
 [assembly: PlugInDescription(DescriptionType.Organization, "ARIA-OS")]

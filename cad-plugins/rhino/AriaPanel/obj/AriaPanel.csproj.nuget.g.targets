@@ -1,7 +1,0 @@
-﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<Project ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <ImportGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
-    <Import Project="$(NuGetPackageRoot)rhinocommon\8.30.26103.11001\buildTransitive\net7.0\RhinoCommon.targets" Condition="Exists('$(NuGetPackageRoot)rhinocommon\8.30.26103.11001\buildTransitive\net7.0\RhinoCommon.targets')" />
-    <Import Project="$(NuGetPackageRoot)microsoft.web.webview2\1.0.3912.50\buildTransitive\Microsoft.Web.WebView2.targets" Condition="Exists('$(NuGetPackageRoot)microsoft.web.webview2\1.0.3912.50\buildTransitive\Microsoft.Web.WebView2.targets')" />
-  </ImportGroup>
-</Project>

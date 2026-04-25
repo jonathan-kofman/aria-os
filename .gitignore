@@ -56,3 +56,10 @@ diy-fab-session.sqlite
 .audit/
 .tools/
 candidate.step
+
+# Rhino plug-in build artifacts — the .rhp + deps are auto-installed
+# into %APPDATA%\McNeel\Rhinoceros\packages\8.0\AriaPanel\ by the
+# csproj's SyncToRhinoPackages target on every Release build. The
+# bin/Release/ tree is regenerable; never commit.
+cad-plugins/rhino/AriaPanel/bin/
+cad-plugins/rhino/AriaPanel/obj/
