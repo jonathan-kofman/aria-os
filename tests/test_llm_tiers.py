@@ -20,83 +20,96 @@ class TestQualityTiers:
         self.calls: list[str] = []
 
     def _patch_all_none(self, monkeypatch):
-        """Patch every backend to return None so call_llm walks the full chain."""
+        """Patch every backend to return None so call_llm walks the full chain.
+        Groq was added to the chain post-eval-fix; it must be patched here
+        too or the real Groq backend answers before the mocks."""
         def make(name):
             def _fn(*a, **k):
                 self.calls.append(name)
                 return None
             return _fn
+        monkeypatch.setattr(llm_client, "_try_groq", make("groq"))
         monkeypatch.setattr(llm_client, "_try_anthropic", make("anthropic"))
         monkeypatch.setattr(llm_client, "_try_gemini", make("gemini"))
         monkeypatch.setattr(llm_client, "_try_gemma", make("gemma"))
         monkeypatch.setattr(llm_client, "_try_ollama", make("ollama"))
 
     def test_balanced_default_order(self, monkeypatch):
-        """Default tier: Gemini → Gemma → Sonnet → Ollama.
-        This is the leak-fix we shipped — verify Anthropic is NOT first."""
+        """Default tier: Groq → Gemini → Gemma → Sonnet → Ollama.
+        Groq is the cost-conscious primary (free + sub-second + tool_use);
+        Anthropic stays in the chain but never first."""
         self._patch_all_none(monkeypatch)
         result = llm_client.call_llm("test", "sys")
         assert result is None
-        assert self.calls == ["gemini", "gemma", "anthropic", "ollama"]
+        assert self.calls == ["groq", "gemini", "gemma", "anthropic", "ollama"]
         # crucial: anthropic must NOT be first
         assert self.calls[0] != "anthropic"
 
     def test_fast_tier_order(self, monkeypatch):
         self._patch_all_none(monkeypatch)
         llm_client.call_llm("test", quality="fast")
-        assert self.calls == ["gemini", "gemma", "ollama", "anthropic"]
-        # fast tier uses cheap models — anthropic is LAST resort
+        assert self.calls == ["groq", "gemini", "gemma", "ollama", "anthropic"]
+        # fast tier — anthropic is LAST resort
         assert self.calls[-1] == "anthropic"
 
     def test_premium_tier_order(self, monkeypatch):
         self._patch_all_none(monkeypatch)
         llm_client.call_llm("test", quality="premium")
-        assert self.calls == ["anthropic", "gemini", "gemma", "ollama"]
+        # Premium: quality first → Anthropic Sonnet, then Gemini, then
+        # Groq as a free fallback, then Gemma/Ollama.
+        assert self.calls == ["anthropic", "gemini", "groq", "gemma", "ollama"]
 
     def test_unknown_quality_falls_back_to_balanced(self, monkeypatch):
         self._patch_all_none(monkeypatch)
         llm_client.call_llm("test", quality="nonsense")
-        assert self.calls[0] == "gemini"  # balanced
+        # Balanced now starts with Groq
+        assert self.calls[0] == "groq"
 
     def test_chain_short_circuits_on_success(self, monkeypatch):
         """Once a backend returns a string, the rest are not called."""
-        def gemini_ok(*a, **k):
-            self.calls.append("gemini")
+        def groq_ok(*a, **k):
+            self.calls.append("groq")
             return "cadquery code here"
         def others(name):
             def _fn(*a, **k):
                 self.calls.append(name)
                 return None
             return _fn
-        monkeypatch.setattr(llm_client, "_try_gemini", gemini_ok)
+        monkeypatch.setattr(llm_client, "_try_groq", groq_ok)
+        monkeypatch.setattr(llm_client, "_try_gemini", others("gemini"))
         monkeypatch.setattr(llm_client, "_try_anthropic", others("anthropic"))
         monkeypatch.setattr(llm_client, "_try_gemma", others("gemma"))
         monkeypatch.setattr(llm_client, "_try_ollama", others("ollama"))
         result = llm_client.call_llm("test")
         assert result == "cadquery code here"
-        assert self.calls == ["gemini"]  # no further calls
+        # Balanced chain starts at groq; once it returns, no further calls.
+        assert self.calls == ["groq"]
 
     def test_exception_in_backend_doesnt_halt_chain(self, monkeypatch):
         """A throwing backend should NOT halt the chain — we try the next one."""
-        def anthropic_raises(*a, **k):
-            self.calls.append("anthropic")
-            raise RuntimeError("api down")
+        def groq_raises(*a, **k):
+            self.calls.append("groq")
+            raise ConnectionError("groq dns")
         def gemini_raises(*a, **k):
             self.calls.append("gemini")
             raise ConnectionError("dns")
         def gemma_ok(*a, **k):
             self.calls.append("gemma")
             return "result from gemma"
-        def ollama_fake(*a, **k):
-            self.calls.append("ollama")
-            return None
-        monkeypatch.setattr(llm_client, "_try_anthropic", anthropic_raises)
+        def others(name):
+            def _fn(*a, **k):
+                self.calls.append(name)
+                return None
+            return _fn
+        monkeypatch.setattr(llm_client, "_try_groq", groq_raises)
         monkeypatch.setattr(llm_client, "_try_gemini", gemini_raises)
         monkeypatch.setattr(llm_client, "_try_gemma", gemma_ok)
-        monkeypatch.setattr(llm_client, "_try_ollama", ollama_fake)
+        monkeypatch.setattr(llm_client, "_try_anthropic", others("anthropic"))
+        monkeypatch.setattr(llm_client, "_try_ollama", others("ollama"))
         r = llm_client.call_llm("test", quality="balanced")
         assert r == "result from gemma"
         # all 3 prior backends were attempted despite raising
+        assert "groq" in self.calls
         assert "gemini" in self.calls
         assert "gemma" in self.calls
 
