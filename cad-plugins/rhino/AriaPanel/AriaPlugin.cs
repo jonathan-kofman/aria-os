@@ -49,8 +49,22 @@ namespace AriaPanel
             }
             catch (Exception ex)
             {
-                errorMessage = $"ARIA plugin failed to load: {ex.Message}";
-                return LoadReturnCode.ErrorNoDialog;
+                // Surface the FULL exception (incl. inner type/stack) via
+                // errorMessage so Rhino's plug-in load dialog shows a
+                // diagnosable error instead of "unable to load".
+                // Use ErrorShowDialog so it ACTUALLY surfaces — the prior
+                // ErrorNoDialog return code suppressed the dialog and
+                // left the user staring at a silently-failed plug-in.
+                var inner = ex.InnerException;
+                errorMessage = $"ARIA plugin OnLoad failed: {ex.GetType().Name}: {ex.Message}";
+                while (inner != null)
+                {
+                    errorMessage += $"\n  -> {inner.GetType().Name}: {inner.Message}";
+                    inner = inner.InnerException;
+                }
+                Rhino.RhinoApp.WriteLine(errorMessage);
+                Rhino.RhinoApp.WriteLine($"Stack: {ex.StackTrace}");
+                return LoadReturnCode.ErrorShowDialog;
             }
         }
     }

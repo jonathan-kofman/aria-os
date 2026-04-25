@@ -21,6 +21,7 @@ namespace AriaPanel
     /// <summary>
     /// WPF UserControl that Rhino docks as a panel.
     /// </summary>
+    [System.Runtime.InteropServices.Guid("609b1ead-2a09-4136-9754-766e6f993fa3")]
     public class AriaPanelHost : UserControl
     {
         // -----------------------------------------------------------------
