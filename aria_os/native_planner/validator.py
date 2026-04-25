@@ -29,6 +29,10 @@ _VALID_KINDS = {
     "meshImportAndCombine",
     # Assembly
     "asmBegin", "addComponent", "joint",
+    # W4: real assembly mates + motion drivers
+    "mateConcentric", "mateCoincident", "mateDistance",
+    "mateAngle", "mateGear", "mateSlider", "mateSlot",
+    "motionRevolute", "motionPrismatic", "motionContact",
     # Drawing
     "beginDrawing", "newSheet", "addView", "addTitleBlock",
     "drawingAutoDim",
@@ -84,6 +88,21 @@ _REQUIRED_PARAMS = {
     "implicitField":    {"expr", "bounds", "operation"},
     "implicitBoolean":  {"sdf_a", "sdf_b", "op"},
     "meshImportAndCombine": {"stl_path", "target", "operation"},
+    # W4: assembly mates — every mate references at least 2 parts.
+    # parts is a list of strings of the form "<component_id>" or
+    # "<component_id>.<connector>" (e.g. "sun.axis", "carrier.pin_1").
+    "mateConcentric":   {"parts"},
+    "mateCoincident":   {"parts"},
+    "mateDistance":     {"parts", "distance"},
+    "mateAngle":        {"parts", "angle"},
+    "mateGear":         {"parts", "ratio"},
+    "mateSlider":       {"parts", "axis"},
+    "mateSlot":         {"parts"},
+    "motionRevolute":   {"joint"},
+    "motionPrismatic":  {"joint"},
+    "motionContact":    {"parts"},
+    # asmBegin / addComponent need their own light schema
+    "addComponent":     {"id", "type"},
 }
 
 # Operation modes accepted by ops that combine with existing geometry.
@@ -95,12 +114,19 @@ def validate_plan(plan: list[dict]) -> tuple[bool, list[str]]:
     issues: list[str] = []
     if not plan:
         return False, ["Plan is empty"]
-    if plan[0].get("kind") != "beginPlan":
+    if plan[0].get("kind") not in ("beginPlan", "asmBegin",
+                                    "beginDrawing", "beginElectronics",
+                                    "beginBoard"):
         issues.append(
-            f"First op must be beginPlan (got {plan[0].get('kind')!r})")
+            f"First op must be beginPlan / asmBegin / beginDrawing / "
+            f"beginElectronics / beginBoard (got {plan[0].get('kind')!r})")
 
     sketch_aliases: set[str] = set()
     feature_aliases: set[str] = set()
+    # W4: assembly scope — components declared via addComponent.
+    # Mate ops reference them by id; cross-checked here.
+    component_ids: set[str] = set()
+    in_asm_mode = False
     # Track the operation mode of each extrude alias so we can catch
     # semantic gotchas like "circularPattern a 'new' body" (which rotates
     # the full part around Z and produces a no-op).
@@ -467,6 +493,93 @@ def validate_plan(plan: list[dict]) -> tuple[bool, list[str]]:
             alias = params.get("alias")
             if alias:
                 feature_aliases.add(alias)
+
+        # W4: assembly scope ops.
+        elif kind == "asmBegin":
+            in_asm_mode = True
+            saw_new_body = True   # asmBegin counts as having a "body context"
+
+        elif kind == "addComponent":
+            cid = params.get("id")
+            ctype = params.get("type")
+            if not cid or not ctype:
+                issues.append(
+                    f"Op #{i}: addComponent requires id + type")
+            else:
+                if cid in component_ids:
+                    issues.append(
+                        f"Op #{i}: component id {cid!r} already declared")
+                component_ids.add(cid)
+            saw_new_body = True
+
+        elif kind in ("mateConcentric", "mateCoincident", "mateDistance",
+                      "mateAngle", "mateGear", "mateSlider", "mateSlot"):
+            parts = params.get("parts") or []
+            if not isinstance(parts, list) or len(parts) < 2:
+                issues.append(
+                    f"Op #{i}: {kind} requires ≥2 parts (got {parts!r})")
+            else:
+                # Each part is "<component_id>" or "<component_id>.<connector>"
+                for part_ref in parts:
+                    if not isinstance(part_ref, str):
+                        issues.append(
+                            f"Op #{i}: {kind} part ref must be string "
+                            f"(got {part_ref!r})")
+                        continue
+                    cid = part_ref.split(".", 1)[0]
+                    if component_ids and cid not in component_ids:
+                        issues.append(
+                            f"Op #{i}: {kind} references unknown "
+                            f"component {cid!r} (declared: "
+                            f"{sorted(component_ids)[:5]}…)")
+            if kind == "mateDistance":
+                try:
+                    d = float(params.get("distance"))
+                except (TypeError, ValueError):
+                    issues.append(
+                        f"Op #{i}: mateDistance distance not numeric")
+            if kind == "mateAngle":
+                try:
+                    a = float(params.get("angle"))
+                    if not (-360 <= a <= 360):
+                        issues.append(
+                            f"Op #{i}: mateAngle angle {a}° out of [-360, 360]")
+                except (TypeError, ValueError):
+                    issues.append(
+                        f"Op #{i}: mateAngle angle not numeric")
+            if kind == "mateGear":
+                try:
+                    r = float(params.get("ratio"))
+                    if r == 0:
+                        issues.append(f"Op #{i}: mateGear ratio cannot be 0")
+                except (TypeError, ValueError):
+                    issues.append(
+                        f"Op #{i}: mateGear ratio not numeric")
+            if kind == "mateSlider":
+                ax = (params.get("axis") or "").upper()
+                if ax not in ("X", "Y", "Z") and not isinstance(
+                        params.get("axis"), list):
+                    issues.append(
+                        f"Op #{i}: mateSlider axis must be X/Y/Z or "
+                        f"a 3-vector (got {params.get('axis')!r})")
+
+        elif kind in ("motionRevolute", "motionPrismatic", "motionContact"):
+            if kind != "motionContact":
+                joint_ref = params.get("joint")
+                if not isinstance(joint_ref, str) or not joint_ref:
+                    issues.append(
+                        f"Op #{i}: {kind} requires a joint reference")
+                else:
+                    cid = joint_ref.split(".", 1)[0]
+                    if component_ids and cid not in component_ids:
+                        issues.append(
+                            f"Op #{i}: {kind} joint {joint_ref!r} "
+                            f"references unknown component {cid!r}")
+            if kind == "motionContact":
+                parts = params.get("parts") or []
+                if not isinstance(parts, list) or len(parts) < 2:
+                    issues.append(
+                        f"Op #{i}: motionContact requires ≥2 parts")
 
         elif kind == "gearFeature":
             try:

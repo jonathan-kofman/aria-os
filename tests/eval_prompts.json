@@ -109,6 +109,14 @@
     {"id": "topology_cantilever", "goal": "topology-optimized cantilever beam, 100x40x20mm, 200N load at the tip, fixed at the base, 50% mass target",
      "expected_ops_any": ["implicitField", "implicitInfill"]},
     {"id": "femoral_stem", "goal": "titanium femoral implant stem, 20mm OD distal, 25mm OD proximal, 80mm long, with osseointegration porosity gradient 30 to 70 percent",
-     "expected_ops_any": ["implicitInfill", "implicitLattice", "implicitField"]}
+     "expected_ops_any": ["implicitInfill", "implicitLattice", "implicitField"]},
+    {"id": "planetary_4to1", "goal": "planetary gearbox 4:1, 3 planets, NEMA17 input, module 1.5",
+     "expected_ops_any": ["addComponent", "mateConcentric", "mateGear"]},
+    {"id": "six_dof_arm", "goal": "6-DOF robot arm RRRRRR, 600mm reach, 2kg payload",
+     "expected_ops_any": ["addComponent", "motionRevolute"]},
+    {"id": "scotch_yoke_50", "goal": "scotch yoke linkage, 50mm stroke, 1500 RPM input",
+     "expected_ops_any": ["addComponent", "mateSlider", "mateSlot", "motionRevolute"]},
+    {"id": "parallel_gripper_40", "goal": "two-jaw parallel gripper, 40mm travel, M3 mounting flange",
+     "expected_ops_any": ["addComponent", "mateSlider", "motionPrismatic"]}
   ]
 }

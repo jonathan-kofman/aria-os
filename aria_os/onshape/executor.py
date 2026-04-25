@@ -570,6 +570,130 @@ class OnshapeExecutor:
         # requires registering the FS module against the part studio.
         return {"skipped": "gearFeature needs FS module — coming soon"}
 
+    # ------------------------------------------------------------------
+    # W4: assembly mates — Onshape distinguishes between Part Studio
+    # features (sketches/extrudes) and Assembly features (instances +
+    # mates). When a plan includes asmBegin, the executor switches to
+    # assembly-tab POSTs.
+    #
+    # Onshape's assembly mate API uses BTAssemblyFeature with featureType
+    # 'mate' and a `mateType` enum: FASTENED (rigid), REVOLUTE,
+    # SLIDER, CYLINDRICAL, PIN_SLOT, PLANAR, BALL, PARALLEL.
+    #
+    # Best-effort wiring: the geometry queries inside each mate need
+    # mate connector references that exist on each instance. We accept
+    # part_ref strings from the planner ("gear_a.axis") and pass them
+    # through as logical names — the host resolves them at apply time.
+    # ------------------------------------------------------------------
+
+    def _op_asmBegin(self, _p: dict) -> dict:
+        """Onshape: switch executor into assembly-tab mode. Real impl
+        would create a new Assembly element if none exists; MVP just
+        clears the registry so subsequent addComponent ops know they
+        produce instances rather than features."""
+        self.sketches.clear()
+        self.features.clear()
+        return {"stage": "assembly", "registry_cleared": True}
+
+    def _op_addComponent(self, p: dict) -> dict:
+        """Insert a part instance into the assembly tab. Real impl
+        calls POST /api/assemblies/d/{did}/w/{wid}/e/{eid}/instances
+        with documentId + elementId of the part. MVP records the
+        component id in the local registry so mate ops can validate
+        their part_ref strings."""
+        cid = p.get("id")
+        ctype = p.get("type")
+        if not cid:
+            raise ValueError("addComponent requires id")
+        # Stash the type in the features dict so mate-validation finds it.
+        self.features[cid] = f"comp:{ctype}"
+        return {"id": cid, "type": ctype, "kind": "component_instance"}
+
+    def _mate_payload(self, mate_type: str, parts: list[str],
+                       extra: dict | None = None) -> dict:
+        """Common BTAssemblyFeature envelope for mate ops."""
+        params = [
+            {"btType": "BTMParameterEnum-145",
+             "parameterId": "mateType",
+             "enumName": "MateType", "namespace": "",
+             "value": mate_type},
+            {"btType": "BTMParameterArray-2025",
+             "parameterId": "mateConnectorsQuery",
+             "items": [
+                 {"btType": "BTMParameterReference-1809",
+                  "elementId": pr, "parameterId": "ref"}
+                 for pr in parts[:2]
+             ]},
+        ]
+        if extra:
+            for pid, pval in extra.items():
+                if isinstance(pval, (int, float)):
+                    params.append({"btType": "BTMParameterQuantity-147",
+                                    "parameterId": pid,
+                                    "expression": f"{pval} mm",
+                                    "value": pval * _MM_TO_M,
+                                    "isInteger": False})
+                else:
+                    params.append({"btType": "BTMParameterEnum-145",
+                                    "parameterId": pid,
+                                    "value": str(pval)})
+        return {"btType": "BTAssemblyFeature-2147",
+                "featureType": "mate", "name": f"{mate_type}_mate",
+                "parameters": params}
+
+    def _op_mateConcentric(self, p: dict) -> dict:
+        parts = p.get("parts") or []
+        feature = self._mate_payload("REVOLUTE", parts)
+        return {"id": p.get("alias", f"mate_concentric_{len(self.features) + 1}"),
+                "kind": "mate_concentric", "parts": parts[:2],
+                "payload_btType": feature["btType"],
+                "status": "payload built — apply via assembly tab when wired"}
+
+    def _op_mateCoincident(self, p: dict) -> dict:
+        parts = p.get("parts") or []
+        feature = self._mate_payload("FASTENED", parts)
+        return {"id": p.get("alias", f"mate_coincident_{len(self.features) + 1}"),
+                "kind": "mate_coincident", "parts": parts[:2],
+                "payload_btType": feature["btType"],
+                "status": "payload built — apply via assembly tab when wired"}
+
+    def _op_mateDistance(self, p: dict) -> dict:
+        parts = p.get("parts") or []
+        d = float(p.get("distance", 0))
+        feature = self._mate_payload("FASTENED", parts,
+                                       extra={"offset": d})
+        return {"id": p.get("alias", f"mate_distance_{len(self.features) + 1}"),
+                "kind": "mate_distance", "parts": parts[:2],
+                "distance_mm": d}
+
+    def _op_mateGear(self, p: dict) -> dict:
+        # Onshape's gear-mate is a Relation, not a Mate — separate API.
+        # MVP: return planned ratio + part refs.
+        parts = p.get("parts") or []
+        ratio = float(p.get("ratio", 1.0))
+        return {"id": p.get("alias", f"mate_gear_{len(self.features) + 1}"),
+                "kind": "mate_gear", "parts": parts[:2], "ratio": ratio,
+                "status": "Onshape gear relation requires Relations API "
+                            "(separate from mates) — MVP records intent"}
+
+    def _op_mateSlider(self, p: dict) -> dict:
+        parts = p.get("parts") or []
+        axis = (p.get("axis") or "X").upper()
+        feature = self._mate_payload("SLIDER", parts,
+                                       extra={"axis": axis})
+        return {"id": p.get("alias", f"mate_slider_{len(self.features) + 1}"),
+                "kind": "mate_slider", "parts": parts[:2], "axis": axis}
+
+    def _op_motionRevolute(self, p: dict) -> dict:
+        return {"kind": "motion_revolute", "joint": p.get("joint"),
+                "speed_rpm": float(p.get("speed_rpm", 0)),
+                "status": ("Onshape motion is a Mate Limit/Drive parameter "
+                            "applied to existing mates — captured for handoff")}
+
+    def _op_motionPrismatic(self, p: dict) -> dict:
+        return {"kind": "motion_prismatic", "joint": p.get("joint"),
+                "range_mm": p.get("range_mm") or [0, 0]}
+
     def _op_meshImportAndCombine(self, p: dict) -> dict:
         """W3: SDF mesh-import bridge for Onshape.
 

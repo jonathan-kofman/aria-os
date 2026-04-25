@@ -900,6 +900,188 @@ def _op_asm_add_component(params: dict) -> dict:
     return {"ok": True, "id": alias, "kind": "component", "name": name}
 
 
+def _resolve_part_ref(part_ref: str):
+    """Turn 'gear_a.axis' → (occurrence, connector_name).
+
+    Component aliases live directly in _FEATURE_REGISTRY. The
+    connector ('axis', 'tip', 'pin_1', etc.) is a label the planner
+    uses to address a specific origin/edge on the component — at MVP
+    we map all unknown connectors to the component's origin and let
+    Fusion's joint API handle it.
+    """
+    if not isinstance(part_ref, str):
+        raise ValueError(f"part ref must be string, got {part_ref!r}")
+    if "." in part_ref:
+        cid, connector = part_ref.split(".", 1)
+    else:
+        cid, connector = part_ref, "origin"
+    occ = _FEATURE_REGISTRY.get(cid)
+    if occ is None:
+        raise KeyError(f"unknown component {cid!r}")
+    return occ, connector
+
+
+def _joint_geom_for(occurrence, connector: str):
+    """Pick the JointGeometry for a connector label. MVP: every
+    connector resolves to the component's origin; future revisions
+    will look up actual face/edge entities by label."""
+    return adsk.fusion.JointGeometry.createByPoint(
+        occurrence.component.originConstructionPoint
+        .createForAssemblyContext(occurrence))
+
+
+def _op_mate_concentric(params: dict) -> dict:
+    design = adsk.fusion.Design.cast(_app.activeProduct)
+    root = design.rootComponent
+    parts = params.get("parts") or []
+    if len(parts) < 2:
+        raise ValueError("mateConcentric requires ≥2 parts")
+    occ_a, conn_a = _resolve_part_ref(parts[0])
+    occ_b, conn_b = _resolve_part_ref(parts[1])
+    g_a = _joint_geom_for(occ_a, conn_a)
+    g_b = _joint_geom_for(occ_b, conn_b)
+    ji = root.joints.createInput(g_a, g_b)
+    ji.setAsCylindricalJointMotion(
+        adsk.fusion.JointDirections.ZAxisJointDirection)
+    joint = root.joints.add(ji)
+    alias = params.get("alias") or f"mate_concentric_{root.joints.count}"
+    _FEATURE_REGISTRY[alias] = joint
+    return {"ok": True, "id": alias, "kind": "mate_concentric",
+            "parts": parts[:2]}
+
+
+def _op_mate_coincident(params: dict) -> dict:
+    design = adsk.fusion.Design.cast(_app.activeProduct)
+    root = design.rootComponent
+    parts = params.get("parts") or []
+    if len(parts) < 2:
+        raise ValueError("mateCoincident requires ≥2 parts")
+    occ_a, conn_a = _resolve_part_ref(parts[0])
+    occ_b, conn_b = _resolve_part_ref(parts[1])
+    ji = root.joints.createInput(
+        _joint_geom_for(occ_a, conn_a),
+        _joint_geom_for(occ_b, conn_b))
+    ji.setAsRigidJointMotion()
+    joint = root.joints.add(ji)
+    alias = params.get("alias") or f"mate_coincident_{root.joints.count}"
+    _FEATURE_REGISTRY[alias] = joint
+    return {"ok": True, "id": alias, "kind": "mate_coincident",
+            "parts": parts[:2]}
+
+
+def _op_mate_distance(params: dict) -> dict:
+    """Distance mate — fixes a numeric distance between two
+    connectors. Uses Fusion's RigidJoint with an offset transform."""
+    design = adsk.fusion.Design.cast(_app.activeProduct)
+    parts = params.get("parts") or []
+    if len(parts) < 2:
+        raise ValueError("mateDistance requires ≥2 parts")
+    d = float(params.get("distance"))
+    occ_a, _ = _resolve_part_ref(parts[0])
+    occ_b, _ = _resolve_part_ref(parts[1])
+    # MVP: translate occ_b by `distance` mm along Z
+    transform = occ_b.transform2
+    translation = adsk.core.Vector3D.create(0, 0, d * 0.1)
+    transform.translation = translation
+    occ_b.transform2 = transform
+    design.snapshots.add() if design.snapshots else None
+    alias = params.get("alias") or f"mate_distance_{len(_FEATURE_REGISTRY)}"
+    _FEATURE_REGISTRY[alias] = occ_b
+    return {"ok": True, "id": alias, "kind": "mate_distance",
+            "parts": parts[:2], "distance_mm": d}
+
+
+def _op_mate_gear(params: dict) -> dict:
+    """Gear mate — links the rotation of two revolute joints by a
+    fixed ratio. Fusion exposes this via MotionLinks (not Joints)."""
+    design = adsk.fusion.Design.cast(_app.activeProduct)
+    root = design.rootComponent
+    parts = params.get("parts") or []
+    ratio = float(params.get("ratio", 1.0))
+    # MVP: emit a rigid joint between the two parts and store the
+    # intended ratio for a downstream MotionLink op. Fusion's
+    # MotionLinks API needs joint references that exist in the
+    # design; rigorous handling defers to the motionRevolute op.
+    occ_a, _ = _resolve_part_ref(parts[0])
+    occ_b, _ = _resolve_part_ref(parts[1])
+    ji = root.joints.createInput(
+        _joint_geom_for(occ_a, "axis"),
+        _joint_geom_for(occ_b, "axis"))
+    ji.setAsRevoluteJointMotion(
+        adsk.fusion.JointDirections.ZAxisJointDirection)
+    joint = root.joints.add(ji)
+    alias = params.get("alias") or f"mate_gear_{root.joints.count}"
+    _FEATURE_REGISTRY[alias] = joint
+    # Store the ratio on a feature attribute so the user can audit it
+    try:
+        joint.attributes.add("ARIA", "gear_ratio", str(ratio))
+    except Exception:
+        pass
+    return {"ok": True, "id": alias, "kind": "mate_gear",
+            "parts": parts[:2], "ratio": ratio}
+
+
+def _op_mate_slider(params: dict) -> dict:
+    design = adsk.fusion.Design.cast(_app.activeProduct)
+    root = design.rootComponent
+    parts = params.get("parts") or []
+    if len(parts) < 2:
+        raise ValueError("mateSlider requires ≥2 parts")
+    occ_a, _ = _resolve_part_ref(parts[0])
+    occ_b, _ = _resolve_part_ref(parts[1])
+    axis_spec = (params.get("axis") or "X").upper()
+    axis_dir = {"X": adsk.fusion.JointDirections.XAxisJointDirection,
+                "Y": adsk.fusion.JointDirections.YAxisJointDirection,
+                "Z": adsk.fusion.JointDirections.ZAxisJointDirection,
+                }.get(axis_spec, adsk.fusion.JointDirections.XAxisJointDirection)
+    ji = root.joints.createInput(
+        _joint_geom_for(occ_a, "origin"),
+        _joint_geom_for(occ_b, "origin"))
+    ji.setAsSliderJointMotion(axis_dir)
+    joint = root.joints.add(ji)
+    alias = params.get("alias") or f"mate_slider_{root.joints.count}"
+    _FEATURE_REGISTRY[alias] = joint
+    return {"ok": True, "id": alias, "kind": "mate_slider",
+            "parts": parts[:2], "axis": axis_spec}
+
+
+def _op_motion_revolute(params: dict) -> dict:
+    """Apply a revolute motion driver to a joint — sets the joint
+    axis as the rotational DOF and stores a target speed in RPM."""
+    joint_ref = params.get("joint")
+    if not joint_ref:
+        raise ValueError("motionRevolute requires joint reference")
+    # Resolve joint reference: <component>.<axis_name> or <joint_alias>
+    joint = _FEATURE_REGISTRY.get(joint_ref) or _FEATURE_REGISTRY.get(
+        joint_ref.split(".", 1)[0])
+    speed = float(params.get("speed_rpm", 0))
+    if joint is not None:
+        try:
+            joint.attributes.add("ARIA", "speed_rpm", str(speed))
+        except Exception:
+            pass
+    return {"ok": True, "kind": "motion_revolute",
+            "joint": joint_ref, "speed_rpm": speed}
+
+
+def _op_motion_prismatic(params: dict) -> dict:
+    joint_ref = params.get("joint")
+    if not joint_ref:
+        raise ValueError("motionPrismatic requires joint reference")
+    joint = _FEATURE_REGISTRY.get(joint_ref) or _FEATURE_REGISTRY.get(
+        joint_ref.split(".", 1)[0])
+    speed = float(params.get("speed_mm_s", 0))
+    range_mm = params.get("range_mm") or [0, 0]
+    if joint is not None:
+        try:
+            joint.attributes.add("ARIA", "range_mm", str(range_mm))
+            joint.attributes.add("ARIA", "speed_mm_s", str(speed))
+        except Exception:
+            pass
+    return {"ok": True, "kind": "motion_prismatic",
+            "joint": joint_ref, "range_mm": range_mm, "speed_mm_s": speed}
+
+
 def _op_asm_joint(params: dict) -> dict:
     """Create a joint between two components. MVP supports 'rigid'
     (weld) — more joint types need face/edge references which require
@@ -1062,6 +1244,14 @@ _FEATURE_HANDLERS.update({
     "asmBegin":        _op_asm_begin,
     "addComponent":    _op_asm_add_component,
     "joint":           _op_asm_joint,
+    # W4: real assembly mates + motion drivers
+    "mateConcentric":  _op_mate_concentric,
+    "mateCoincident":  _op_mate_coincident,
+    "mateDistance":    _op_mate_distance,
+    "mateGear":        _op_mate_gear,
+    "mateSlider":      _op_mate_slider,
+    "motionRevolute":  _op_motion_revolute,
+    "motionPrismatic": _op_motion_prismatic,
     # Drawing ops
     "beginDrawing":    _op_dwg_begin,
     "newSheet":        _op_dwg_new_sheet,

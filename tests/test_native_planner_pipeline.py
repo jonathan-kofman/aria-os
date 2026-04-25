@@ -255,6 +255,176 @@ class TestW1AcceptancePrompts:
                      f"got kinds={kinds}")
 
 
+# --- W4 Assembly Designer + mate validator ----------------------------
+
+class TestAssemblyDesigner:
+    """The Assembly Designer turns natural-language mechanism prompts
+    into structurally valid BOMs with calculated tooth counts /
+    geometry constraints. Without this, the LLM produces "looks right
+    but doesn't mesh" output."""
+
+    def test_planetary_4to1_math_closes(self):
+        from aria_os.agents.assembly_designer_agent import design_assembly
+        spec = design_assembly(
+            "planetary gearbox 4:1 with 3 planets, NEMA17 input")
+        assert spec is not None
+        ids = {c["id"] for c in spec.components}
+        assert "sun" in ids and "ring" in ids and "carrier" in ids
+        # 3 planets
+        planet_ids = [i for i in ids if i.startswith("planet_")]
+        assert len(planet_ids) == 3
+        # Tooth-count math: N_ring = N_sun + 2*N_planet
+        sun_n = next(c for c in spec.components if c["id"] == "sun")[
+            "params"]["n_teeth"]
+        ring_n = next(c for c in spec.components if c["id"] == "ring")[
+            "params"]["n_teeth"]
+        plnt_n = next(c for c in spec.components
+                       if c["id"].startswith("planet_"))["params"]["n_teeth"]
+        assert ring_n == sun_n + 2 * plnt_n, (
+            f"Gear math broken: sun={sun_n}, planet={plnt_n}, ring={ring_n}; "
+            f"expected ring = sun + 2·planet")
+        # Achieves the requested ratio within 5%
+        actual_ratio = 1 + ring_n / sun_n
+        assert abs(actual_ratio - 4.0) / 4.0 < 0.05
+
+    def test_planetary_emits_gear_mates(self):
+        from aria_os.agents.assembly_designer_agent import design_assembly
+        spec = design_assembly("planetary gearbox 5:1, 3 planets")
+        gear_mates = [m for m in spec.mates if m["kind"] == "gear"]
+        # Each planet meshes with sun AND ring → 2*n_planets gear mates
+        assert len(gear_mates) == 6, (
+            f"Expected 6 gear mates for 3 planets (sun↔planet, planet↔ring); "
+            f"got {len(gear_mates)}")
+
+    def test_six_dof_arm(self):
+        from aria_os.agents.assembly_designer_agent import design_assembly
+        spec = design_assembly(
+            "6-DOF robot arm RRRRRR, 600mm reach, 2kg payload")
+        # 6 motor housings + 6 links + base + ee_flange = 14 components
+        types = [c["type"] for c in spec.components]
+        assert types.count("motor_housing") == 6
+        assert types.count("tube") == 6
+        # 6 revolute motion drivers
+        rev_motions = [m for m in spec.motion if m["kind"] == "revolute"]
+        assert len(rev_motions) == 6
+
+    def test_scotch_yoke_50mm(self):
+        from aria_os.agents.assembly_designer_agent import design_assembly
+        spec = design_assembly("scotch yoke linkage, 50mm stroke, 1500 RPM")
+        assert spec is not None
+        # Crank radius = stroke/2
+        crank = next(c for c in spec.components if c["id"] == "crank")
+        assert abs(crank["params"]["pin_radius"] - 25.0) < 0.01
+        # Has a slot mate + slider mate
+        kinds = [m["kind"] for m in spec.mates]
+        assert "slot" in kinds and "slider" in kinds
+
+    def test_parallel_gripper_travel(self):
+        from aria_os.agents.assembly_designer_agent import design_assembly
+        spec = design_assembly(
+            "two-jaw parallel gripper, 40mm travel, M3 mounting")
+        assert spec is not None
+        # Two jaws + body + flange
+        ids = [c["id"] for c in spec.components]
+        assert "jaw_left" in ids and "jaw_right" in ids
+        # Two prismatic motion drivers
+        prism = [m for m in spec.motion if m["kind"] == "prismatic"]
+        assert len(prism) == 2
+
+    def test_unknown_returns_none(self):
+        """Goals outside the family library route to LLM; the agent
+        should return None so the dispatcher knows to fall back."""
+        from aria_os.agents.assembly_designer_agent import design_assembly
+        assert design_assembly("flange 100mm OD") is None
+        assert design_assembly("M6 cap screw") is None
+
+
+class TestMateOpsValidator:
+    """W4 added 7 mate ops + 3 motion ops. They have to validate
+    parts references against the asmBegin/addComponent scope."""
+
+    def _asm_base(self):
+        return [
+            {"kind": "asmBegin", "params": {}},
+            {"kind": "addComponent",
+             "params": {"id": "gear_a", "type": "spur_gear"}},
+            {"kind": "addComponent",
+             "params": {"id": "gear_b", "type": "spur_gear"}},
+        ]
+
+    def test_concentric_two_parts_ok(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._asm_base() + [
+            {"kind": "mateConcentric",
+             "params": {"parts": ["gear_a.axis", "gear_b.axis"]}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert ok, issues
+
+    def test_concentric_unknown_component_caught(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._asm_base() + [
+            {"kind": "mateConcentric",
+             "params": {"parts": ["gear_a.axis", "ghost.axis"]}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("ghost" in i for i in issues)
+
+    def test_concentric_one_part_caught(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._asm_base() + [
+            {"kind": "mateConcentric",
+             "params": {"parts": ["gear_a.axis"]}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("≥2 parts" in i for i in issues)
+
+    def test_mate_gear_zero_ratio_caught(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._asm_base() + [
+            {"kind": "mateGear",
+             "params": {"parts": ["gear_a", "gear_b"], "ratio": 0}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("ratio cannot be 0" in i for i in issues)
+
+    def test_motion_revolute_unknown_joint_caught(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._asm_base() + [
+            {"kind": "motionRevolute",
+             "params": {"joint": "ghost.shaft", "speed_rpm": 100}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("ghost" in i for i in issues)
+
+    def test_dup_component_id_caught(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = [
+            {"kind": "asmBegin", "params": {}},
+            {"kind": "addComponent",
+             "params": {"id": "x", "type": "gear"}},
+            {"kind": "addComponent",
+             "params": {"id": "x", "type": "shaft"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("already declared" in i for i in issues)
+
+    def test_designer_plan_validates(self):
+        """The Assembly Designer's serialized plan must pass the
+        validator end-to-end."""
+        from aria_os.agents.assembly_designer_agent import design_assembly
+        from aria_os.native_planner.validator import validate_plan
+        spec = design_assembly("planetary gearbox 4:1, 3 planets")
+        plan = spec.to_plan()
+        ok, issues = validate_plan(plan)
+        assert ok, f"Designer's planetary plan failed validation: {issues}"
+
+
 # --- W3 plus: Groq tool_use_failed rescue parser ----------------------
 
 class TestGroqRescueParser:
@@ -976,6 +1146,20 @@ class TestOpHandlerCoverage:
             f"W1 ops missing Fusion handlers: {sorted(missing)}. "
             f"Add to _FEATURE_HANDLERS in aria_panel.py.")
 
+    def test_w4_ops_have_fusion_handlers(self):
+        keys = self._fusion_handler_keys()
+        if not keys:
+            import pytest
+            pytest.skip("Fusion plugin file not present")
+        w4_ops = {
+            "mateConcentric", "mateCoincident", "mateDistance",
+            "mateGear", "mateSlider",
+            "motionRevolute", "motionPrismatic",
+        }
+        missing = w4_ops - keys
+        assert not missing, (
+            f"W4 ops missing Fusion handlers: {sorted(missing)}.")
+
     def test_w1_ops_have_onshape_handlers(self):
         """The Onshape executor uses `_op_<kind>` method names for
         dispatch. Make sure every W1 op has a matching method."""
@@ -986,6 +1170,19 @@ class TestOpHandlerCoverage:
             "shell", "thicken", "threadFeature", "draft",
         }
         missing = [op for op in w1_ops
+                   if not hasattr(OnshapeExecutor, f"_op_{op}")]
+        assert not missing, (
+            f"Onshape executor missing handlers for: {missing}")
+
+    def test_w4_ops_have_onshape_handlers(self):
+        from aria_os.onshape.executor import OnshapeExecutor
+        w4_ops = {
+            "asmBegin", "addComponent",
+            "mateConcentric", "mateCoincident", "mateDistance",
+            "mateGear", "mateSlider",
+            "motionRevolute", "motionPrismatic",
+        }
+        missing = [op for op in w4_ops
                    if not hasattr(OnshapeExecutor, f"_op_{op}")]
         assert not missing, (
             f"Onshape executor missing handlers for: {missing}")
