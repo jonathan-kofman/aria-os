@@ -392,6 +392,51 @@ def _try_anthropic(prompt: str, system: str, repo_root: "Path | None" = None,
     return None
 
 
+def _try_groq(prompt: str, system: str, repo_root: Path | None = None) -> str | None:
+    """Try Groq's chat-completion API. Returns text or None on failure.
+
+    Groq's free tier is generous (30 RPM / 14400/day on llama-3.3-70b-
+    versatile), and the OpenAI-compatible API runs sub-second. We use
+    the same model as the structured-output path so behaviour stays
+    consistent across structured vs. free-text fallbacks."""
+    api_key = get_groq_key(repo_root)
+    if not api_key:
+        return None
+    try:
+        from groq import Groq  # type: ignore
+    except ImportError:
+        return None
+    try:
+        client = Groq(api_key=api_key)
+    except Exception:
+        return None
+    for model in ("llama-3.3-70b-versatile", "llama-3.1-8b-instant"):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system or ""},
+                    {"role": "user", "content": prompt},
+                ],
+                max_completion_tokens=4096,
+                temperature=0.2,
+            )
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "rate" in msg or "429" in msg or "quota" in msg:
+                continue   # try smaller model
+            if "decommissioned" in msg or "not_found" in msg or "not found" in msg:
+                continue
+            print(f"[LLM] groq/{model} failed: {exc}")
+            return None
+        text = response.choices[0].message.content or ""
+        if text.strip():
+            print(f"[LLM] groq/{model}")
+            _record_llm_call("groq")
+            return text
+    return None
+
+
 def _try_gemini(prompt: str, system: str, repo_root: Path | None = None) -> str | None:
     """Try Google Gemini API. Returns text response or None on any failure.
 
@@ -902,16 +947,21 @@ def call_llm(
 
     Never raises. Returns None if all backends unavailable.
     """
+    # Groq is the cost-conscious primary: 30 RPM free + sub-second
+    # inference + tool_use support. Place it ahead of Gemini in
+    # balanced/fast so a 50-prompt eval can run on free credits.
     if quality == "premium":
         chain = [
             (lambda: _try_anthropic(prompt, system, repo_root, model_tier="premium"),
              "anthropic/sonnet"),
             (lambda: _try_gemini(prompt, system, repo_root), "gemini"),
+            (lambda: _try_groq(prompt, system, repo_root), "groq"),
             (lambda: _try_gemma(prompt, system), "gemma"),
             (lambda: _try_ollama(prompt, system), "ollama"),
         ]
     elif quality == "fast":
         chain = [
+            (lambda: _try_groq(prompt, system, repo_root), "groq"),
             (lambda: _try_gemini(prompt, system, repo_root), "gemini"),
             (lambda: _try_gemma(prompt, system), "gemma"),
             (lambda: _try_ollama(prompt, system), "ollama"),
@@ -920,6 +970,7 @@ def call_llm(
         ]
     else:  # balanced (default)
         chain = [
+            (lambda: _try_groq(prompt, system, repo_root), "groq"),
             (lambda: _try_gemini(prompt, system, repo_root), "gemini"),
             (lambda: _try_gemma(prompt, system), "gemma"),
             (lambda: _try_anthropic(prompt, system, repo_root, model_tier="premium"),

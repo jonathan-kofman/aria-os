@@ -203,29 +203,64 @@ def _rescue_groq_failed_generation(exc: Exception) -> list[dict] | None:
     [...]`), the JSON array is still in the failed_generation payload.
     Extract it.
 
-    The error body is a Python dict-as-string with the key
-    'failed_generation' carrying the raw model output. We pull out
-    the [...] block and parse it."""
+    The Groq SDK exposes the error body in two shapes depending on
+    version: `exc.body` may be a dict (newer SDK) or a JSON string
+    (older), and the actual `failed_generation` is nested under
+    `error.failed_generation`. We extract the failed_generation
+    string FIRST (so we don't need to navigate nested Python repr
+    edge-cases), then balance brackets inside that one field."""
     import json as _json
     import re as _re
-    body = str(getattr(exc, "body", None) or exc)
-    # Find first `[` and balance to its matching `]`
-    start = body.find("[")
+
+    # Prefer the structured body — saves us from parsing the str(exc)
+    # which Python-repr-escapes the failed_generation JSON.
+    failed_gen: str | None = None
+    body_attr = getattr(exc, "body", None)
+    if isinstance(body_attr, dict):
+        err = body_attr.get("error") or {}
+        if isinstance(err, dict):
+            failed_gen = err.get("failed_generation") or None
+    if failed_gen is None and isinstance(body_attr, str):
+        try:
+            d = _json.loads(body_attr)
+            if isinstance(d, dict):
+                err = d.get("error") or {}
+                failed_gen = (err.get("failed_generation")
+                                if isinstance(err, dict) else None)
+        except Exception:
+            pass
+    if failed_gen is None:
+        # Last resort: regex-extract from str(exc). The repr embeds the
+        # failed_generation between single quotes after the key. Match
+        # 'failed_generation': '...' allowing nested escaped quotes.
+        s = str(exc)
+        m = _re.search(r"'failed_generation':\s*'((?:[^'\\]|\\.)*)'", s,
+                        _re.DOTALL)
+        if m:
+            failed_gen = m.group(1)
+            # Reverse Python's repr-escaping (literal backslash sequences)
+            failed_gen = (failed_gen
+                            .replace("\\n", "\n")
+                            .replace("\\t", "\t")
+                            .replace("\\'", "'")
+                            .replace('\\"', '"')
+                            .replace("\\\\", "\\"))
+    if not failed_gen:
+        return None
+
+    # Now find the JSON array inside the failed_gen wrapper.
+    start = failed_gen.find("[")
     if start < 0:
         return None
     depth = 0
-    for i in range(start, len(body)):
-        c = body[i]
+    for i in range(start, len(failed_gen)):
+        c = failed_gen[i]
         if c == "[": depth += 1
         elif c == "]":
             depth -= 1
             if depth == 0:
-                snippet = body[start:i + 1]
-                # The string is escaped inside a Python repr — un-escape
-                snippet = (snippet
-                            .replace("\\n", "\n").replace("\\\"", "\"")
-                            .replace("\\'", "'"))
-                # Strip trailing commas
+                snippet = failed_gen[start:i + 1]
+                # Strip trailing commas (LLMs love these)
                 snippet = _re.sub(r",\s*([}\]])", r"\1", snippet)
                 try:
                     data = _json.loads(snippet)

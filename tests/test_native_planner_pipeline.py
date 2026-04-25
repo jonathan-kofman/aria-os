@@ -255,6 +255,102 @@ class TestW1AcceptancePrompts:
                      f"got kinds={kinds}")
 
 
+# --- W3 plus: Groq tool_use_failed rescue parser ----------------------
+
+class TestGroqRescueParser:
+    """Groq's llama-3.3-70b sometimes returns tool_use as raw text
+    (`<function=emit_plan>[…]`) instead of an actual tool_calls API
+    response. The rescue parser extracts the JSON anyway.
+
+    These tests pin the exact error shape we observed in production
+    eval runs so regressions never silently cost us the Groq path."""
+
+    def _make_exc(self, failed_gen: str):
+        """Mimic the Groq SDK's BadRequestError.body shape."""
+        class BadRequestError(Exception):
+            def __init__(self, body):
+                self.body = body
+                super().__init__("Error code: 400 - " + str(body))
+        return BadRequestError({
+            "error": {
+                "message": ("Failed to call a function. Please adjust "
+                              "your prompt. See 'failed_generation' for "
+                              "more details."),
+                "type": "invalid_request_error",
+                "code": "tool_use_failed",
+                "failed_generation": failed_gen,
+            }
+        })
+
+    def test_rescue_extracts_function_wrapped_array(self):
+        from aria_os.native_planner.structured_llm import (
+            _rescue_groq_failed_generation)
+        exc = self._make_exc(
+            '<function=emit_plan>[\n'
+            '  {"kind": "beginPlan", "params": {}, "label": "Reset"},\n'
+            '  {"kind": "newSketch", "params": {"plane": "XY", "alias": "s"}},\n'
+            '  {"kind": "sketchCircle", "params": {"sketch": "s", "r": 5}},\n'
+            '  {"kind": "extrude", "params": {"sketch": "s", "distance": 5,'
+            '"operation": "new", "alias": "b"}}\n'
+            ']</function>')
+        plan = _rescue_groq_failed_generation(exc)
+        assert plan is not None, "Rescue returned None on canonical input"
+        kinds = [op.get("kind") for op in plan]
+        assert kinds == ["beginPlan", "newSketch", "sketchCircle", "extrude"]
+
+    def test_rescue_handles_trailing_comma(self):
+        from aria_os.native_planner.structured_llm import (
+            _rescue_groq_failed_generation)
+        exc = self._make_exc(
+            '<function=emit_plan>[\n'
+            '  {"kind": "beginPlan", "params": {}},\n'
+            '  {"kind": "newSketch", "params": {"plane": "XY", "alias": "s"}},\n'
+            ']</function>')   # trailing comma before ]
+        plan = _rescue_groq_failed_generation(exc)
+        assert plan is not None
+        assert len(plan) == 2
+
+    def test_rescue_handles_string_body(self):
+        """Older Groq SDK serializes body as a JSON string, not dict."""
+        from aria_os.native_planner.structured_llm import (
+            _rescue_groq_failed_generation)
+        import json
+        body_str = json.dumps({
+            "error": {
+                "message": "Failed to call a function.",
+                "code": "tool_use_failed",
+                "failed_generation":
+                    '<function=emit_plan>[{"kind":"beginPlan","params":{}}]</function>',
+            }
+        })
+
+        class StrBodyExc(Exception):
+            body = body_str
+        exc = StrBodyExc("Error 400")
+        plan = _rescue_groq_failed_generation(exc)
+        assert plan is not None
+        assert plan[0]["kind"] == "beginPlan"
+
+    def test_rescue_returns_none_when_no_failed_generation(self):
+        """Rate-limit / quota errors have no failed_generation — rescue
+        must NOT invent a plan from thin air."""
+        from aria_os.native_planner.structured_llm import (
+            _rescue_groq_failed_generation)
+
+        class RateLimitError(Exception):
+            body = {"error": {"message": "Rate limit reached",
+                                "type": "rate_limit_error"}}
+        exc = RateLimitError("429")
+        plan = _rescue_groq_failed_generation(exc)
+        assert plan is None
+
+    def test_rescue_returns_none_on_empty_failed_generation(self):
+        from aria_os.native_planner.structured_llm import (
+            _rescue_groq_failed_generation)
+        exc = self._make_exc("")
+        assert _rescue_groq_failed_generation(exc) is None
+
+
 # --- W3.4 SDF expander: implicit → meshImportAndCombine ---------------
 
 class TestSdfExpander:
