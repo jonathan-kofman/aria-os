@@ -255,6 +255,202 @@ class TestW1AcceptancePrompts:
                      f"got kinds={kinds}")
 
 
+# --- W6 Drawings: validator + GD&T library ---------------------------
+
+class TestDrawingOpsValidator:
+    """W6 added 17 drawing-specific ops on top of beginDrawing/
+    newSheet/addView/addTitleBlock. Cross-reference: every dim/GD&T
+    op references a view alias declared by addView."""
+
+    def _drawing_base(self):
+        return [
+            {"kind": "beginDrawing", "params": {"name": "FLG-100"}},
+            {"kind": "newSheet",
+             "params": {"alias": "sh1", "size": "A3", "scale": "1:1"}},
+            {"kind": "addView",
+             "params": {"alias": "v_top", "sheet": "sh1",
+                          "view_type": "top"}},
+            {"kind": "addView",
+             "params": {"alias": "v_front", "sheet": "sh1",
+                          "view_type": "front"}},
+        ]
+
+    def test_section_view_needs_known_source(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._drawing_base() + [
+            {"kind": "sectionView",
+             "params": {"sheet": "sh1", "source_view": "ghost",
+                          "section_line": "A-A", "alias": "v_sec"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("ghost" in i for i in issues)
+
+    def test_detail_view_radius_positive(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._drawing_base() + [
+            {"kind": "detailView",
+             "params": {"sheet": "sh1", "source_view": "v_top",
+                          "center": [10, 10], "radius": -5,
+                          "alias": "v_det"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("radius" in i for i in issues)
+
+    def test_gdt_unknown_characteristic_caught(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._drawing_base() + [
+            {"kind": "gdtFrame",
+             "params": {"view": "v_top", "feature": "back_face",
+                          "characteristic": "wobbliness",
+                          "tolerance": 0.05}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("ASME Y14.5" in i for i in issues)
+
+    def test_gdt_negative_tolerance_caught(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._drawing_base() + [
+            {"kind": "gdtFrame",
+             "params": {"view": "v_top", "feature": "back_face",
+                          "characteristic": "flatness",
+                          "tolerance": -0.05}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("must be > 0" in i for i in issues)
+
+    def test_datum_label_format(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._drawing_base() + [
+            {"kind": "datumLabel",
+             "params": {"view": "v_top", "feature": "back_face",
+                          "label": "PRIMARY"}},  # too long
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("single letter" in i for i in issues)
+
+    def test_surface_finish_ra_in_range(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._drawing_base() + [
+            {"kind": "surfaceFinishCallout",
+             "params": {"view": "v_top", "feature": "f1", "ra": 200}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("Ra 200" in i and "[0.025, 50]" in i for i in issues)
+
+    def test_weld_symbol_type_must_be_known(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._drawing_base() + [
+            {"kind": "weldSymbol",
+             "params": {"view": "v_front", "edge": "e1", "type": "glued"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("AWS A2.4" in i for i in issues)
+
+    def test_full_flange_drawing_validates(self):
+        """End-to-end: a flange shop drawing with title block + 3 views
+        + auto-dim + GD&T + revision table validates."""
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._drawing_base() + [
+            {"kind": "addView",
+             "params": {"alias": "v_iso", "sheet": "sh1",
+                          "view_type": "iso"}},
+            {"kind": "sectionView",
+             "params": {"sheet": "sh1", "source_view": "v_top",
+                          "section_line": "A-A", "alias": "v_sec"}},
+            {"kind": "autoDimension", "params": {"view": "v_top"}},
+            {"kind": "autoDimension", "params": {"view": "v_front"}},
+            {"kind": "datumLabel",
+             "params": {"view": "v_front", "feature": "back_face",
+                          "label": "A"}},
+            {"kind": "gdtFrame",
+             "params": {"view": "v_front", "feature": "back_face",
+                          "characteristic": "flatness",
+                          "tolerance": 0.05}},
+            {"kind": "gdtFrame",
+             "params": {"view": "v_top", "feature": "bolt_holes",
+                          "characteristic": "position",
+                          "tolerance": 0.2,
+                          "datums": ["A", "B", "C"]}},
+            {"kind": "surfaceFinishCallout",
+             "params": {"view": "v_front", "feature": "back_face",
+                          "ra": 3.2}},
+            {"kind": "addTitleBlock",
+             "params": {"sheet": "sh1", "title": "FLG-100",
+                          "rev": "A", "material": "AL 6061-T6"}},
+            {"kind": "revisionTable", "params": {"sheet": "sh1"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert ok, issues
+
+
+class TestGdtLibrary:
+    """The GD&T helper library has to (a) format frames per ASME Y14.5,
+    (b) recommend appropriate callouts per feature type, (c) survive
+    ASCII fallback for legacy DXF tooling."""
+
+    def test_format_position_with_diameter_and_three_datums(self):
+        from aria_os.engineering.gdt import format_frame
+        s = format_frame("position", 0.2, ["A", "B", "C"], dia=True)
+        assert "⌖" in s
+        assert "Ø0.2" in s
+        assert "A|B|C" in s
+
+    def test_format_flatness_no_datums(self):
+        from aria_os.engineering.gdt import format_frame
+        s = format_frame("flatness", 0.05)
+        assert "⏥" in s
+        assert "0.05" in s
+        # Form characteristics never carry datums
+        assert "|" not in s
+
+    def test_format_ascii_fallback(self):
+        from aria_os.engineering.gdt import format_frame
+        s = format_frame("perpendicularity", 0.1, ["A"], use_ascii=True)
+        assert "PERP" in s
+        assert "⊥" not in s
+
+    def test_unknown_characteristic_raises(self):
+        from aria_os.engineering.gdt import format_frame
+        import pytest
+        with pytest.raises(ValueError):
+            format_frame("wobbliness", 0.1)
+
+    def test_recommend_for_flange_back_face(self):
+        from aria_os.engineering.gdt import recommend_for_feature
+        r = recommend_for_feature("flange_back_face")
+        assert len(r) == 2
+        chars = {c["characteristic"] for c in r}
+        assert chars == {"flatness", "parallelism"}
+
+    def test_recommend_for_bolt_holes(self):
+        from aria_os.engineering.gdt import recommend_for_feature
+        r = recommend_for_feature("bolt_holes")
+        assert r and r[0]["characteristic"] == "position"
+        assert r[0]["tolerance"] == 0.2
+        assert r[0]["datums"] == ["A", "B", "C"]
+        assert r[0].get("dia") is True
+
+    def test_recommend_unknown_returns_empty(self):
+        from aria_os.engineering.gdt import recommend_for_feature
+        assert recommend_for_feature("magic_pony") == []
+
+    def test_summary_compact_for_prompt(self):
+        from aria_os.engineering.gdt import gdt_summary_for_prompt
+        summary = gdt_summary_for_prompt()
+        assert len(summary) < 1500
+        # All 14 characteristics surface in the summary
+        for k in ("flatness", "perpendicularity", "position",
+                  "cylindricity", "total_runout"):
+            assert k in summary
+
+
 # --- W5 Sheet metal: validator + bend table --------------------------
 
 class TestSheetMetalValidator:

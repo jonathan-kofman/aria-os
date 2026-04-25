@@ -123,6 +123,12 @@
     {"id": "chassis_panel", "goal": "chassis panel 300x200mm, 1.5mm mild steel, 4 right-angle bends with bend reliefs, 8 M3 holes",
      "expected_ops_any": ["sheetMetalBase", "sheetMetalBend", "sheetMetalFlange"]},
     {"id": "rect_to_round_transition", "goal": "rectangular-to-round transition piece, 80x40 rect inlet to 60mm round outlet, 100mm long, 1mm aluminum sheet metal",
-     "expected_ops_any": ["loft", "sheetMetalBase", "sheetMetalFlange"]}
+     "expected_ops_any": ["loft", "sheetMetalBase", "sheetMetalFlange"]},
+    {"id": "flange_shop_drawing", "goal": "shop drawing for a 100mm OD flange, 4 M6 bolt holes on 80mm PCD, 6mm thick AL 6061-T6, with full GD&T: flatness on back face, position tolerance on bolt holes, cylindricity on center bore",
+     "expected_ops_any": ["beginDrawing", "addView", "gdtFrame", "datumLabel"]},
+    {"id": "drone_arm_drawing", "goal": "drone arm shop drawing with section view through the bearing bore, surface finish callouts, parallelism tolerance, title block + revision table",
+     "expected_ops_any": ["beginDrawing", "sectionView", "gdtFrame", "revisionTable"]},
+    {"id": "bracket_with_bom", "goal": "bracket assembly drawing with balloon callouts identifying each component, BOM table, and weld symbol on the gusset",
+     "expected_ops_any": ["beginDrawing", "balloon", "bomTable", "weldSymbol"]}
   ]
 }

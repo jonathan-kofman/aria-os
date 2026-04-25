@@ -205,6 +205,16 @@ _LEAN_FAMILIES: list[tuple[tuple[str, ...], str]] = [
      ("TOPOLOGY: implicitField with bounds covering the design "
       "envelope. operation='new' if standalone, 'intersect' to keep "
       "to outer envelope.")),
+    (("drawing", "shop drawing", "blueprint", "gd&t", "gdt",
+      "tolerance", "section view", "detail view", "callout"),
+     ("DRAWING: beginDrawing → newSheet → addView (top/front/right/iso) "
+      "→ autoDimension every view → gdtFrame for critical features. "
+      "GD&T characteristic vocabulary: flatness ⏥, parallelism ⫽, "
+      "perpendicularity ⊥, position ⌖, cylindricity ⌭, total_runout ⌰. "
+      "Default callouts: flange back face → flatness 0.05 + parallelism "
+      "0.1 to A. Bolt holes → position Ø0.2 A|B|C. Shaft journal → "
+      "cylindricity 0.005 + total_runout 0.02 to A. Always close with "
+      "addTitleBlock + revisionTable.")),
 ]
 
 

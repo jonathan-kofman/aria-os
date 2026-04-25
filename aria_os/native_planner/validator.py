@@ -36,6 +36,15 @@ _VALID_KINDS = {
     # Drawing
     "beginDrawing", "newSheet", "addView", "addTitleBlock",
     "drawingAutoDim",
+    # W6: extended drawing vocabulary — section/detail/broken views,
+    # full GD&T callout chain, weld symbols, revision + BOM tables.
+    # Aligned with ASME Y14.5 and ISO 128.
+    "sectionView", "detailView", "brokenView",
+    "autoDimension", "linearDimension", "angularDimension",
+    "diameterDimension", "radialDimension", "ordinateDimension",
+    "gdtFrame", "datumLabel", "surfaceFinishCallout",
+    "weldSymbol", "revisionTable", "bomTable",
+    "centerlineMark", "balloon",
     # Fusion Electronics
     "beginElectronics", "placeSymbol", "placeFootprint",
     "addConnection", "boardOutline",
@@ -102,6 +111,25 @@ _REQUIRED_PARAMS = {
     "sheetMetalUnfold":  {"body"},
     "sheetMetalCutout":  {"sketch", "operation"},
     "exportFlatPattern": {"body", "format"},
+    # W6: drawing ops — most reference an existing view alias declared
+    # by addView. The view alias scope is checked in the main loop.
+    "sectionView":      {"sheet", "source_view", "section_line"},
+    "detailView":       {"sheet", "source_view", "center", "radius"},
+    "brokenView":       {"sheet", "source_view", "break_line"},
+    "autoDimension":    {"view"},
+    "linearDimension":  {"view", "from", "to"},
+    "angularDimension": {"view", "edges"},
+    "diameterDimension": {"view", "edge"},
+    "radialDimension":  {"view", "edge"},
+    "ordinateDimension": {"view", "from_origin", "to"},
+    "gdtFrame":         {"view", "feature", "characteristic", "tolerance"},
+    "datumLabel":       {"view", "feature", "label"},
+    "surfaceFinishCallout": {"view", "feature", "ra"},
+    "weldSymbol":       {"view", "edge", "type"},
+    "revisionTable":    {"sheet"},
+    "bomTable":         {"sheet"},
+    "centerlineMark":   {"view", "feature"},
+    "balloon":          {"view", "component", "number"},
     # W4: assembly mates — every mate references at least 2 parts.
     # parts is a list of strings of the form "<component_id>" or
     # "<component_id>.<connector>" (e.g. "sun.axis", "carrier.pin_1").
@@ -141,6 +169,19 @@ def validate_plan(plan: list[dict]) -> tuple[bool, list[str]]:
     # Mate ops reference them by id; cross-checked here.
     component_ids: set[str] = set()
     in_asm_mode = False
+    # W6: drawing scope — sheet + view aliases tracked so dim/GD&T
+    # ops can be checked against the views they reference.
+    sheet_aliases: set[str] = set()
+    view_aliases: set[str] = set()
+    in_drawing_mode = False
+    # GD&T characteristic vocabulary — ASME Y14.5 + ISO 1101.
+    valid_gdt_chars = {
+        "flatness", "straightness", "circularity", "cylindricity",
+        "perpendicularity", "parallelism", "angularity",
+        "position", "concentricity", "symmetry",
+        "profile_of_a_line", "profile_of_a_surface",
+        "circular_runout", "total_runout",
+    }
     # Track the operation mode of each extrude alias so we can catch
     # semantic gotchas like "circularPattern a 'new' body" (which rotates
     # the full part around Z and produces a no-op).
@@ -575,6 +616,140 @@ def validate_plan(plan: list[dict]) -> tuple[bool, list[str]]:
             alias = params.get("alias")
             if alias:
                 feature_aliases.add(alias)
+
+        # W6: drawing scope ops.
+        elif kind == "beginDrawing":
+            in_drawing_mode = True
+            saw_new_body = True
+
+        elif kind == "newSheet":
+            alias = params.get("alias")
+            if alias:
+                if alias in sheet_aliases:
+                    issues.append(
+                        f"Op #{i}: sheet alias {alias!r} already declared")
+                sheet_aliases.add(alias)
+
+        elif kind == "addView":
+            sheet = params.get("sheet")
+            if sheet_aliases and sheet not in sheet_aliases:
+                issues.append(
+                    f"Op #{i}: addView references unknown sheet "
+                    f"{sheet!r} — emit newSheet first")
+            alias = params.get("alias")
+            if alias:
+                if alias in view_aliases:
+                    issues.append(
+                        f"Op #{i}: view alias {alias!r} already declared")
+                view_aliases.add(alias)
+
+        elif kind in ("sectionView", "detailView", "brokenView"):
+            # Each derived view declares its own alias and references
+            # an existing source_view that addView declared earlier.
+            src = params.get("source_view")
+            if view_aliases and src not in view_aliases:
+                issues.append(
+                    f"Op #{i}: {kind} source_view {src!r} not declared "
+                    f"(known: {sorted(view_aliases)[:5]}…)")
+            alias = params.get("alias")
+            if alias:
+                view_aliases.add(alias)
+            if kind == "detailView":
+                try:
+                    r = float(params.get("radius"))
+                    if r <= 0:
+                        issues.append(
+                            f"Op #{i}: detailView radius must be > 0")
+                except (TypeError, ValueError):
+                    issues.append(
+                        f"Op #{i}: detailView radius not numeric")
+
+        elif kind == "autoDimension":
+            v = params.get("view")
+            if view_aliases and v not in view_aliases:
+                issues.append(
+                    f"Op #{i}: autoDimension view {v!r} unknown")
+
+        elif kind in ("linearDimension", "angularDimension",
+                      "diameterDimension", "radialDimension",
+                      "ordinateDimension"):
+            v = params.get("view")
+            if view_aliases and v not in view_aliases:
+                issues.append(
+                    f"Op #{i}: {kind} view {v!r} unknown")
+
+        elif kind == "gdtFrame":
+            v = params.get("view")
+            if view_aliases and v not in view_aliases:
+                issues.append(
+                    f"Op #{i}: gdtFrame view {v!r} unknown")
+            char = (params.get("characteristic") or "").lower()
+            if char not in valid_gdt_chars:
+                issues.append(
+                    f"Op #{i}: gdtFrame characteristic {params.get('characteristic')!r} "
+                    "not in ASME Y14.5 set "
+                    f"(valid: {sorted(valid_gdt_chars)[:6]}…)")
+            try:
+                tol = float(params.get("tolerance"))
+                if tol <= 0:
+                    issues.append(
+                        f"Op #{i}: gdtFrame tolerance must be > 0")
+            except (TypeError, ValueError):
+                issues.append(
+                    f"Op #{i}: gdtFrame tolerance not numeric")
+
+        elif kind == "datumLabel":
+            v = params.get("view")
+            if view_aliases and v not in view_aliases:
+                issues.append(
+                    f"Op #{i}: datumLabel view {v!r} unknown")
+            label = (params.get("label") or "").strip().upper()
+            # ASME datums are single uppercase letters A-Z, sometimes A1/A2 etc
+            if not label or not label[0].isalpha() or len(label) > 3:
+                issues.append(
+                    f"Op #{i}: datumLabel label {params.get('label')!r} "
+                    "should be a single letter (A-Z) or letter+digit (A1, A2)")
+
+        elif kind == "surfaceFinishCallout":
+            v = params.get("view")
+            if view_aliases and v not in view_aliases:
+                issues.append(
+                    f"Op #{i}: surfaceFinishCallout view {v!r} unknown")
+            try:
+                ra = float(params.get("ra"))
+                if not (0.025 <= ra <= 50):
+                    issues.append(
+                        f"Op #{i}: Ra {ra}µm out of practical range "
+                        "[0.025, 50] (ISO 1302)")
+            except (TypeError, ValueError):
+                issues.append(
+                    f"Op #{i}: surfaceFinishCallout Ra not numeric")
+
+        elif kind == "weldSymbol":
+            wt = (params.get("type") or "").lower()
+            valid = {"fillet", "groove", "spot", "seam", "plug",
+                     "bevel", "j", "u", "v", "square"}
+            if wt not in valid:
+                issues.append(
+                    f"Op #{i}: weldSymbol type {params.get('type')!r} "
+                    f"not in AWS A2.4 set (valid: {sorted(valid)[:6]}…)")
+
+        elif kind in ("revisionTable", "bomTable"):
+            sheet = params.get("sheet")
+            if sheet_aliases and sheet not in sheet_aliases:
+                issues.append(
+                    f"Op #{i}: {kind} sheet {sheet!r} unknown")
+
+        elif kind == "balloon":
+            v = params.get("view")
+            if view_aliases and v not in view_aliases:
+                issues.append(f"Op #{i}: balloon view {v!r} unknown")
+            try:
+                n = int(params.get("number"))
+                if n < 1:
+                    issues.append(f"Op #{i}: balloon number must be ≥ 1")
+            except (TypeError, ValueError):
+                issues.append(f"Op #{i}: balloon number not integer")
 
         # W4: assembly scope ops.
         elif kind == "asmBegin":
