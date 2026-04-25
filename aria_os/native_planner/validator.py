@@ -42,6 +42,12 @@ _VALID_KINDS = {
     # Fusion native-leverage
     "addParameter", "openGenerativeDesign", "createCAMSetup",
     "createMotionStudy", "sheetMetalBase", "sheetMetalFlange",
+    # W5: extended sheet metal vocabulary — uses Fusion's Sheet Metal
+    # workspace API (FlangeFeatures, BendFeatures, etc.) so flat
+    # patterns auto-unfold and bend allowances come from the rule
+    # library.
+    "sheetMetalBend", "sheetMetalLouver", "sheetMetalHem",
+    "sheetMetalUnfold", "sheetMetalCutout", "exportFlatPattern",
     "snapshotVersion",
     # KiCad server-side
     "beginBoard", "setStackup", "addNet", "addTrack", "addVia",
@@ -88,6 +94,14 @@ _REQUIRED_PARAMS = {
     "implicitField":    {"expr", "bounds", "operation"},
     "implicitBoolean":  {"sdf_a", "sdf_b", "op"},
     "meshImportAndCombine": {"stl_path", "target", "operation"},
+    # W5: sheet metal — body-creating ops mark saw_new_body via the
+    # main loop; flange/bend/louver attach to existing edges/faces.
+    "sheetMetalBend":    {"edges", "angle"},
+    "sheetMetalLouver":  {"face", "n_louvers", "size_mm"},
+    "sheetMetalHem":     {"edges", "type"},
+    "sheetMetalUnfold":  {"body"},
+    "sheetMetalCutout":  {"sketch", "operation"},
+    "exportFlatPattern": {"body", "format"},
     # W4: assembly mates — every mate references at least 2 parts.
     # parts is a list of strings of the form "<component_id>" or
     # "<component_id>.<connector>" (e.g. "sun.axis", "carrier.pin_1").
@@ -177,6 +191,74 @@ def validate_plan(plan: list[dict]) -> tuple[bool, list[str]]:
             if alias:
                 feature_aliases.add(alias)
                 extrude_op[alias] = "new"
+
+        # W5: extended sheet metal ops — all attach to existing
+        # geometry (edges/faces of an existing sheet-metal body).
+        elif kind == "sheetMetalBend":
+            if not saw_new_body:
+                issues.append(
+                    f"Op #{i}: sheetMetalBend requires an existing "
+                    "sheet metal body (emit sheetMetalBase first)")
+            try:
+                ang = float(params.get("angle"))
+                if abs(ang) > 270:
+                    issues.append(
+                        f"Op #{i}: sheetMetalBend angle {ang}° exceeds "
+                        "±270 — physically infeasible for a single bend")
+            except (TypeError, ValueError):
+                issues.append(
+                    f"Op #{i}: sheetMetalBend angle not numeric")
+
+        elif kind == "sheetMetalLouver":
+            if not saw_new_body:
+                issues.append(
+                    f"Op #{i}: sheetMetalLouver requires an existing "
+                    "sheet metal body")
+            try:
+                n = int(params.get("n_louvers"))
+                if n < 1 or n > 100:
+                    issues.append(
+                        f"Op #{i}: sheetMetalLouver n_louvers={n} "
+                        "out of [1, 100]")
+            except (TypeError, ValueError):
+                issues.append(
+                    f"Op #{i}: sheetMetalLouver n_louvers not integer")
+
+        elif kind == "sheetMetalHem":
+            if not saw_new_body:
+                issues.append(
+                    f"Op #{i}: sheetMetalHem requires an existing body")
+            hem_type = (params.get("type") or "").lower()
+            if hem_type not in ("closed", "open", "rolled", "teardrop"):
+                issues.append(
+                    f"Op #{i}: sheetMetalHem type must be one of "
+                    f"closed|open|rolled|teardrop (got {params.get('type')!r})")
+
+        elif kind == "sheetMetalUnfold":
+            if not saw_new_body:
+                issues.append(
+                    f"Op #{i}: sheetMetalUnfold requires an existing body")
+
+        elif kind == "sheetMetalCutout":
+            if params.get("sketch") not in sketch_aliases:
+                issues.append(
+                    f"Op #{i}: sheetMetalCutout references unknown sketch "
+                    f"{params.get('sketch')!r}")
+            op_mode = params.get("operation", "cut")
+            if op_mode not in ("cut", "join"):
+                issues.append(
+                    f"Op #{i}: sheetMetalCutout operation must be cut|join "
+                    f"(got {op_mode!r})")
+
+        elif kind == "exportFlatPattern":
+            fmt = (params.get("format") or "").lower()
+            if fmt not in ("dxf", "dwg", "step"):
+                issues.append(
+                    f"Op #{i}: exportFlatPattern format must be dxf/dwg/step "
+                    f"(got {params.get('format')!r})")
+            if not saw_new_body:
+                issues.append(
+                    f"Op #{i}: exportFlatPattern needs an existing body")
 
         elif kind == "extrude":
             if params.get("sketch") not in sketch_aliases:

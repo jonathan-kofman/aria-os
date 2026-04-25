@@ -184,9 +184,17 @@ _LEAN_FAMILIES: list[tuple[tuple[str, ...], str]] = [
     (("planetary", "epicyclic", "gearbox"),
      ("PLANETARY: N_ring = N_sun + 2·N_planet. ratio = 1 + N_ring/N_sun. "
       "Equal spacing requires (N_sun+N_ring) % n_planets == 0.")),
-    (("sheet metal", "louvered", "hem", "flange chain"),
-     ("SHEET METAL: use sheetMetalBase + sheetMetalFlange not "
-      "extrude+shell. K-factor 0.42 default for AL/steel 1mm-3mm.")),
+    (("sheet metal", "louvered", "hem", "flange chain",
+      "enclosure", "chassis panel"),
+     ("SHEET METAL: use sheetMetalBase + sheetMetalFlange + "
+      "sheetMetalBend (NOT extrude+shell). K-factor by material/"
+      "thickness: AL-soft 0.33-0.45, AL-hard 0.42-0.50, steel-mild "
+      "0.38-0.46, stainless 0.40-0.47. Min inside bend radius = "
+      "1×t (steel/AL-soft) or 2.5×t (AL-hard 6061-T6). "
+      "Bend allowance = (π·angle/180) × (R + K·t). "
+      "Add bend relief slot (1.5·t wide × R+0.5·t long) at each "
+      "interior bend to prevent tearing. Default 90° bends, R = t. "
+      "End every plan with exportFlatPattern format='dxf' for laser-cut.")),
     (("gyroid", "lattice", "infill", "tpms", "porosity"),
      ("LATTICE: use implicitInfill operation='intersect' against the "
       "outer shell — clips lattice to outer surface, preserves holes.")),

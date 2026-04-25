@@ -255,6 +255,159 @@ class TestW1AcceptancePrompts:
                      f"got kinds={kinds}")
 
 
+# --- W5 Sheet metal: validator + bend table --------------------------
+
+class TestSheetMetalValidator:
+    """W5 added 6 sheet-metal ops on top of the existing
+    sheetMetalBase/Flange. They depend on a sheet-metal body existing
+    (sheetMetalBase first) and have material/geometry guards."""
+
+    def _sm_base(self):
+        return [
+            {"kind": "beginPlan", "params": {}},
+            {"kind": "newSketch",
+             "params": {"plane": "XY", "alias": "s"}},
+            {"kind": "sketchRect",
+             "params": {"sketch": "s", "w": 200, "h": 150}},
+            {"kind": "sheetMetalBase",
+             "params": {"sketch": "s", "thickness_mm": 1.5,
+                          "alias": "panel"}},
+        ]
+
+    def test_bend_needs_existing_body(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = [
+            {"kind": "beginPlan", "params": {}},
+            {"kind": "sheetMetalBend",
+             "params": {"edges": ["e1"], "angle": 90}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("requires an existing" in i for i in issues)
+
+    def test_bend_angle_in_range(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._sm_base() + [
+            {"kind": "sheetMetalBend",
+             "params": {"edges": ["panel.edge_top"], "angle": 400}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("exceeds" in i for i in issues)
+
+    def test_louver_count_bounds(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._sm_base() + [
+            {"kind": "sheetMetalLouver",
+             "params": {"face": "panel.top", "n_louvers": 0,
+                          "size_mm": [40, 5]}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("out of [1, 100]" in i for i in issues)
+
+    def test_hem_type_must_be_known(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._sm_base() + [
+            {"kind": "sheetMetalHem",
+             "params": {"edges": ["panel.edge_x_pos"],
+                          "type": "fancy"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("closed" in i and "open" in i for i in issues)
+
+    def test_export_flat_format(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._sm_base() + [
+            {"kind": "exportFlatPattern",
+             "params": {"body": "panel", "format": "pdf"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("dxf/dwg/step" in i for i in issues)
+
+    def test_full_enclosure_plan_validates(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._sm_base() + [
+            {"kind": "sheetMetalFlange",
+             "params": {"edge": "panel.edge_x_pos",
+                          "angle": 90, "length_mm": 80,
+                          "alias": "side1"}},
+            {"kind": "sheetMetalBend",
+             "params": {"edges": ["side1.edge_top"], "angle": 90,
+                          "radius_mm": 1.5}},
+            {"kind": "sheetMetalLouver",
+             "params": {"face": "panel.top", "n_louvers": 4,
+                          "size_mm": [40, 5]}},
+            {"kind": "sheetMetalHem",
+             "params": {"edges": ["panel.edge_x_neg"], "type": "open",
+                          "length_mm": 5}},
+            {"kind": "exportFlatPattern",
+             "params": {"body": "panel", "format": "dxf"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert ok, issues
+
+
+class TestBendTable:
+    """Sheet-metal flat-pattern math depends on the right K-factor.
+    Pin material lookup, K-factor ranges, and bend allowance formula."""
+
+    def test_material_family_normalization(self):
+        from aria_os.engineering.bend_table import material_family
+        assert material_family("AL 6061-T6") == "aluminum_hard"
+        assert material_family("3003 sheet") == "aluminum_soft"
+        assert material_family("304 stainless") == "stainless"
+        assert material_family("1018 mild steel") == "steel_mild"
+        assert material_family("brass") == "copper_brass"
+        # Unknown defaults to mild steel
+        assert material_family("unknown alloy") == "steel_mild"
+
+    def test_k_factor_bands(self):
+        from aria_os.engineering.bend_table import k_factor
+        # 2mm AL-soft falls in 1-3mm band → K=0.40
+        assert k_factor("3003", 2.0) == 0.40
+        # 2mm AL-hard 6061-T6 → K=0.45
+        assert k_factor("6061-T6", 2.0) == 0.45
+        # 1.5mm mild steel → K=0.42
+        assert k_factor("A36", 1.5) == 0.42
+
+    def test_min_bend_radius(self):
+        from aria_os.engineering.bend_table import min_bend_radius
+        # AL-hard 6061 needs 2.5×t — typical FAA spec
+        assert min_bend_radius("6061", 2.0) == 5.0
+        # Mild steel 1.5mm gets 1×t = 1.5mm
+        assert min_bend_radius("A36", 1.5) == 1.5
+
+    def test_bend_allowance_formula(self):
+        """A 90° bend at R=2mm with t=1mm and K=0.42 should give a
+        bend allowance of approximately π/2 × (2 + 0.42) = 3.80 mm."""
+        from aria_os.engineering.bend_table import bend_allowance
+        ba = bend_allowance(angle_deg=90, inner_radius_mm=2.0,
+                              thickness_mm=1.0, k=0.42)
+        import math
+        expected = math.pi / 2 * (2.0 + 0.42)
+        assert abs(ba - expected) < 1e-6
+
+    def test_relief_size(self):
+        from aria_os.engineering.bend_table import relief_size
+        w, l = relief_size(thickness_mm=1.5, bend_radius_mm=2.0)
+        assert w == 1.5 * 1.5    # 2.25mm wide slot
+        assert l == 2.0 + 0.5 * 1.5  # 2.75mm long
+
+    def test_bend_table_summary_lean_prompt_friendly(self):
+        from aria_os.engineering.bend_table import (
+            bend_table_summary_for_prompt)
+        summary = bend_table_summary_for_prompt()
+        # Compact for LLM context
+        assert len(summary) < 1500
+        # Covers all 5 material families
+        for fam in ("aluminum_soft", "aluminum_hard", "steel_mild",
+                    "stainless", "copper_brass"):
+            assert fam in summary
+
+
 # --- Lean prompt mode (token-budget fix) ------------------------------
 
 class TestLeanPromptMode:

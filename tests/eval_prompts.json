@@ -117,6 +117,12 @@
     {"id": "scotch_yoke_50", "goal": "scotch yoke linkage, 50mm stroke, 1500 RPM input",
      "expected_ops_any": ["addComponent", "mateSlider", "mateSlot", "motionRevolute"]},
     {"id": "parallel_gripper_40", "goal": "two-jaw parallel gripper, 40mm travel, M3 mounting flange",
-     "expected_ops_any": ["addComponent", "mateSlider", "motionPrismatic"]}
+     "expected_ops_any": ["addComponent", "mateSlider", "motionPrismatic"]},
+    {"id": "enclosure_louvered", "goal": "sheet metal enclosure, 200x150x80mm, 1.5mm steel, 4 louvers on top, M3 mounting on base, with hems on the open edges",
+     "expected_ops_any": ["sheetMetalBase", "sheetMetalFlange", "sheetMetalLouver", "sheetMetalHem"]},
+    {"id": "chassis_panel", "goal": "chassis panel 300x200mm, 1.5mm mild steel, 4 right-angle bends with bend reliefs, 8 M3 holes",
+     "expected_ops_any": ["sheetMetalBase", "sheetMetalBend", "sheetMetalFlange"]},
+    {"id": "rect_to_round_transition", "goal": "rectangular-to-round transition piece, 80x40 rect inlet to 60mm round outlet, 100mm long, 1mm aluminum sheet metal",
+     "expected_ops_any": ["loft", "sheetMetalBase", "sheetMetalFlange"]}
   ]
 }
