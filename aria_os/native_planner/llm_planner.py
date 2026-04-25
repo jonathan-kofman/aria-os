@@ -263,7 +263,8 @@ def plan_from_llm(goal: str, spec: dict,
                    *, quality: str = "balanced",
                    repo_root: Path | None = None,
                    host_context: dict | None = None,
-                   mode: str = "new") -> list[dict]:
+                   mode: str = "new",
+                   lean: bool | None = None) -> list[dict]:
     """Ask an LLM to turn (goal, spec) into a native feature-op plan.
 
     Prefers STRUCTURED OUTPUT (Anthropic tool_use / Gemini
@@ -278,7 +279,17 @@ def plan_from_llm(goal: str, spec: dict,
 
     `mode` can be 'new' (default — fresh plan starting with beginPlan)
     or 'extend' (append features on top of existing design — skip
-    beginPlan, don't addParameter existing names)."""
+    beginPlan, don't addParameter existing names).
+
+    `lean` (default: read ARIA_LEAN_PROMPT env var, else False):
+    swap the static engineering prompt for a goal-targeted micro-
+    prompt and drop the static 6-example block. Saves ~3K-3.5K
+    tokens per request — needed when running against Groq's free
+    tier (12K TPM) where the full prompt fits ~1.8 requests/min."""
+    import os as _os
+    if lean is None:
+        lean = _os.environ.get("ARIA_LEAN_PROMPT", "").lower() in (
+            "1", "true", "yes")
     context_blocks = []
     if host_context:
         params = host_context.get("user_parameters") or []
@@ -356,14 +367,32 @@ def plan_from_llm(goal: str, spec: dict,
     )
 
     # Build a per-call system prompt by appending the retrieval blocks
-    # to the static one. We keep the static prompt cached for the
-    # common case and only recompute when retrieval fired.
+    # to the base. In LEAN mode we substitute a goal-targeted
+    # engineering prompt and drop the static 6-example block — the
+    # dynamic few-shots from W2 retrieval already cover the example
+    # role, and the family-specific engineering snippet is far more
+    # relevant than the full superset. Saves ~3-3.5K tokens per
+    # request which is the difference between fitting Groq's 12K TPM
+    # at 5 req/min vs ~1.8 req/min.
+    if lean:
+        from .engineering_prompt import lean_engineering_prompt
+        base = (
+            "You are a senior mechanical engineer writing CAD feature "
+            "plans for ARIA. You convert a natural-language part "
+            "description plus a parsed spec dict into an ordered list "
+            "of Fusion 360 feature operations. Output is a JSON array "
+            "ONLY — no prose, no markdown fences, no commentary. "
+            "Every element MUST be an object `{kind, params, label}`.\n\n"
+            + lean_engineering_prompt(goal) + "\n\n"
+            + _OPS_SCHEMA)
+    else:
+        base = _SYSTEM_PROMPT
     if api_block or fewshot_block:
-        system_prompt = (_SYSTEM_PROMPT
+        system_prompt = (base
                           + ("\n\n" + api_block if api_block else "")
                           + ("\n\n" + fewshot_block if fewshot_block else ""))
     else:
-        system_prompt = _SYSTEM_PROMPT
+        system_prompt = base
 
     # PREFERRED: structured output (tool_use / responseSchema).
     # Guarantees valid JSON matching the plan schema.

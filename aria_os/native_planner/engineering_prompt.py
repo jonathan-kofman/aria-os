@@ -136,6 +136,90 @@ feature with the violation: "Wall 0.8mm — below 1.5mm CNC min".
 
 ENGINEERING_PRACTICE_PROMPT = _build_engineering_prompt()
 
+
+# --- Lean variants ----------------------------------------------------
+#
+# When token budget is tight (free-tier Groq's 12K TPM is the binding
+# constraint), drop the engineering prompt to a tiny core (~600 chars)
+# plus only the part-family section that matches the goal. Saves
+# ~3-3.5K chars per request, which is the difference between fitting
+# 5 requests/min and 1.8 requests/min in Groq's TPM bucket.
+
+_LEAN_CORE = (
+    "## Engineering conventions\n"
+    "- Bolt holes: drill ISO 273 CLEARANCE diameter, not nominal "
+    "(M3→3.4, M4→4.5, M5→5.5, M6→6.6, M8→9.0, M10→11.0, M12→13.5, "
+    "M16→17.5, M20→22.0).\n"
+    "- Default tolerance ISO 2768-m. Default surface Ra 3.2µm CNC.\n"
+    "- Edge break 0.5mm chamfer/radius on machined parts (ISO 13715).\n"
+    "- 'PCD <D>' = bolt-circle DIAMETER → store as radius (D/2).\n"
+    "- Material callouts use full ASTM ref (e.g. 'AL 6061-T6 per ASTM B221').\n"
+)
+
+# Per-family micro-prompt — added on top of _LEAN_CORE when the goal
+# matches the family's keywords. Each entry < 300 chars.
+_LEAN_FAMILIES: list[tuple[tuple[str, ...], str]] = [
+    (("flange", "bolt circle", "pcd"),
+     ("FLANGE: bolt holes on PCD radius. Even count → first hole at "
+      "90°. Odd → at +X. Center bore datum A, cylindricity 0.05.")),
+    (("impeller", "fan rotor", "blower"),
+     ("IMPELLER: hub first (extrude new). ONE blade off-center "
+      "(extrude join). circularPattern that ONE blade. Bore last (cut). "
+      "'Backward-swept' = positive sweep angle (tip trails).")),
+    (("bracket", "l-bracket", "gusset"),
+     ("BRACKET: holes split across legs when ≥4 (2 base + 2 leg). "
+      "Inside-corner fillet R = wall_t/2. Edge offset = max(2× hole Ø, 8mm).")),
+    (("gear", "involute", "spur", "helical"),
+     ("GEAR: prefer gearFeature one-liner. m = OD/(N+2). Face width "
+      "≈ 6×m. Bore is a SEPARATE extrude(cut) AFTER gearFeature.")),
+    (("shaft", "axle", "pin"),
+     ("SHAFT: shoulder Ø ≥ 1.5× journal Ø. Keyway ISO 6885. "
+      "Total runout 0.02mm on journals.")),
+    (("housing", "enclosure", "case"),
+     ("HOUSING: walls ≥ 1.5mm CNC AL / 2mm FDM. Bosses ≥ 1.5× hole Ø "
+      "wall around. Gasket groove depth ≈ 0.6× gasket Ø.")),
+    (("screw", "bolt", "fastener", "thread"),
+     ("FASTENER: head + shank + threadFeature on the cylindrical "
+      "shank face. M8x1.25 / 1/4-20-UNC / 1/4-NPT spec strings.")),
+    (("planetary", "epicyclic", "gearbox"),
+     ("PLANETARY: N_ring = N_sun + 2·N_planet. ratio = 1 + N_ring/N_sun. "
+      "Equal spacing requires (N_sun+N_ring) % n_planets == 0.")),
+    (("sheet metal", "louvered", "hem", "flange chain"),
+     ("SHEET METAL: use sheetMetalBase + sheetMetalFlange not "
+      "extrude+shell. K-factor 0.42 default for AL/steel 1mm-3mm.")),
+    (("gyroid", "lattice", "infill", "tpms", "porosity"),
+     ("LATTICE: use implicitInfill operation='intersect' against the "
+      "outer shell — clips lattice to outer surface, preserves holes.")),
+    (("conformal cooling", "cooling channel"),
+     ("CONFORMAL: implicitChannel target=block path=spline_sketch. "
+      "Channel diameter typically 4-8mm.")),
+    (("topology", "lightweighted", "minimum mass"),
+     ("TOPOLOGY: implicitField with bounds covering the design "
+      "envelope. operation='new' if standalone, 'intersect' to keep "
+      "to outer envelope.")),
+]
+
+
+def _select_family_prompt(goal: str) -> str:
+    """Return the part-family micro-prompt for `goal`, or empty if no
+    family matches."""
+    g = (goal or "").lower()
+    out = []
+    for keywords, snippet in _LEAN_FAMILIES:
+        if any(k in g for k in keywords):
+            out.append(snippet)
+    return "\n".join(out)
+
+
+def lean_engineering_prompt(goal: str) -> str:
+    """Build a goal-targeted engineering prompt that's ~5× smaller
+    than the full ENGINEERING_PRACTICE_PROMPT. Used by lean-mode
+    eval / token-constrained provider runs."""
+    fam = _select_family_prompt(goal)
+    if fam:
+        return _LEAN_CORE + "\n" + fam
+    return _LEAN_CORE
+
 _STATIC_FALLBACK = r"""
 ## Engineering conventions you MUST apply
 

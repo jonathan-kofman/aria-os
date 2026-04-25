@@ -255,6 +255,116 @@ class TestW1AcceptancePrompts:
                      f"got kinds={kinds}")
 
 
+# --- Lean prompt mode (token-budget fix) ------------------------------
+
+class TestLeanPromptMode:
+    """When the LLM provider is token-limited (Groq 12K TPM is the
+    binding constraint), the lean-prompt path swaps the static 5-page
+    engineering prompt for a goal-targeted micro-prompt and drops the
+    static 6-example block. These tests pin the size budget AND that
+    the family-specific snippet still surfaces for matching goals."""
+
+    def test_lean_engineering_smaller_than_full(self):
+        from aria_os.native_planner.engineering_prompt import (
+            ENGINEERING_PRACTICE_PROMPT, lean_engineering_prompt)
+        full = len(ENGINEERING_PRACTICE_PROMPT)
+        lean = len(lean_engineering_prompt("M6 cap screw"))
+        assert lean < full / 2, (
+            f"Lean engineering prompt {lean} chars is not <50% of "
+            f"full {full} chars")
+
+    def test_lean_picks_up_flange_family(self):
+        from aria_os.native_planner.engineering_prompt import (
+            lean_engineering_prompt)
+        out = lean_engineering_prompt("flange 100mm OD, 4 M6 holes on PCD 80mm")
+        assert "FLANGE" in out
+        # Ensure the unrelated families don't bleed through
+        assert "GEAR:" not in out
+        assert "PLANETARY" not in out
+
+    def test_lean_picks_up_planetary_family(self):
+        from aria_os.native_planner.engineering_prompt import (
+            lean_engineering_prompt)
+        out = lean_engineering_prompt(
+            "planetary gearbox 4:1, 3 planets, NEMA17")
+        assert "PLANETARY" in out
+        # Math hint must be present so the LLM gets the closure rule
+        assert "N_ring = N_sun + 2" in out
+
+    def test_lean_picks_up_implicit_geometry_family(self):
+        from aria_os.native_planner.engineering_prompt import (
+            lean_engineering_prompt)
+        out = lean_engineering_prompt(
+            "aerospace bracket with gyroid lattice infill")
+        assert "LATTICE" in out
+
+    def test_lean_falls_back_to_core_when_no_family(self):
+        from aria_os.native_planner.engineering_prompt import (
+            lean_engineering_prompt, _LEAN_CORE)
+        out = lean_engineering_prompt("an unspecified widget")
+        assert out == _LEAN_CORE.strip() or out.startswith(
+            _LEAN_CORE.strip())
+
+    def test_plan_from_llm_lean_flag_uses_short_prompt(self, monkeypatch):
+        """When `lean=True`, the system prompt passed to the LLM must
+        be smaller than the default static one — bigger means we
+        accidentally regressed to the full prompt."""
+        captured = {}
+
+        def fake_structured(prompt, system, *, quality, repo_root=None):
+            captured["system_len"] = len(system)
+            return [{"kind": "beginPlan", "params": {}, "label": "stub"},
+                    {"kind": "newSketch",
+                     "params": {"plane": "XY", "alias": "s"}},
+                    {"kind": "sketchCircle",
+                     "params": {"sketch": "s", "r": 5}},
+                    {"kind": "extrude",
+                     "params": {"sketch": "s", "distance": 5,
+                                  "operation": "new", "alias": "b"}}]
+        monkeypatch.setattr(
+            "aria_os.native_planner.structured_llm.plan_from_llm_structured",
+            fake_structured)
+
+        from aria_os.native_planner.llm_planner import (
+            plan_from_llm, _SYSTEM_PROMPT)
+        plan_from_llm("M6 cap screw, 30mm long", {},
+                       quality="balanced", lean=True)
+        assert "system_len" in captured
+        # Hard ceiling: lean total (base + retrieval) must fit under
+        # 14K chars (~3.5K tokens) — the target Groq's 12K TPM allows
+        # at 4-5 req/min.
+        assert captured["system_len"] < 14000, (
+            f"Lean prompt is {captured['system_len']} chars, "
+            f"target <14000 (~3.5K tokens for Groq TPM headroom)")
+
+    def test_aria_lean_prompt_env_var(self, monkeypatch):
+        """ARIA_LEAN_PROMPT=1 in the env should auto-enable lean mode
+        even when the caller doesn't pass `lean=` explicitly."""
+        captured = {}
+
+        def fake_structured(prompt, system, *, quality, repo_root=None):
+            captured["system_len"] = len(system)
+            return [{"kind": "beginPlan", "params": {}, "label": "stub"},
+                    {"kind": "newSketch",
+                     "params": {"plane": "XY", "alias": "s"}},
+                    {"kind": "sketchCircle",
+                     "params": {"sketch": "s", "r": 5}},
+                    {"kind": "extrude",
+                     "params": {"sketch": "s", "distance": 5,
+                                  "operation": "new", "alias": "b"}}]
+        monkeypatch.setattr(
+            "aria_os.native_planner.structured_llm.plan_from_llm_structured",
+            fake_structured)
+        monkeypatch.setenv("ARIA_LEAN_PROMPT", "1")
+
+        from aria_os.native_planner.llm_planner import plan_from_llm
+        plan_from_llm("M6 cap screw, 30mm long", {},
+                       quality="balanced")  # no lean kwarg
+        assert captured["system_len"] < 14000, (
+            f"ARIA_LEAN_PROMPT=1 should auto-engage lean mode; "
+            f"got {captured['system_len']} chars")
+
+
 # --- W4 Assembly Designer + mate validator ----------------------------
 
 class TestAssemblyDesigner:
