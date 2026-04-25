@@ -129,6 +129,14 @@
     {"id": "drone_arm_drawing", "goal": "drone arm shop drawing with section view through the bearing bore, surface finish callouts, parallelism tolerance, title block + revision table",
      "expected_ops_any": ["beginDrawing", "sectionView", "gdtFrame", "revisionTable"]},
     {"id": "bracket_with_bom", "goal": "bracket assembly drawing with balloon callouts identifying each component, BOM table, and weld symbol on the gusset",
-     "expected_ops_any": ["beginDrawing", "balloon", "bomTable", "weldSymbol"]}
+     "expected_ops_any": ["beginDrawing", "balloon", "bomTable", "weldSymbol"]},
+    {"id": "verify_thin_al_pocket", "goal": "aluminum mounting plate, 100x60mm, 0.8mm wall thickness, M6 mounting holes",
+     "expected_ops_any": ["verifyPart"]},
+    {"id": "verify_tight_bend", "goal": "6061-T6 sheet metal bracket, 2mm thick, with 1mm bend radius",
+     "expected_ops_any": ["verifyPart"]},
+    {"id": "verify_overstressed_cantilever", "goal": "aluminum cantilever bracket, 100mm long, 10mm wide, 1mm thick, supporting 200N at the tip",
+     "expected_ops_any": ["verifyPart"]},
+    {"id": "verify_thin_pressure_vessel", "goal": "aluminum pressure vessel, 100mm OD, 0.5mm wall, internal pressure 5MPa",
+     "expected_ops_any": ["verifyPart"]}
   ]
 }

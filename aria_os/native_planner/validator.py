@@ -58,6 +58,8 @@ _VALID_KINDS = {
     "sheetMetalBend", "sheetMetalLouver", "sheetMetalHem",
     "sheetMetalUnfold", "sheetMetalCutout", "exportFlatPattern",
     "snapshotVersion",
+    # W7: verification gate
+    "verifyPart",
     # KiCad server-side
     "beginBoard", "setStackup", "addNet", "addTrack", "addVia",
     "addZone", "routeBoard",
@@ -111,6 +113,10 @@ _REQUIRED_PARAMS = {
     "sheetMetalUnfold":  {"body"},
     "sheetMetalCutout":  {"sketch", "operation"},
     "exportFlatPattern": {"body", "format"},
+    # W7: verification gate. Runs DFM + tolerance + drawing audit + (opt)
+    # FEA against the parts produced by the rest of the plan. The
+    # planner auto-appends one of these per plan unless suppressed.
+    "verifyPart":  {"process"},
     # W6: drawing ops — most reference an existing view alias declared
     # by addView. The view alias scope is checked in the main loop.
     "sectionView":      {"sheet", "source_view", "section_line"},
@@ -616,6 +622,21 @@ def validate_plan(plan: list[dict]) -> tuple[bool, list[str]]:
             alias = params.get("alias")
             if alias:
                 feature_aliases.add(alias)
+
+        # W7: verification gate. Doesn't add a body or feature —
+        # just declares a check that runs after geometry is meshed.
+        elif kind == "verifyPart":
+            proc = (params.get("process") or "").lower()
+            try:
+                from aria_os.verification.dfm import available_processes
+                valid = set(available_processes())
+            except Exception:
+                valid = {"cnc_3axis", "sheet_metal", "fdm",
+                          "sla", "casting", "injection_mold"}
+            if proc and proc not in valid:
+                issues.append(
+                    f"Op #{i}: verifyPart process {proc!r} not in "
+                    f"{sorted(valid)[:6]}…")
 
         # W6: drawing scope ops.
         elif kind == "beginDrawing":

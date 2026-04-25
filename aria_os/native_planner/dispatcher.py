@@ -68,6 +68,48 @@ def make_plan(goal: str, spec: dict | None = None,
 
     import inspect as _inspect
 
+    def _maybe_append_verify(plan: list[dict]) -> list[dict]:
+        """Auto-append a verifyPart op at the end of every plan unless
+        the planner already emitted one, the plan is a drawing-only or
+        assembly-only plan (no body), or spec asks to skip via
+        spec['skip_verify'] = True."""
+        if not plan or spec.get("skip_verify"):
+            return plan
+        if any(op.get("kind") == "verifyPart" for op in plan):
+            return plan
+        body_creating = {"extrude", "revolve", "sweep", "loft",
+                         "coil", "gearFeature", "sheetMetalBase"}
+        # Only append if the plan creates real geometry
+        has_geom = any(op.get("kind") in body_creating
+                        and (op.get("params") or {}).get("operation") in
+                            (None, "new")
+                        or op.get("kind") in ("gearFeature",
+                                                "sheetMetalBase")
+                        for op in plan)
+        if not has_geom:
+            return plan
+        # Pick the manufacturing process from goal keywords
+        gtxt = (goal or "").lower()
+        if any(k in gtxt for k in ("sheet metal", "louver", "hem",
+                                     "flange chain", "enclosure")):
+            process = "sheet_metal"
+        elif any(k in gtxt for k in ("3d print", "fdm", "filament")):
+            process = "fdm"
+        elif any(k in gtxt for k in ("sla", "resin print")):
+            process = "sla"
+        elif any(k in gtxt for k in ("cast", "investment", "sand mold")):
+            process = "casting"
+        elif any(k in gtxt for k in ("injection mold", "im part")):
+            process = "injection_mold"
+        else:
+            process = "cnc_3axis"
+        plan.append({
+            "kind": "verifyPart",
+            "params": {"process": process},
+            "label": f"Verify against {process} DFM rules",
+        })
+        return plan
+
     def _try_hardcoded():
         for keywords, fn in _KEYWORD_TO_PLANNER:
             if any(k in g for k in keywords):
@@ -77,14 +119,14 @@ def make_plan(goal: str, spec: dict | None = None,
                 if not ok:
                     raise ValueError(
                         f"Hardcoded planner emitted invalid plan: {issues}")
-                return plan
+                return _maybe_append_verify(plan)
         return None
 
     # --- Fast path: hardcoded planner for known parts ---
     if not prefer_llm:
         plan = _try_hardcoded()
         if plan is not None:
-            return plan
+            return _maybe_append_verify(plan)
 
     if not allow_llm:
         raise NotImplementedError(
@@ -145,6 +187,7 @@ def make_plan(goal: str, spec: dict | None = None,
 
         ok, issues = validate_plan(plan)
         if ok:
+            plan = _maybe_append_verify(plan)
             attempt_record.update({"outcome": "validated", "n_ops": len(plan)})
             history.append(attempt_record)
             _persist_escalation_log(repo_root, goal, history,
@@ -162,6 +205,7 @@ def make_plan(goal: str, spec: dict | None = None,
     # Exhausted all tiers — fall back to hardcoded as a safety net
     hard = _try_hardcoded()
     if hard is not None:
+        hard = _maybe_append_verify(hard)
         history.append({"tier": "hardcoded_fallback", "outcome": "validated"})
         _persist_escalation_log(repo_root, goal, history,
                                   final_outcome="hardcoded_fallback")
