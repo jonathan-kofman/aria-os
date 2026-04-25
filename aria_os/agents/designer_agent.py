@@ -473,6 +473,81 @@ _exp.export(result, _stl,  _exp.ExportTypes.STL)
             print(f"  [{self.name}] Execution failed: {state.generation_error}")
 
 
+_CADQUERY_WORKPLANE_METHODS = {
+    # Geometry primitives
+    "Workplane", "circle", "rect", "polygon", "polyline", "ellipse",
+    "ellipseArc", "spline", "splineApproxChain", "parametricCurve",
+    "lineTo", "line", "moveTo", "move", "vLine", "hLine", "vLineTo",
+    "hLineTo", "threePointArc", "tangentArcPoint", "radiusArc",
+    "sagittaArc", "mirrorY", "mirrorX", "mirrorAxis",
+    # Solid features
+    "extrude", "twistExtrude", "revolve", "loft", "sweep",
+    "shell", "fillet", "chamfer", "draft", "thicken",
+    "cboreHole", "cskHole", "hole", "tag", "untag",
+    "section", "split", "cut", "cutThruAll", "cutBlind",
+    "union", "intersect", "intersection",
+    # Selectors / orientation
+    "faces", "edges", "vertices", "wires", "shells", "solids",
+    "compounds", "first", "last", "item",
+    "workplane", "transformed", "rotateAboutCenter", "rotate",
+    "translate", "mirror", "newObject", "end", "endPlane",
+    "center", "consolidateWires", "close",
+    # Patterns + arrays
+    "rarray", "polarArray", "eachpoint", "each", "pushPoints",
+    "circle", "rect",
+    # Sketches / 2D
+    "Sketch", "sketch", "finalize", "constrain", "vertices", "tag",
+    # Standard Python list / collection methods that often appear
+    "append", "extend", "pop", "insert", "remove", "sort", "reverse",
+    "clear", "copy", "count", "index",
+    # Standard string methods
+    "strip", "lstrip", "rstrip", "split", "rsplit", "splitlines",
+    "lower", "upper", "title", "replace", "startswith", "endswith",
+    "find", "rfind", "format", "join", "encode", "decode",
+    # Standard numeric / math methods
+    "real", "imag", "conjugate", "is_integer",
+    # Common library calls that aren't Workplane
+    "cylinder", "box", "sphere", "wedge", "torus",  # cq.* primitives — actual class methods, OK
+    # Standard tuple/dict methods
+    "items", "keys", "values", "get", "setdefault", "update",
+    # Trimesh / numpy methods that show up in measurement code
+    "BoundingBox", "val", "vals", "Volume", "Area", "Face",
+    "Compound", "Solid", "Wire", "Edge", "Shell", "Vertex",
+    "BRepGProp", "GProp_GProps",
+    # Common file I/O
+    "exportStl", "exportStep", "exportDxf", "exportSvg",
+    "importStl", "importStep",
+}
+
+# Known LLM-hallucinated CadQuery methods → recommended replacement.
+# Flagging these is a hard-error correction, not a soft heuristic.
+_KNOWN_HALLUCINATIONS = {
+    # method-name → (why it's wrong, fix)
+    "rotateExtrude":   ("does not exist on Workplane",
+                          "use .revolve(angleDegrees=…)"),
+    "extrudeRevolve":  ("does not exist",
+                          "use .revolve(angleDegrees=…)"),
+    "createCylinder":  ("not a Workplane method",
+                          "use .circle(r).extrude(h)"),
+    "makeCylinder":    ("not a Workplane method",
+                          "use .circle(r).extrude(h)"),
+    "createSphere":    ("not a Workplane method",
+                          "use .sphere(r) on a cq.Workplane"),
+    "drillHole":       ("does not exist; closest is .hole()",
+                          "use .hole(d) or .cboreHole(d, cb_d, cb_h)"),
+    "filletEdges":     ("not a Workplane method",
+                          "use .edges('|Z').fillet(r) (selector + fillet)"),
+    "patternCircle":   ("not a Workplane method",
+                          "use .polarArray(radius, startAngle, angle, count)"),
+    "pattern":         ("not a Workplane method",
+                          "use .polarArray(...) or .rarray(xSpacing, ySpacing, xCount, yCount)"),
+    "boolean":         ("not a Workplane method",
+                          "use .union(other) / .cut(other) / .intersect(other)"),
+    "mate":            ("not a Workplane method (mates are an Assembly concept)",
+                          "use cq.Assembly().constrain(...)"),
+}
+
+
 def _precheck_code_spec(code: str, spec: dict) -> list[str]:
     """Scan generated CadQuery code for obvious spec-count/dimension mismatches.
 
@@ -482,9 +557,23 @@ def _precheck_code_spec(code: str, spec: dict) -> list[str]:
     spec values (e.g. range(4) when n_blades=6, or OD=160 when od_mm=150).
     False positives are harmless — they add a correction note to the next prompt,
     not a hard failure.
+
+    v2 extension: also flags hallucinated CadQuery method calls
+    (.rotateExtrude(), .createCylinder(), etc.) so the LLM can fix
+    them on the regenerate path before the code ever runs.
     """
     import re
     issues: list[str] = []
+
+    # --- W2.4: hallucinated-method detector (runs first; cheap) ---
+    # Find every `.<name>(` chain — those are the method calls that
+    # would fail at runtime if the method doesn't exist.
+    for m in re.finditer(r"\.([A-Za-z_][A-Za-z0-9_]*)\s*\(", code):
+        name = m.group(1)
+        if name in _KNOWN_HALLUCINATIONS:
+            why, fix = _KNOWN_HALLUCINATIONS[name]
+            issues.append(
+                f"HALLUCINATED METHOD: .{name}() {why}. {fix}.")
 
     # --- Count checks ---
     # Collect all range(N) and standalone N = <int> from the code

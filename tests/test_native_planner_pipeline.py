@@ -255,6 +255,128 @@ class TestW1AcceptancePrompts:
                      f"got kinds={kinds}")
 
 
+# --- W2.5 Tier escalation -----------------------------------------------
+
+class TestTierEscalation:
+    """When the first LLM attempt produces a validator-failing plan,
+    the dispatcher escalates to the next tier AND folds the previous
+    attempt's issues into the next prompt as correction context."""
+
+    def test_first_attempt_failure_feeds_issues_to_second(self, monkeypatch):
+        """Sanity-check the correction-context mechanism: simulate the
+        first call returning a plan with issues, second returning a
+        valid plan, and verify the second call saw the first's issues."""
+        seen_goals: list[str] = []
+
+        def fake_plan(goal, spec, *, quality, repo_root=None,
+                       host_context=None, mode="new"):
+            seen_goals.append(goal)
+            if len(seen_goals) == 1:
+                # Plan that will fail validation (no body-creating op)
+                return [{"kind": "beginPlan", "params": {}}]
+            # Second call: emit a valid plan
+            return [
+                {"kind": "beginPlan", "params": {}},
+                {"kind": "newSketch",
+                 "params": {"plane": "XY", "alias": "s"}},
+                {"kind": "sketchCircle",
+                 "params": {"sketch": "s", "r": 5}},
+                {"kind": "extrude",
+                 "params": {"sketch": "s", "distance": 5,
+                              "operation": "new", "alias": "b"}},
+            ]
+        monkeypatch.setattr(
+            "aria_os.native_planner.dispatcher.plan_from_llm", fake_plan)
+
+        from aria_os.native_planner.dispatcher import make_plan
+        plan = make_plan("widget", {}, prefer_llm=True, quality="fast")
+        assert plan is not None
+        assert len(seen_goals) == 2, (
+            f"Expected exactly 2 attempts, got {len(seen_goals)}")
+        # Second prompt should mention the first attempt's issues
+        assert "Previous attempt had issues" in seen_goals[1], (
+            f"Correction context missing from 2nd attempt: "
+            f"{seen_goals[1][:200]}")
+
+    def test_parse_error_feeds_to_next_tier(self, monkeypatch):
+        """When the first tier raises ValueError (parse failure), the
+        next tier should receive the parse-error message as context."""
+        seen_goals: list[str] = []
+
+        def fake_plan(goal, spec, *, quality, repo_root=None,
+                       host_context=None, mode="new"):
+            seen_goals.append(goal)
+            if len(seen_goals) == 1:
+                raise ValueError("LLM returned no parseable plan")
+            return [
+                {"kind": "beginPlan", "params": {}},
+                {"kind": "newSketch",
+                 "params": {"plane": "XY", "alias": "s"}},
+                {"kind": "sketchCircle",
+                 "params": {"sketch": "s", "r": 5}},
+                {"kind": "extrude",
+                 "params": {"sketch": "s", "distance": 5,
+                              "operation": "new", "alias": "b"}},
+            ]
+        monkeypatch.setattr(
+            "aria_os.native_planner.dispatcher.plan_from_llm", fake_plan)
+
+        from aria_os.native_planner.dispatcher import make_plan
+        plan = make_plan("widget", {}, prefer_llm=True, quality="fast")
+        assert plan is not None
+        assert "parseable JSON" in seen_goals[1], seen_goals[1][:300]
+
+
+# --- W2.4 Code precheck v2: hallucinated CadQuery methods --------------
+
+class TestHallucinatedMethodDetector:
+    """The LLM frequently invents CadQuery methods that don't exist
+    (.rotateExtrude(), .createCylinder(), etc.). These tests pin the
+    precheck so a regen prompt always has the corrective context."""
+
+    def _check(self, code: str) -> list[str]:
+        from aria_os.agents.designer_agent import _precheck_code_spec
+        return _precheck_code_spec(code, spec={})
+
+    def test_rotateextrude_caught(self):
+        issues = self._check(
+            "import cadquery as cq\n"
+            "result = cq.Workplane('XY').circle(5).rotateExtrude(360)\n")
+        assert any("rotateExtrude" in i and "revolve" in i for i in issues)
+
+    def test_createcylinder_caught(self):
+        issues = self._check(
+            "result = cq.Workplane('XY').createCylinder(5, 10)\n")
+        assert any("createCylinder" in i for i in issues)
+
+    def test_drillhole_caught(self):
+        issues = self._check(
+            "result = result.drillHole(5)\n")
+        assert any(".drillHole" in i for i in issues)
+
+    def test_filletedges_caught(self):
+        issues = self._check(
+            "result = result.filletEdges(2)\n")
+        assert any("filletEdges" in i for i in issues)
+
+    def test_real_cadquery_doesnt_trip_detector(self):
+        """A clean CadQuery program that uses .extrude(), .fillet(),
+        .revolve(), .union() must produce ZERO hallucination issues."""
+        code = (
+            "import cadquery as cq\n"
+            "r = cq.Workplane('XY').circle(50).extrude(10)\n"
+            "r = r.faces('>Z').workplane().circle(20).cutThruAll()\n"
+            "r = r.faces('|Z').edges('not(>>Z)').fillet(2)\n"
+            "r = r.union(other_solid)\n"
+            "r = r.translate((10, 0, 0)).rotate((0,0,0),(0,0,1), 30)\n"
+        )
+        issues = self._check(code)
+        # No HALLUCINATED MESSAGES allowed
+        hallucinations = [i for i in issues if "HALLUCINATED" in i]
+        assert not hallucinations, (
+            f"Clean code tripped hallucination detector: {hallucinations}")
+
+
 # --- W2.3 Retrieval injection in LLM planner --------------------------
 
 class TestRetrievalInjection:
