@@ -26,11 +26,14 @@
       RhinoCommon NuGet is enough — Rhino supplies the real one at runtime.
     -->
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
-    <!-- Canonical Rhino 8 plug-in package directory. Every build
-         syncs the .rhp + its deps here so Rhino auto-discovers
-         the latest version on next launch — no drag-drop, no
-         "ID already in use" duplication. -->
-    <RhinoPluginInstallDir>$(APPDATA)\McNeel\Rhinoceros\packages\8.0\AriaPanel</RhinoPluginInstallDir>
+    <!-- Per-user development install path. NOT under
+         %APPDATA%\McNeel\Rhinoceros\packages\ — that's the Yak
+         package directory and Rhino's PackageManager auto-cleans
+         entries lacking a manifest.yml. Installing under
+         %LOCALAPPDATA%\AriaPanel\Rhino8\ is invisible to Yak;
+         Rhino loads it via the PluginManager → Install one-time
+         registration which then sticks across rebuilds. -->
+    <RhinoPluginInstallDir>$(LOCALAPPDATA)\AriaPanel\Rhino8</RhinoPluginInstallDir>
   </PropertyGroup>
 
   <!-- Post-build sync: copy the entire output dir to the Rhino
