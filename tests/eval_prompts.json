@@ -137,6 +137,14 @@
     {"id": "verify_overstressed_cantilever", "goal": "aluminum cantilever bracket, 100mm long, 10mm wide, 1mm thick, supporting 200N at the tip",
      "expected_ops_any": ["verifyPart"]},
     {"id": "verify_thin_pressure_vessel", "goal": "aluminum pressure vessel, 100mm OD, 0.5mm wall, internal pressure 5MPa",
-     "expected_ops_any": ["verifyPart"]}
+     "expected_ops_any": ["verifyPart"]},
+    {"id": "modality_sketch_bracket", "goal": "L-bracket sketch on iPad, 80x60mm legs, 5mm thick, 4 mounting holes",
+     "modality": "sketch", "expected_ops_any": ["extrude", "circularPattern"]},
+    {"id": "modality_image_motor_mount", "goal": "photo of NEMA17 stepper motor + caliper showing 42.3mm width — generate matching motor mount plate",
+     "modality": "image", "expected_ops_any": ["extrude", "circularPattern"]},
+    {"id": "modality_multiview_impeller", "goal": "3-photo orbit (top/front/iso) of an existing centrifugal impeller — reverse-engineer to CadQuery",
+     "modality": "multiview", "expected_ops_any": ["extrude", "circularPattern"]},
+    {"id": "modality_voice_resize_hole", "goal": "voice utterance 'make this hole 2mm bigger' with hover context on bolt_hole_3",
+     "modality": "voice", "expected_ops_any": ["addParameter"]}
   ]
 }
