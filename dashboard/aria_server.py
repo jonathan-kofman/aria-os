@@ -1272,6 +1272,85 @@ async def download_artifact(path: str):
     return FileResponse(resolved, media_type=media, filename=Path(resolved).name)
 
 
+class ExportGltfRequest(BaseModel):
+    """Body schema for /api/export_gltf.
+
+    `stl_path` is required; `structsight_json_path` is optional. When the
+    JSON is absent the .glb still bakes a neutral grey tint, which keeps the
+    VR viewer happy if StructSight hasn't run yet.
+    """
+    stl_path: str
+    structsight_json_path: str | None = None
+    out_path: str | None = None
+
+
+@app.post("/api/export_gltf")
+async def export_gltf_endpoint(req: ExportGltfRequest):
+    """Convert an STL to a structsight-vr-ready .glb with optional risk
+    tinting. Path-traversal protected: every input/output is required to
+    resolve inside REPO_ROOT/outputs/.
+
+    Returns ``{glb_path, vertex_count, face_count, tint}``.
+    """
+    import os
+    from aria_os.generators.gltf_export import export_to_gltf
+
+    allowed_prefix = os.path.realpath(str(REPO_ROOT / "outputs"))
+
+    def _check(p: str | None, label: str) -> str | None:
+        if p is None or p == "":
+            return None
+        resolved = os.path.realpath(p)
+        if not (resolved == allowed_prefix
+                or resolved.startswith(allowed_prefix + os.sep)):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access denied: {label} outside outputs directory",
+            )
+        return resolved
+
+    stl_resolved = _check(req.stl_path, "stl_path")
+    if stl_resolved is None or not Path(stl_resolved).is_file():
+        raise HTTPException(
+            status_code=404, detail=f"STL not found: {req.stl_path}"
+        )
+    ssj_resolved = _check(req.structsight_json_path, "structsight_json_path")
+    if ssj_resolved is not None and not Path(ssj_resolved).is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"StructSight JSON not found: {req.structsight_json_path}",
+        )
+
+    # Out path: default to <stl_dir>/part.glb if not provided. Either way we
+    # confirm it lands in outputs/.
+    out_path = req.out_path
+    if not out_path:
+        out_path = str(Path(stl_resolved).with_name("part.glb"))
+    out_resolved = os.path.realpath(out_path)
+    if not (out_resolved == allowed_prefix
+            or out_resolved.startswith(allowed_prefix + os.sep)):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: out_path outside outputs directory",
+        )
+
+    try:
+        result = export_to_gltf(
+            stl_path=stl_resolved,
+            structsight_json=ssj_resolved,
+            out_path=out_resolved,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500, detail=f"glTF export failed: {e}"
+        )
+    return result
+
+
 @app.get("/api/parts/{part_id}/stl")
 async def get_stl(part_id: str):
     """Serve the STL file for a part."""
@@ -1330,6 +1409,217 @@ async def cem_summary():
         return {"cem": cem_entries[:100]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------- #
+# W9: aria-vr live-sync + voice-plan endpoints
+# --------------------------------------------------------------------------- #
+# A connected aria-vr headset opens a WebSocket to /ws/model_updates and
+# subscribes to "new_model" / "new_measurements" events. When a pipeline
+# run lands a fresh .glb under outputs/, the dashboard broadcasts the URL.
+# The headset auto-reloads the scene with the new model.
+#
+# /api/voice_plan accepts a multipart audio upload + (optional) host
+# context, transcribes via the existing speech_to_text path, hands the
+# transcription to the planner, and returns the resulting plan + the URL
+# of the freshly exported model so the headset can chain to model-sync.
+
+from fastapi import WebSocket, WebSocketDisconnect, UploadFile, File, Form
+
+# In-memory subscriber set. WebSocket clients register here; the helper
+# `broadcast_model_update(url)` fans out events. Survival of process
+# restart isn't a concern — clients reconnect.
+_VR_WS_CLIENTS: set["WebSocket"] = set()
+_VR_WS_LOCK = asyncio.Lock()
+
+
+async def broadcast_model_update(model_url: str,
+                                    *, run_id: str | None = None,
+                                    extras: dict | None = None) -> int:
+    """Fan out a 'new_model' event to every connected aria-vr client.
+    Returns the number of subscribers that received it. Failed sockets
+    are silently dropped from the set."""
+    payload = {
+        "event": "new_model",
+        "url":   model_url,
+        "run_id": run_id,
+    }
+    if extras:
+        payload.update(extras)
+    msg = json.dumps(payload, default=str)
+    dead: list[WebSocket] = []
+    async with _VR_WS_LOCK:
+        clients = list(_VR_WS_CLIENTS)
+    for ws in clients:
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.append(ws)
+    if dead:
+        async with _VR_WS_LOCK:
+            for ws in dead:
+                _VR_WS_CLIENTS.discard(ws)
+    return len(clients) - len(dead)
+
+
+@app.websocket("/ws/model_updates")
+async def vr_model_updates(ws: WebSocket):
+    """aria-vr connects here and listens for new_model events. Client
+    can send {'event': 'ping'} every 30s to keep the connection alive
+    behind aggressive proxies."""
+    await ws.accept()
+    async with _VR_WS_LOCK:
+        _VR_WS_CLIENTS.add(ws)
+    # Send a hello so the client knows the channel is live + can sync
+    # its UI state ("connected to ARIA").
+    try:
+        await ws.send_text(json.dumps({
+            "event":      "hello",
+            "subscribers": len(_VR_WS_CLIENTS),
+        }))
+        while True:
+            text = await ws.receive_text()
+            try:
+                msg = json.loads(text)
+            except Exception:
+                continue
+            # Echo pings; ignore everything else.
+            if msg.get("event") == "ping":
+                await ws.send_text(json.dumps({"event": "pong"}))
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        async with _VR_WS_LOCK:
+            _VR_WS_CLIENTS.discard(ws)
+
+
+@app.post("/api/voice_plan")
+async def voice_plan(
+    audio: UploadFile = File(...),
+    host_context_json: str | None = Form(None),
+    quality: str = Form("balanced"),
+):
+    """Accept a recorded utterance from the aria-vr headset, transcribe
+    it, run it through the planner with optional host_context (the
+    selected feature in the headset's measurement tool, if any), and
+    return both the plan + a URL for the freshly exported model so the
+    headset can chain to model-sync.
+
+    The audio file is whatever MediaRecorder captured on Quest — usually
+    audio/webm;codecs=opus. We pass through to the existing
+    aria_os.speech_to_text helper which already understands the chain.
+    """
+    import tempfile
+
+    # 1. Stage the upload to a temp WAV/WEBM the existing transcribe
+    # helper can read. The helper handles webm → wav internally.
+    suffix = Path(audio.filename or "voice.webm").suffix or ".webm"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await audio.read())
+        wav_path = Path(tmp.name)
+
+    try:
+        from aria_os.speech_to_text import transcribe
+    except ImportError:
+        raise HTTPException(
+            status_code=503, detail="speech_to_text module unavailable")
+    text = transcribe(wav_path)
+    if not text:
+        raise HTTPException(
+            status_code=502,
+            detail="Transcription failed (no STT backend available)")
+
+    # 2. Parse optional host_context (selection, user_parameters, etc.)
+    host_context: dict | None = None
+    if host_context_json:
+        try:
+            host_context = json.loads(host_context_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"host_context_json malformed: {exc}")
+
+    # 3. Run through voice-in-context for the demonstrative resolution
+    # path (handles "make this hole 2mm bigger" with hover context).
+    try:
+        from aria_os.agents.voice_in_context import (
+            _resolve_target, _classify_intent,
+            _build_goal_with_target,
+        )
+    except ImportError:
+        raise HTTPException(
+            status_code=503, detail="voice_in_context module unavailable")
+    target = _resolve_target(text, host_context or {})
+    intent = _classify_intent(text)
+    resolved_goal = _build_goal_with_target(text, target)
+    mode = "modify" if intent == "modify" else (
+        "extend" if intent == "extend" else "new")
+
+    # 4. Plan
+    try:
+        from aria_os.native_planner.dispatcher import make_plan
+        plan = make_plan(
+            resolved_goal, {},
+            prefer_llm=True, quality=quality,
+            repo_root=REPO_ROOT, host_context=host_context, mode=mode)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Planner failed: {exc}")
+
+    # 5. Try to find the most recent run output to broadcast — the
+    # planner doesn't itself execute geometry yet (executor lives in
+    # the host bridge), so we hand the headset the plan and any
+    # already-existing model URL the user is iterating on.
+    runs_dir = REPO_ROOT / "outputs" / "runs"
+    latest_glb_url: str | None = None
+    latest_run_id: str | None = None
+    if runs_dir.is_dir():
+        try:
+            runs = sorted(
+                (p for p in runs_dir.iterdir() if p.is_dir()),
+                key=lambda p: p.stat().st_mtime, reverse=True)
+            for r in runs[:5]:
+                glb = r / "part.glb"
+                if glb.is_file():
+                    latest_run_id = r.name
+                    latest_glb_url = f"/outputs/runs/{r.name}/part.glb"
+                    break
+        except Exception:
+            pass
+
+    # 6. Notify VR clients so the headset can chain to model-sync
+    if latest_glb_url:
+        await broadcast_model_update(
+            latest_glb_url, run_id=latest_run_id,
+            extras={"trigger": "voice_plan", "goal": resolved_goal})
+
+    return {
+        "transcription":   text,
+        "intent":          intent,
+        "resolved_target": target,
+        "goal":            resolved_goal,
+        "mode":            mode,
+        "plan":            plan,
+        "model_url":       latest_glb_url,
+        "run_id":          latest_run_id,
+    }
+
+
+@app.post("/api/measurements/save")
+async def save_measurements(payload: dict):
+    """aria-vr posts the user's measurement annotations here so they
+    persist alongside the run artifacts. Payload shape:
+        {run_id, model_url, measurements: [{kind, points, value, label}]}
+    """
+    run_id = (payload or {}).get("run_id") or "untracked"
+    out_dir = REPO_ROOT / "outputs" / "vr" / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    f = out_dir / "measurements.json"
+    f.write_text(json.dumps(payload, indent=2, default=str),
+                  encoding="utf-8")
+    return {"ok": True, "saved_to": str(f.relative_to(REPO_ROOT))}
 
 
 # --------------------------------------------------------------------------- #
