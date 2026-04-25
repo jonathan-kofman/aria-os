@@ -13,6 +13,12 @@
     <!-- Don't generate the runtime AppHost (we're a class library
          loaded by Rhino, not a standalone exe). -->
     <UseAppHost>false</UseAppHost>
+    <!-- Class libraries normally don't get a runtimeconfig.json,
+         but Rhino 8's plug-in loader on .NET 7 needs one to know
+         which runtime version to bind. Without this, drag-drop
+         silently fails with the generic "unable to load plug-in"
+         message — no further detail. -->
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
     <!-- Lock-file assemblies (Newtonsoft.Json, WebView2) MUST be
          copied next to the .rhp so Rhino can resolve them at load
          time. The RhinoCommon NuGet's .props file already marks

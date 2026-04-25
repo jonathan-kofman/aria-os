@@ -133,7 +133,7 @@ namespace AriaPanel
         }
     }
 
-    [System.Runtime.InteropServices.Guid("b2c3d4e5-f6a7-8901-bcde-f12345678901")]
+    [System.Runtime.InteropServices.Guid("9b7a8636-e1fb-4a09-9cde-d8de5533ab44")]
     public class AriaGenerateCommand : Rhino.Commands.Command
     {
         public override string EnglishName => "AriaGenerate";

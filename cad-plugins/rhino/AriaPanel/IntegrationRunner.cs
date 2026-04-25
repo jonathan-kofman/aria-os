@@ -41,6 +41,7 @@ namespace AriaPanel
     /// writes per-op + summary JSON. Designed to be unattended:
     /// reads paths from env vars, no UI prompts.
     /// </summary>
+    [System.Runtime.InteropServices.Guid("a26155a0-c0f3-4ce1-be5c-8ee6a33eeaaa")]
     public class IntegrationRunnerCommand : Command
     {
         public override string EnglishName => "AriaIntegrate";
