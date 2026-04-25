@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ARIA-OS — Insights</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --fg: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #f97316;
+    --green: #4ade80;
+    --amber: #fbbf24;
+    --red:   #ef4444;
+    --border: #30363d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, "SF Pro Display", system-ui, sans-serif;
+  }
+  h1 { font-size: 22px; margin: 0 0 8px; color: var(--accent); }
+  .subtitle { color: var(--muted); margin-bottom: 24px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .card h2 {
+    font-size: 13px; font-weight: 600;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.05em; margin: 0 0 12px;
+  }
+  .stat {
+    font-size: 32px; font-weight: 600; line-height: 1;
+    margin-bottom: 4px;
+  }
+  .stat.green { color: var(--green); }
+  .stat.amber { color: var(--amber); }
+  .stat.red   { color: var(--red); }
+  .stat-sub { color: var(--muted); font-size: 12px; }
+  table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  th, td {
+    text-align: left; padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  th { color: var(--muted); font-weight: 500; }
+  tr:last-child td { border-bottom: none; }
+  .bar {
+    height: 4px; background: var(--accent); border-radius: 2px;
+    margin-top: 4px;
+  }
+  pre.code {
+    background: #0a0e13; padding: 8px 12px; border-radius: 4px;
+    overflow-x: auto; font-size: 12px; color: var(--muted);
+    margin: 0;
+  }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 99px;
+    font-size: 11px; font-weight: 600;
+  }
+  .pill.green { background: rgba(74,222,128,0.15); color: var(--green); }
+  .pill.amber { background: rgba(251,191,36,0.15); color: var(--amber); }
+  .pill.red   { background: rgba(239,68,68,0.15);  color: var(--red); }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  .row { display: flex; justify-content: space-between; padding: 4px 0; }
+  .row span:last-child { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>ARIA-OS Insights</h1>
+<div class="subtitle" id="last-updated">Loading…</div>
+
+<div class="grid">
+
+  <!-- ============ Card: Eval pass rate ============ -->
+  <div class="card">
+    <h2>LLM Planner — Latest Eval</h2>
+    <div class="stat" id="eval-rate">—</div>
+    <div class="stat-sub" id="eval-subtitle">No eval runs yet</div>
+    <div class="bar" id="eval-bar" style="width: 0%"></div>
+    <table id="eval-history" style="margin-top: 12px;"></table>
+  </div>
+
+  <!-- ============ Card: Feedback (accept / reject) ============ -->
+  <div class="card">
+    <h2>User Feedback</h2>
+    <div class="stat green" id="fb-accept-rate">—</div>
+    <div class="stat-sub" id="fb-subtitle">Accept rate across all runs</div>
+    <table id="fb-counts" style="margin-top: 12px;"></table>
+  </div>
+
+  <!-- ============ Card: Top failure modes ============ -->
+  <div class="card">
+    <h2>Top Failure Modes</h2>
+    <table id="failures"></table>
+  </div>
+
+  <!-- ============ Card: Few-shot usage ============ -->
+  <div class="card">
+    <h2>Few-shot Library</h2>
+    <div class="stat" id="fewshot-count">—</div>
+    <div class="stat-sub">Total few-shots (curated + auto-promoted)</div>
+    <table id="fewshot-breakdown" style="margin-top: 12px;"></table>
+  </div>
+
+  <!-- ============ Card: A/B comparison ============ -->
+  <div class="card" style="grid-column: 1 / -1;">
+    <h2>Latest A/B Variant Comparison</h2>
+    <div id="ab-summary" class="empty">No A/B run yet — invoke
+      <code>scripts/ab_eval.py</code> to populate.</div>
+    <table id="ab-table" style="display: none;"></table>
+  </div>
+
+</div>
+
+<script type="module">
+const API = window.location.origin;
+
+async function fetchJson(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
+function fmtPct(x) {
+  if (x === null || x === undefined) return "—";
+  return (x * 100).toFixed(0) + "%";
+}
+
+function colorClass(rate) {
+  if (rate === null) return "";
+  if (rate >= 0.80) return "green";
+  if (rate >= 0.60) return "amber";
+  return "red";
+}
+
+// --- Eval history ---
+const evalRuns = await fetchJson(`${API}/api/insights/eval_history`);
+const evalRate = document.getElementById("eval-rate");
+const evalBar  = document.getElementById("eval-bar");
+const evalSub  = document.getElementById("eval-subtitle");
+const evalTbl  = document.getElementById("eval-history");
+if (evalRuns && evalRuns.length) {
+  const latest = evalRuns[0];
+  evalRate.textContent = fmtPct(latest.pass_rate);
+  evalRate.className = "stat " + colorClass(latest.pass_rate);
+  evalBar.style.width = (latest.pass_rate * 100).toFixed(0) + "%";
+  evalSub.textContent =
+    `${latest.counts.PASS}/${latest.n_prompts} passed — ${latest.timestamp_utc.slice(0,16).replace("T", " ")} UTC`;
+  evalTbl.innerHTML =
+    "<tr><th>Date</th><th>Pass rate</th><th>n</th></tr>" +
+    evalRuns.slice(0, 5).map(r =>
+      `<tr><td>${r.timestamp_utc.slice(0,10)}</td>
+           <td><span class="pill ${colorClass(r.pass_rate)}">${fmtPct(r.pass_rate)}</span></td>
+           <td>${r.n_prompts}</td></tr>`).join("");
+}
+
+// --- Feedback ---
+const fb = await fetchJson(`${API}/api/feedback/stats`);
+const fbRate = document.getElementById("fb-accept-rate");
+const fbCounts = document.getElementById("fb-counts");
+if (fb && fb.n_total > 0) {
+  fbRate.textContent = fmtPct(fb.accept_rate);
+  fbCounts.innerHTML =
+    "<tr><th>Decision</th><th>Count</th></tr>" +
+    Object.entries(fb.counts).map(([k, v]) =>
+      `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+} else {
+  fbRate.textContent = "—";
+  fbCounts.innerHTML =
+    `<tr><td colspan="2" class="empty">No feedback yet — POST to /api/feedback to populate.</td></tr>`;
+}
+
+// --- Top failure modes (from feedback failed_op stats) ---
+const fail = document.getElementById("failures");
+if (fb && fb.by_failed_op && Object.keys(fb.by_failed_op).length) {
+  fail.innerHTML =
+    "<tr><th>Op</th><th>Failures</th></tr>" +
+    Object.entries(fb.by_failed_op).map(([op, n]) =>
+      `<tr><td><code>${op}</code></td><td>${n}</td></tr>`).join("");
+} else {
+  fail.innerHTML =
+    `<tr><td colspan="2" class="empty">No failure-tagged feedback yet.</td></tr>`;
+}
+
+// --- Few-shot library ---
+const fs = await fetchJson(`${API}/api/insights/fewshots`);
+if (fs) {
+  document.getElementById("fewshot-count").textContent =
+    fs.curated_count + fs.auto_count;
+  document.getElementById("fewshot-breakdown").innerHTML =
+    `<tr><td>Curated</td><td>${fs.curated_count}</td></tr>
+     <tr><td>Auto-promoted</td><td>${fs.auto_count}</td></tr>`;
+}
+
+// --- A/B comparison ---
+const ab = await fetchJson(`${API}/api/insights/ab_latest`);
+const abEl = document.getElementById("ab-summary");
+const abTbl = document.getElementById("ab-table");
+if (ab && ab.delta_pp !== undefined) {
+  const sign = ab.delta_pp >= 0 ? "+" : "";
+  const cls = ab.delta_pp >= 0 ? "green" : "red";
+  abEl.innerHTML =
+    `<div class="row"><span>Control (${ab.control_label})</span>
+       <span>${fmtPct(ab.control_pass_rate)}</span></div>
+     <div class="row"><span>Candidate (${ab.candidate_label})</span>
+       <span>${fmtPct(ab.candidate_pass_rate)}</span></div>
+     <div class="row"><span>Delta</span>
+       <span class="pill ${cls}">${sign}${ab.delta_pp.toFixed(1)} pp</span></div>
+     <div class="row"><span>Regressions / improvements</span>
+       <span>${ab.n_regressions} / ${ab.n_improvements}</span></div>`;
+  abEl.classList.remove("empty");
+}
+
+document.getElementById("last-updated").textContent =
+  "Updated " + new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC";
+</script>
+
+</body>
+</html>

@@ -1623,6 +1623,139 @@ async def save_measurements(payload: dict):
 
 
 # --------------------------------------------------------------------------- #
+# W10: feedback capture (knowledge loop input)
+# --------------------------------------------------------------------------- #
+
+class FeedbackRequest(BaseModel):
+    run_id: str
+    goal: str
+    plan: list[dict]
+    decision: str   # accept | reject | needs_revision
+    reason: str = ""
+    spec: dict = {}
+    failed_op_index: int | None = None
+    user_id: str | None = None
+    host: str = "dashboard"
+    extras: dict = {}
+
+
+@app.post("/api/feedback")
+async def submit_feedback(req: FeedbackRequest):
+    """Capture user accept/reject for a generated plan. Powers the
+    W10 auto-promote (W10.2), failure-mining (W10.3), and SFT export
+    (W10.4) pipelines."""
+    if req.decision not in ("accept", "reject", "needs_revision"):
+        raise HTTPException(
+            status_code=422,
+            detail="decision must be accept|reject|needs_revision")
+    try:
+        from aria_os.feedback import FeedbackEntry, record_feedback
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"feedback module unavailable: {exc}")
+    entry = FeedbackEntry(
+        run_id=req.run_id, goal=req.goal, plan=req.plan,
+        decision=req.decision, reason=req.reason, spec=req.spec,
+        failed_op_index=req.failed_op_index, user_id=req.user_id,
+        host=req.host, extras=req.extras or {})
+    path = record_feedback(entry, repo_root=REPO_ROOT)
+    return {
+        "ok": True,
+        "saved_to": str(path.relative_to(REPO_ROOT)),
+        "plan_hash": entry.plan_hash,
+    }
+
+
+@app.get("/api/feedback/stats")
+async def feedback_stats():
+    """Aggregate feedback stats — used by the insights dashboard."""
+    try:
+        from aria_os.feedback import stats as _stats
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"feedback module unavailable: {exc}")
+    return _stats(repo_root=REPO_ROOT)
+
+
+# --------------------------------------------------------------------------- #
+# W10.6: insights data endpoints (powers dashboard/insights.html)
+# --------------------------------------------------------------------------- #
+
+@app.get("/insights")
+async def insights_view():
+    """Serve the static insights dashboard."""
+    p = Path(__file__).resolve().parent / "insights.html"
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="insights.html missing")
+    return FileResponse(str(p), media_type="text/html")
+
+
+@app.get("/api/insights/eval_history")
+async def insights_eval_history(limit: int = 20):
+    """Return the last N eval runs from outputs/eval/<ts>/results.json
+    for the insights dashboard's pass-rate chart."""
+    base = REPO_ROOT / "outputs" / "eval"
+    if not base.is_dir():
+        return []
+    runs = []
+    for d in sorted(base.iterdir(), reverse=True):
+        if not d.is_dir():
+            continue
+        results = d / "results.json"
+        if not results.is_file():
+            continue
+        try:
+            data = json.loads(results.read_text(encoding="utf-8"))
+            runs.append({
+                "timestamp_utc": data.get("timestamp_utc",
+                                              d.name),
+                "n_prompts":     data.get("n_prompts", 0),
+                "counts":        data.get("counts", {}),
+                "pass_rate":     data.get("pass_rate", 0),
+                "run_dir":       d.name,
+            })
+        except Exception:
+            continue
+        if len(runs) >= limit:
+            break
+    return runs
+
+
+@app.get("/api/insights/fewshots")
+async def insights_fewshots():
+    """Count the curated vs auto-promoted few-shots."""
+    fs_dir = REPO_ROOT / "aria_os" / "native_planner" / "fewshots"
+    if not fs_dir.is_dir():
+        return {"curated_count": 0, "auto_count": 0}
+    files = list(fs_dir.glob("*.json"))
+    curated = sum(1 for f in files if not f.name.startswith("auto_"))
+    auto = sum(1 for f in files if f.name.startswith("auto_"))
+    return {"curated_count": curated, "auto_count": auto,
+            "all_files": [f.name for f in files]}
+
+
+@app.get("/api/insights/ab_latest")
+async def insights_ab_latest():
+    """Most recent A/B comparison.json from outputs/eval/ab/<ts>/."""
+    base = REPO_ROOT / "outputs" / "eval" / "ab"
+    if not base.is_dir():
+        return {}
+    runs = sorted((d for d in base.iterdir() if d.is_dir()),
+                    reverse=True)
+    for d in runs:
+        comparison = d / "comparison.json"
+        if comparison.is_file():
+            try:
+                return json.loads(
+                    comparison.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+    return {}
+
+
+# --------------------------------------------------------------------------- #
 # Dev entrypoint
 # --------------------------------------------------------------------------- #
 
