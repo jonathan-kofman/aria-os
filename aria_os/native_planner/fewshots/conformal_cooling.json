@@ -1,0 +1,15 @@
+{
+  "id": "conformal_cooling",
+  "goal": "Mold insert with conformal cooling channels following a curved cavity, 120x80x40mm, 6mm channel diameter",
+  "tags": ["conformal cooling", "cooling channels", "mold insert", "rocket chamber cooling", "tooling cooling", "regenerative cooling"],
+  "ops_used": ["beginPlan", "newSketch", "sketchRect", "extrude", "sketchSpline", "implicitChannel"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_blk", "name": "Mold block"}},
+    {"kind": "sketchRect", "params": {"sketch": "sk_blk", "cx": 0, "cy": 0, "w": 120, "h": 80}},
+    {"kind": "extrude", "params": {"sketch": "sk_blk", "distance": 40, "operation": "new", "alias": "block"}, "label": "Mold block 120×80×40"},
+    {"kind": "newSketch", "params": {"plane": "XZ", "alias": "sk_path", "name": "Cooling path"}},
+    {"kind": "sketchSpline", "params": {"sketch": "sk_path", "points": [[-50,30],[-30,15],[-10,25],[10,15],[30,25],[50,30]]}, "label": "Spiral cooling path follows mold cavity contour"},
+    {"kind": "implicitChannel", "params": {"target": "block", "path": "sk_path", "diameter": 6, "operation": "cut", "alias": "channel"}, "label": "Ø6mm conformal cooling channel"}
+  ]
+}

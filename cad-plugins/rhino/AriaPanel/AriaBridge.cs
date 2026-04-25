@@ -295,6 +295,8 @@ namespace AriaPanel
                 "helix"           => OpHelix(doc, p),
                 "shell"           => OpShell(doc, p),
                 "threadFeature"   => OpThread(doc, p),
+                // W3: SDF mesh-import bridge
+                "meshImportAndCombine" => OpMeshImportAndCombine(doc, p),
                 // Rhino-native leverage
                 "make2D"          => OpMake2D(doc, p),
                 "nurbsSweep"      => OpNurbsSweep(doc, p),
@@ -922,6 +924,136 @@ namespace AriaPanel
                 ok = true, id = alias, kind = "thread", spec,
                 status = "cosmetic stub — Rhino has no native thread feature; " +
                           "use Fusion or Onshape for modeled threads",
+            };
+        }
+
+        // -----------------------------------------------------------------
+        // W3: mesh-import bridge (SDF → STL → Boolean against a Brep)
+        //
+        // The server-side SDF backend does the heavy lifting: evaluates
+        // the implicit field on a voxel grid, marching-cubes to a mesh,
+        // writes an STL. This op then asks Rhino to open that STL,
+        // convert to a mesh, and combine with the named target Brep.
+        //
+        // Rhino's Boolean Mesh+Brep is fragile, so we try in order:
+        //   1. Mesh→Brep via Brep.CreateFromMesh + boolean(Brep,Brep)
+        //   2. Mesh-Brep boolean via Brep.CreateBoolean*Mesh APIs
+        //   3. Add the mesh as a separate body and warn (degraded but visible)
+        // -----------------------------------------------------------------
+        private static object OpMeshImportAndCombine(RhinoDoc doc, JObject p)
+        {
+            string stlPath = p["stl_path"]?.ToString()
+                              ?? throw new ArgumentException("meshImportAndCombine requires stl_path");
+            string op = p["operation"]?.ToString() ?? "intersect";
+            string targetAlias = p["target"]?.ToString();
+            string alias = p["alias"]?.ToString() ?? $"meshcombine_{_featureRegistry.Count + 1}";
+
+            if (!File.Exists(stlPath))
+                throw new FileNotFoundException(stlPath);
+
+            // Use Rhino's import command (handles binary + ASCII STL).
+            int countBefore = doc.Objects.Count;
+            RhinoApp.RunScript($"-_Import \"{stlPath}\" _Enter", false);
+            // The newly added object(s) are the imported mesh(es).
+            var added = new List<RhinoObject>();
+            for (int i = countBefore; i < doc.Objects.Count; i++)
+            {
+                var obj = doc.Objects.ElementAt(i);
+                if (obj != null) added.Add(obj);
+            }
+            if (added.Count == 0)
+                throw new InvalidOperationException(
+                    $"STL import produced no objects ({stlPath})");
+
+            // Combine the imported mesh(es) into a single Mesh.
+            var importedMesh = new Mesh();
+            foreach (var ro in added)
+            {
+                if (ro.Geometry is Mesh m) importedMesh.Append(m);
+                else if (ro.Geometry is Brep b) importedMesh.Append(
+                    Mesh.CreateFromBrep(b, MeshingParameters.Default).FirstOrDefault() ?? new Mesh());
+            }
+            // Remove the raw imports — we'll add the combined result back.
+            foreach (var ro in added) doc.Objects.Delete(ro.Id, true);
+
+            // No target → just keep the mesh body
+            if (targetAlias == null || op == "new")
+            {
+                var meshAttrs = new ObjectAttributes
+                {
+                    LayerIndex = EnsureLayer(doc, "ARIA::Bodies"),
+                    Name = alias,
+                };
+                var meshId = doc.Objects.AddMesh(importedMesh, meshAttrs);
+                _featureRegistry[alias] = meshId;
+                doc.Views.Redraw();
+                return new {
+                    ok = true, id = alias, kind = "mesh_import",
+                    stl_path = stlPath, operation = "new",
+                };
+            }
+
+            // Pull the target Brep out of the registry
+            if (!_featureRegistry.TryGetValue(targetAlias, out var targetId))
+                throw new ArgumentException($"target alias unknown: {targetAlias}");
+            var targetObj = doc.Objects.Find(targetId);
+            if (targetObj?.Geometry is not Brep target)
+                throw new InvalidOperationException(
+                    $"target {targetAlias} is not a Brep");
+
+            // Convert mesh → Brep and try Brep+Brep boolean.
+            Brep meshBrep = null;
+            try
+            {
+                meshBrep = Brep.CreateFromMesh(importedMesh, true);
+            }
+            catch (Exception) { /* fall through */ }
+
+            Brep[] result = null;
+            if (meshBrep != null)
+            {
+                double tol = doc.ModelAbsoluteTolerance;
+                result = op switch
+                {
+                    "cut"       => Brep.CreateBooleanDifference(target, meshBrep, tol),
+                    "join"      => Brep.CreateBooleanUnion(new[] { target, meshBrep }, tol),
+                    "intersect" => Brep.CreateBooleanIntersection(target, meshBrep, tol),
+                    _ => null,
+                };
+            }
+            if (result != null && result.Length > 0)
+            {
+                doc.Objects.Delete(targetId, true);
+                var resultId = doc.Objects.AddBrep(result[0], new ObjectAttributes
+                {
+                    LayerIndex = EnsureLayer(doc, "ARIA::Bodies"),
+                    Name = alias,
+                });
+                _featureRegistry[alias] = resultId;
+                doc.Views.Redraw();
+                return new {
+                    ok = true, id = alias, kind = "mesh_combine_brep",
+                    stl_path = stlPath, operation = op,
+                    target = targetAlias,
+                };
+            }
+
+            // Mesh→Brep failed (or boolean failed) — keep the mesh
+            // body alongside the target so the user still sees the
+            // implicit geometry. They can clean it up manually.
+            var fallbackAttrs = new ObjectAttributes
+            {
+                LayerIndex = EnsureLayer(doc, "ARIA::Bodies"),
+                Name = alias + "_mesh_fallback",
+            };
+            var meshFallbackId = doc.Objects.AddMesh(importedMesh, fallbackAttrs);
+            _featureRegistry[alias] = meshFallbackId;
+            doc.Views.Redraw();
+            return new {
+                ok = true, id = alias, kind = "mesh_kept",
+                stl_path = stlPath, operation = op,
+                target = targetAlias,
+                warning = "Mesh→Brep conversion failed; mesh kept as separate body for manual cleanup",
             };
         }
 

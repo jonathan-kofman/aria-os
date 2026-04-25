@@ -35,7 +35,19 @@ _OUT_DIR = _REPO / "outputs" / "eval"
 def _have_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY")
                 or os.environ.get("GOOGLE_API_KEY")
-                or os.environ.get("GEMINI_API_KEY"))
+                or os.environ.get("GEMINI_API_KEY")
+                or os.environ.get("GROQ_API_KEY"))
+
+
+# Free-tier rate limits we need to respect:
+#   Groq llama-3.3-70b-versatile: 30 RPM  → 2.0s between calls min
+#   Gemini 2.5-flash free:        10 RPM  → 6.0s between calls min
+#   Anthropic:                    paid    → no pacing needed
+# The harness runs whichever provider is first in the chain, so the
+# safe pacing is the slowest free-tier we'd plausibly fall back to.
+# Default to 2.5s (Groq-friendly); bump via ARIA_EVAL_PACE_SEC.
+def _pace_seconds() -> float:
+    return float(os.environ.get("ARIA_EVAL_PACE_SEC", "2.5"))
 
 
 def _load_prompts() -> list[dict]:
@@ -77,8 +89,18 @@ def test_llm_success_rate_50_prompts():
 
     results: list[dict] = []
     counts = {"PASS": 0, "WEAK": 0, "FAIL": 0, "ERROR": 0}
+    pace = _pace_seconds()
+    last_call_t: float | None = None
 
     for p in prompts:
+        # Pace requests so we don't blow the slowest free tier we'd
+        # legitimately fall back to. First call has no wait.
+        if last_call_t is not None:
+            elapsed_since = time.time() - last_call_t
+            if elapsed_since < pace:
+                time.sleep(pace - elapsed_since)
+        last_call_t = time.time()
+
         pid = p["id"]
         goal = p["goal"]
         expected = p.get("expected_ops_any") or []

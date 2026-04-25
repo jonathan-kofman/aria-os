@@ -569,3 +569,69 @@ class OnshapeExecutor:
         # Onshape's involute-gear is a public FeatureScript; integration
         # requires registering the FS module against the part studio.
         return {"skipped": "gearFeature needs FS module — coming soon"}
+
+    def _op_meshImportAndCombine(self, p: dict) -> dict:
+        """W3: SDF mesh-import bridge for Onshape.
+
+        Two-step API call:
+          1. POST /api/blobelements/d/{did}/w/{wid} — uploads the STL
+             blob, returns the new element id (eid_blob).
+          2. POST /api/partstudios/d/.../features — adds an "Import"
+             feature that pulls the blob into the part studio as a
+             mesh body.
+          3. Optional Boolean feature combines that mesh with the
+             named target body.
+
+        Best-effort: Onshape's mesh→solid conversion is more limited
+        than Fusion's — this stub uploads + imports; the Boolean step
+        is left as a TODO until we wire the proper mesh-as-feature
+        FeatureScript call.
+        """
+        from pathlib import Path
+        stl_path = p.get("stl_path")
+        if not stl_path:
+            raise ValueError("meshImportAndCombine requires stl_path")
+        target_alias = p.get("target")
+        op_mode = p.get("operation", "intersect")
+        alias = p.get("alias") or f"meshcombine_{len(self.features) + 1}"
+
+        # Upload the STL as a blob element. Onshape's blobelements
+        # endpoint accepts multipart with `file` field + `filename`.
+        try:
+            blob_resp = self.client.upload_blob(
+                self.did, self.wid,
+                Path(stl_path),
+                element_name=alias)
+            blob_eid = (blob_resp.get("id")
+                         or blob_resp.get("elementId") or "")
+        except AttributeError:
+            # Client doesn't have upload_blob yet — graceful skip
+            return {"skipped": "Onshape blob upload not wired",
+                     "stl_path": stl_path}
+        except Exception as exc:
+            return {"error": f"blob upload failed: {exc}",
+                     "stl_path": stl_path}
+
+        # Add an Import feature that brings the blob into this part
+        # studio as a mesh body.
+        feature = {
+            "btType": "BTMFeature-134",
+            "featureType": "import",
+            "name": alias,
+            "parameters": [
+                {"btType": "BTMParameterReference-148",
+                 "parameterId": "documentId",
+                 "documentId": self.did},
+                {"btType": "BTMParameterReference-148",
+                 "parameterId": "elementId",
+                 "elementId": blob_eid},
+            ],
+        }
+        fid = self._add_feature(feature, alias + "_imported")
+        # The boolean step is a separate Onshape feature — leave for
+        # follow-up since BREP↔mesh booleans need extra wiring.
+        return {"id": alias, "kind": "mesh_import", "onshape_id": fid,
+                 "blob_eid": blob_eid, "operation": op_mode,
+                 "target": target_alias,
+                 "status": ("imported as mesh body — boolean against "
+                              "target requires manual feature add")}

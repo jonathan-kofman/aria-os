@@ -1,0 +1,17 @@
+{
+  "id": "gyroid_bracket",
+  "goal": "Aerospace bracket, 100x60x20mm, gyroid lattice infill at 60% density, mounting holes preserved",
+  "tags": ["gyroid", "lattice", "infill", "lightweight bracket", "additive manufacturing", "tpms", "lattice infill", "minimum mass"],
+  "ops_used": ["beginPlan", "newSketch", "sketchRect", "extrude", "sketchCircle", "circularPattern", "implicitInfill"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_outer", "name": "Outer profile"}},
+    {"kind": "sketchRect", "params": {"sketch": "sk_outer", "cx": 0, "cy": 0, "w": 100, "h": 60}},
+    {"kind": "extrude", "params": {"sketch": "sk_outer", "distance": 20, "operation": "new", "alias": "shell"}, "label": "Outer shell 100×60×20"},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_hole", "name": "M6 mounting hole"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_hole", "cx": 40, "cy": 20, "r": 3.3}},
+    {"kind": "extrude", "params": {"sketch": "sk_hole", "distance": 25, "operation": "cut", "alias": "hole_one"}},
+    {"kind": "circularPattern", "params": {"feature": "hole_one", "axis": "Z", "count": 4, "alias": "hole_pat"}, "label": "Pattern 4 mounting holes"},
+    {"kind": "implicitInfill", "params": {"target": "shell", "pattern": "gyroid", "density": 0.4, "cell_mm": 6, "operation": "intersect", "alias": "lattice"}, "label": "60% mass-removal gyroid infill (intersect with shell preserves outer surfaces and holes)"}
+  ]
+}

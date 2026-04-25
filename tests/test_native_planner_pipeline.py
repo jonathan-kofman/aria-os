@@ -255,6 +255,206 @@ class TestW1AcceptancePrompts:
                      f"got kinds={kinds}")
 
 
+# --- W3.4 SDF expander: implicit → meshImportAndCombine ---------------
+
+class TestSdfExpander:
+    """The expander turns implicit-geometry ops into mesh-import ops
+    the host bridges can actually execute. We don't need to evaluate
+    the SDF here (heavy, depends on skimage) — but we can verify the
+    expander's structural contract: implicit ops are replaced, native
+    ops pass through, target/operation are preserved."""
+
+    def _shell_plan(self):
+        return [
+            {"kind": "beginPlan", "params": {}},
+            {"kind": "newSketch",
+             "params": {"plane": "XY", "alias": "sk"}},
+            {"kind": "sketchRect",
+             "params": {"sketch": "sk", "w": 50, "h": 30}},
+            {"kind": "extrude",
+             "params": {"sketch": "sk", "distance": 10,
+                          "operation": "new", "alias": "shell"}},
+        ]
+
+    def test_native_only_plan_passes_through(self, tmp_path):
+        from aria_os.sdf.expander import expand_plan
+        plan = self._shell_plan()
+        out = expand_plan(plan, run_dir=tmp_path)
+        assert out == plan, (
+            "Native-only plan should be unchanged after expand_plan")
+
+    def test_implicit_replaced_with_mesh_import(self, tmp_path,
+                                                  monkeypatch):
+        """Mock the SDF render path so the test doesn't need skimage,
+        and verify the implicit op was replaced with meshImportAndCombine
+        carrying target + operation through."""
+        from aria_os.sdf import expander as exp
+
+        def fake_render(kind, params, out_path, bbox_hint):
+            out_path.write_bytes(b"solid mock\nendsolid mock\n")
+        monkeypatch.setattr(exp, "_render_to_stl", fake_render)
+
+        plan = self._shell_plan() + [
+            {"kind": "implicitInfill",
+             "params": {"target": "shell", "pattern": "gyroid",
+                          "density": 0.4, "cell_mm": 6,
+                          "operation": "intersect", "alias": "lat"},
+             "label": "Gyroid"},
+        ]
+        out = exp.expand_plan(plan, run_dir=tmp_path)
+        # Length unchanged — one-for-one replacement
+        assert len(out) == len(plan)
+        # Last op is now meshImportAndCombine carrying target + op
+        last = out[-1]
+        assert last["kind"] == "meshImportAndCombine"
+        assert last["params"]["target"] == "shell"
+        assert last["params"]["operation"] == "intersect"
+        # The STL path exists (the mock wrote it)
+        from pathlib import Path
+        assert Path(last["params"]["stl_path"]).is_file()
+
+    def test_mesh_import_and_combine_validates(self, tmp_path):
+        """The expanded plan must also validate cleanly so it can be
+        streamed to the host bridge unchanged."""
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._shell_plan() + [
+            {"kind": "meshImportAndCombine", "params": {
+                "stl_path": str(tmp_path / "x.stl"),
+                "target": "shell",
+                "operation": "intersect",
+                "alias": "combined"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert ok, issues
+
+    def test_render_failure_emits_noop_not_crash(self, tmp_path,
+                                                    monkeypatch):
+        """If the SDF render fails (kernel missing, bad pattern, etc.),
+        the rest of the plan must still execute — we emit a noop with
+        a reason rather than aborting the whole plan."""
+        from aria_os.sdf import expander as exp
+
+        def fake_render(*a, **kw):
+            raise RuntimeError("synthetic SDF failure")
+        monkeypatch.setattr(exp, "_render_to_stl", fake_render)
+
+        plan = self._shell_plan() + [
+            {"kind": "implicitInfill",
+             "params": {"target": "shell", "pattern": "gyroid",
+                          "operation": "intersect"}},
+        ]
+        out = exp.expand_plan(plan, run_dir=tmp_path)
+        assert out[-1]["kind"] == "noop"
+        assert "synthetic" in out[-1]["params"].get("reason", "")
+
+
+# --- W3.3 SDF / implicit ops in validator ----------------------------
+
+class TestImplicitOpsValidator:
+    """W3 added 5 implicit-geometry ops. Each must validate with the
+    right cross-references AND the new few-shots that use them must
+    pass the validator."""
+
+    def _shell(self):
+        """A minimal solid that subsequent implicit ops can target."""
+        return [
+            {"kind": "beginPlan", "params": {}},
+            {"kind": "newSketch", "params": {"plane": "XY", "alias": "s"}},
+            {"kind": "sketchRect", "params": {"sketch": "s",
+                                                 "w": 50, "h": 30}},
+            {"kind": "extrude", "params": {
+                "sketch": "s", "distance": 10,
+                "operation": "new", "alias": "shell"}},
+        ]
+
+    def test_implicit_infill_basic(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._shell() + [
+            {"kind": "implicitInfill", "params": {
+                "target": "shell", "pattern": "gyroid",
+                "density": 0.5, "operation": "intersect",
+                "alias": "lat"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert ok, issues
+
+    def test_implicit_infill_unknown_pattern_caught(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._shell() + [
+            {"kind": "implicitInfill", "params": {
+                "target": "shell", "pattern": "spaghetti",
+                "operation": "intersect"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("spaghetti" in i.lower() for i in issues)
+
+    def test_implicit_infill_density_out_of_range_caught(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._shell() + [
+            {"kind": "implicitInfill", "params": {
+                "target": "shell", "pattern": "gyroid",
+                "density": 1.5, "operation": "intersect"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("density" in i for i in issues)
+
+    def test_implicit_infill_unknown_target_caught(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._shell() + [
+            {"kind": "implicitInfill", "params": {
+                "target": "ghost", "pattern": "gyroid",
+                "operation": "intersect"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("ghost" in i for i in issues)
+
+    def test_implicit_channel_needs_positive_diameter(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._shell() + [
+            {"kind": "newSketch", "params": {"plane": "XZ", "alias": "p"}},
+            {"kind": "sketchPolyline", "params": {
+                "sketch": "p", "points": [[0,0],[20,5],[40,0]]}},
+            {"kind": "implicitChannel", "params": {
+                "target": "shell", "path": "p",
+                "diameter": -1, "operation": "cut"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("diameter" in i for i in issues)
+
+    def test_implicit_boolean_op_validation(self):
+        from aria_os.native_planner.validator import validate_plan
+        plan = self._shell() + [
+            {"kind": "implicitBoolean", "params": {
+                "sdf_a": "f1", "sdf_b": "f2", "op": "blend"}},
+        ]
+        ok, issues = validate_plan(plan)
+        assert not ok
+        assert any("union" in i and "intersect" in i for i in issues)
+
+    def test_gyroid_fewshot_validates(self):
+        """The hybrid native+implicit few-shot must validate end-to-end."""
+        from aria_os.native_planner.fewshots import all_shots
+        from aria_os.native_planner.validator import validate_plan
+        gyroid = next((s for s in all_shots() if s.id == "gyroid_bracket"),
+                      None)
+        assert gyroid is not None, "gyroid_bracket few-shot missing"
+        ok, issues = validate_plan(gyroid.plan)
+        assert ok, issues
+
+    def test_conformal_cooling_fewshot_validates(self):
+        from aria_os.native_planner.fewshots import all_shots
+        from aria_os.native_planner.validator import validate_plan
+        cool = next(
+            (s for s in all_shots() if s.id == "conformal_cooling"), None)
+        assert cool is not None, "conformal_cooling few-shot missing"
+        ok, issues = validate_plan(cool.plan)
+        assert ok, issues
+
+
 # --- W2.5 Tier escalation -----------------------------------------------
 
 class TestTierEscalation:

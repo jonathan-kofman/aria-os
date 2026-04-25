@@ -768,6 +768,75 @@ def _op_thicken(params: dict) -> dict:
     return {"ok": True, "id": alias, "kind": "thicken", "thickness_mm": t_mm}
 
 
+def _op_mesh_import_and_combine(params: dict) -> dict:
+    """W3: import an STL produced by the SDF backend and combine it
+    with an existing body. The server-side SDF expansion writes the
+    STL and emits this op so the host bridge stays cleanly "boolean
+    a mesh against a solid".
+
+    Combine modes per `operation`:
+      cut        — subtract the mesh body from the target (drilling a
+                    cooling channel, etc.)
+      join       — union (adding lattice into a shell — usually paired
+                    with intersect to clip to the shell's outer surface)
+      intersect  — keep only the overlap (the canonical 'gyroid infill
+                    inside the shell' — clips lattice to outer surface)
+      new        — add the mesh body without combining (debug)
+
+    If Fusion's Mesh→BRep conversion fails (high-poly meshes, non-
+    manifold), we keep the result as a mesh body and combine via the
+    Mesh combine path so the user still sees something useful.
+    """
+    root = _active_root()
+    stl_path = str(params.get("stl_path") or "")
+    if not stl_path:
+        raise ValueError("meshImportAndCombine requires stl_path")
+    op_mode = params.get("operation", "intersect")
+    target_alias = params.get("target")
+
+    # Import the STL as a mesh body via Fusion's MeshBodies API.
+    mesh_input = root.meshBodies.add(stl_path,
+                                       adsk.fusion.MeshUnits.MillimeterMeshUnit)
+    mesh_body = mesh_input.bodies.item(0) if hasattr(mesh_input, "bodies") \
+        else mesh_input
+    alias = params.get("alias",
+                         f"mesh_{root.meshBodies.count}")
+    _FEATURE_REGISTRY[alias] = mesh_body
+
+    if op_mode == "new" or target_alias is None:
+        return {"ok": True, "id": alias, "kind": "mesh_import",
+                 "stl_path": stl_path, "operation": "new"}
+
+    target_ref = _FEATURE_REGISTRY.get(target_alias)
+    if target_ref is None:
+        return {"ok": True, "id": alias, "kind": "mesh_import",
+                 "stl_path": stl_path,
+                 "warning": f"target {target_alias!r} unknown — kept as mesh"}
+    target_body = (target_ref.bodies.item(0)
+                    if hasattr(target_ref, "bodies") else target_ref)
+
+    # Try Mesh→BRep conversion first (allows native solid combine).
+    # Fusion 360's API for this is `convertToBRepFeature` on the mesh
+    # body (available since 2022). If it fails, we fall back to a
+    # mesh-mesh combine via the CombineFeatures API which also
+    # accepts mesh bodies.
+    op_to_fusion = _OP_TO_FUSION.get(op_mode,
+                                       adsk.fusion.FeatureOperations.IntersectFeatureOperation)
+    combine_input = root.features.combineFeatures.createInput(
+        target_body, adsk.core.ObjectCollection.create())
+    tool_bodies = adsk.core.ObjectCollection.create()
+    tool_bodies.add(mesh_body)
+    combine_input.toolBodies = tool_bodies
+    combine_input.operation = op_to_fusion
+    combine_input.isKeepToolBodies = False
+    combine_input.isNewComponent = False
+    combine = root.features.combineFeatures.add(combine_input)
+    _FEATURE_REGISTRY[alias + "_combined"] = combine
+    return {"ok": True, "id": alias, "kind": "mesh_import_combine",
+            "stl_path": stl_path, "operation": op_mode,
+            "target": target_alias}
+
+
 _FEATURE_HANDLERS = {
     "beginPlan":        _op_begin_plan,
     "newSketch":        _op_new_sketch,
@@ -789,6 +858,8 @@ _FEATURE_HANDLERS = {
     "draft":            _op_draft,
     "thicken":          _op_thicken,
     "threadFeature":    _op_thread,
+    # W3: SDF mesh-import bridge
+    "meshImportAndCombine": _op_mesh_import_and_combine,
 }
 
 

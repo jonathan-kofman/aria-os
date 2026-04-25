@@ -19,6 +19,14 @@ _VALID_KINDS = {
     "rib", "shell", "draft", "boundarySurface", "thicken",
     # W1: standard-hardware ops
     "threadFeature", "gearFeature",
+    # W3: implicit / SDF ops — produce mesh bodies that the host
+    # bridge imports and booleans against the parent solid.
+    "implicitInfill", "implicitChannel", "implicitLattice",
+    "implicitField", "implicitBoolean",
+    # W3: mesh-bridge primitive — host-side "import STL + boolean".
+    # The server expands implicitInfill/Channel/Lattice into one of
+    # these per implicit op before streaming to the host bridge.
+    "meshImportAndCombine",
     # Assembly
     "asmBegin", "addComponent", "joint",
     # Drawing
@@ -65,6 +73,17 @@ _REQUIRED_PARAMS = {
     # Standard hardware: stamped onto an existing feature/face/body.
     "threadFeature":   {"face", "spec"},
     "gearFeature":     {"sketch", "module", "n_teeth", "thickness"},
+    # W3: implicit / SDF ops — every implicit op needs a target body
+    # alias (the native solid the implicit will be combined with) and
+    # a boolean operation describing how to combine. The actual SDF
+    # parameters depend on `pattern` and are validated lazily by the
+    # SDF kernel at execution time.
+    "implicitInfill":   {"target", "pattern", "operation"},
+    "implicitChannel":  {"target", "path", "diameter", "operation"},
+    "implicitLattice":  {"target", "cell", "size", "operation"},
+    "implicitField":    {"expr", "bounds", "operation"},
+    "implicitBoolean":  {"sdf_a", "sdf_b", "op"},
+    "meshImportAndCombine": {"stl_path", "target", "operation"},
 }
 
 # Operation modes accepted by ops that combine with existing geometry.
@@ -382,6 +401,72 @@ def validate_plan(plan: list[dict]) -> tuple[bool, list[str]]:
                 issues.append(
                     f"Op #{i}: threadFeature spec {params.get('spec')!r} "
                     "not recognized (try 'M8x1.25', '1/4-20-UNC', '1/4-NPT')")
+
+        elif kind in ("implicitInfill", "implicitChannel",
+                      "implicitLattice", "implicitField",
+                      "implicitBoolean"):
+            # All implicit ops must target an existing body (except
+            # implicitField/implicitBoolean which produce SDFs that
+            # later ops combine — they don't bind to a body directly).
+            op_mode = params.get("operation",
+                                  "join" if kind != "implicitBoolean" else "")
+            if kind == "implicitBoolean":
+                bool_op = (params.get("op") or "").lower()
+                if bool_op not in ("union", "intersect", "subtract",
+                                    "smooth_union", "smooth_subtract"):
+                    issues.append(
+                        f"Op #{i}: implicitBoolean op must be one of "
+                        "union|intersect|subtract|smooth_union|smooth_subtract "
+                        f"(got {params.get('op')!r})")
+            else:
+                if op_mode not in _BOOLEAN_OPS:
+                    issues.append(
+                        f"Op #{i}: {kind} operation must be "
+                        f"{'/'.join(_BOOLEAN_OPS)} (got {op_mode!r})")
+                if kind != "implicitField":
+                    target = params.get("target")
+                    if target not in feature_aliases \
+                            and target not in {a.removesuffix("__body")
+                                                  for a in feature_aliases}:
+                        issues.append(
+                            f"Op #{i}: {kind} target {target!r} not a "
+                            "known feature alias — emit the parent solid first")
+                    if not saw_new_body:
+                        issues.append(
+                            f"Op #{i}: {kind} requires an existing body")
+            # Pattern validation for implicitInfill / implicitLattice
+            if kind == "implicitInfill":
+                pat = (params.get("pattern") or "").lower()
+                known = {"gyroid", "schwarz_p", "schwarz_d", "schwarz_w",
+                         "iwp", "neovius", "diamond", "octet_truss",
+                         "bcc", "fcc", "kagome", "honeycomb", "stochastic"}
+                if pat not in known:
+                    issues.append(
+                        f"Op #{i}: implicitInfill pattern {params.get('pattern')!r} "
+                        f"unknown (try one of {sorted(known)[:6]} …)")
+                # Density (when given) must be 0 < d < 1
+                if "density" in params:
+                    try:
+                        d = float(params["density"])
+                        if not (0.0 < d < 1.0):
+                            issues.append(
+                                f"Op #{i}: implicitInfill density={d} "
+                                "must be in (0, 1)")
+                    except (TypeError, ValueError):
+                        issues.append(
+                            f"Op #{i}: implicitInfill density not numeric")
+            if kind == "implicitChannel":
+                try:
+                    dia = float(params.get("diameter"))
+                    if dia <= 0:
+                        issues.append(
+                            f"Op #{i}: implicitChannel diameter must be > 0")
+                except (TypeError, ValueError):
+                    issues.append(
+                        f"Op #{i}: implicitChannel diameter not numeric")
+            alias = params.get("alias")
+            if alias:
+                feature_aliases.add(alias)
 
         elif kind == "gearFeature":
             try:

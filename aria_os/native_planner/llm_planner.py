@@ -84,6 +84,26 @@ Emit a JSON array of feature operations. Each op has:
   thicken:    {surface: alias, thickness: mm, operation: "new"|"join"|"cut", alias: str}
               — turn a surface into a solid with given thickness. Use for sheet-like parts.
 
+## Implicit / SDF geometry — for things the feature tree literally cannot represent
+
+  implicitInfill:   {target: body_alias, pattern: "gyroid"|"schwarz_p"|"schwarz_d"|"iwp"|"neovius"|"octet_truss"|"bcc"|"fcc"|"kagome"|"honeycomb",
+                     density?: 0..1, cell_mm?: mm, operation: "join"|"cut"|"intersect", alias: str}
+                    — fill `target` body's interior with a TPMS or strut lattice. Used for
+                      lightweighting, AM-friendly bone/fin lattices, energy absorbers.
+                      Default density 0.5; cell_mm 8.
+  implicitChannel:  {target: body_alias, path: sketch_alias, diameter: mm, operation: "cut"|"join", alias: str}
+                    — cut a smooth channel along a 3D path through the target. Used for
+                      conformal cooling in molds/rocket chambers, blood-vessel-style routing.
+  implicitLattice:  {target: body_alias, cell: "octet"|"bcc"|"fcc"|"kagome"|"honeycomb",
+                     size: mm, operation: "join"|"intersect", alias: str}
+                    — strut-style lattice (vs the surface lattice from implicitInfill).
+                      Use for medical implants, energy absorbers, scaffolds.
+  implicitField:    {expr: str, bounds: [x_min, y_min, z_min, x_max, y_max, z_max],
+                     operation: "join"|"cut"|"intersect", alias: str}
+                    — arbitrary closed-form SDF expression evaluated on a bounding box.
+                      Use for topology-optimization output, FGM density gradients,
+                      stress-driven density. The `expr` runs in a sandboxed numpy env.
+
 ## Standard hardware — saves 20+ low-level ops each
 
   threadFeature: {face: face_id, spec: "M8x1.25"|"1/4-20-UNC"|"1/4-NPT", length?: mm,
@@ -388,6 +408,18 @@ def plan_from_llm(goal: str, spec: dict,
 # simple — the LLM still does the actual classification, we're only
 # breaking ranking ties.
 _GOAL_TO_OPS_HINT: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+    # W3: implicit-geometry triggers
+    (("gyroid", "schwarz", "tpms", "lattice infill", "bone lattice",
+      "porosity", "porous"),
+        ("implicitInfill", "implicitLattice")),
+    (("conformal cooling", "conformal channel", "conformal passage",
+      "conformal heat exchanger"),
+        ("implicitChannel",)),
+    (("topology optim", "topo opt", "topology-optimized",
+      "topology optimised", "minimum mass", "lightweighted"),
+        ("implicitField",)),
+    (("octet truss", "bcc lattice", "fcc lattice", "kagome", "honeycomb"),
+        ("implicitLattice",)),
     (("thread", "screw", "bolt", "fastener", "tapped", "npt"), ("threadFeature",)),
     (("gear", "pinion", "involute", "spur"),                    ("gearFeature",)),
     (("revolve", "axisymmetric", "shaft", "bottle", "lid",

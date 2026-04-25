@@ -101,6 +101,14 @@
     {"id": "twist_lock", "goal": "twist-lock pin, 8mm shaft 30mm long, with crossbar handle",
      "expected_ops_any": ["extrude", "revolve"]},
     {"id": "hinge_pin", "goal": "hinge pin, 6mm OD x 100mm long, with mushroom head and circlip groove",
-     "expected_ops_any": ["revolve", "extrude"]}
+     "expected_ops_any": ["revolve", "extrude"]},
+    {"id": "gyroid_bracket", "goal": "lightweight aerospace bracket, 100x60x20mm, gyroid lattice infill at 60% density, mounting holes preserved",
+     "expected_ops_any": ["implicitInfill", "implicitLattice"]},
+    {"id": "conformal_cooling", "goal": "mold insert with conformal cooling channels following a curved cavity, 120x80x40mm, 6mm channel diameter",
+     "expected_ops_any": ["implicitChannel"]},
+    {"id": "topology_cantilever", "goal": "topology-optimized cantilever beam, 100x40x20mm, 200N load at the tip, fixed at the base, 50% mass target",
+     "expected_ops_any": ["implicitField", "implicitInfill"]},
+    {"id": "femoral_stem", "goal": "titanium femoral implant stem, 20mm OD distal, 25mm OD proximal, 80mm long, with osseointegration porosity gradient 30 to 70 percent",
+     "expected_ops_any": ["implicitInfill", "implicitLattice", "implicitField"]}
   ]
 }
