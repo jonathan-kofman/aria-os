@@ -255,6 +255,146 @@ class TestW1AcceptancePrompts:
                      f"got kinds={kinds}")
 
 
+# --- W2.3 Retrieval injection in LLM planner --------------------------
+
+class TestRetrievalInjection:
+    """The retriever runs BEFORE every LLM call and appends API +
+    few-shot blocks to the system prompt. These tests pin the wiring
+    without touching live LLMs — we mock the call_llm chain and inspect
+    what got passed in."""
+
+    def test_ops_hint_picks_up_thread_keyword(self):
+        from aria_os.native_planner.llm_planner import _ops_hint_from_goal
+        h = _ops_hint_from_goal("M16x2 cap screw, 60mm long")
+        assert "threadFeature" in h, h
+
+    def test_ops_hint_picks_up_loft_for_transition(self):
+        from aria_os.native_planner.llm_planner import _ops_hint_from_goal
+        h = _ops_hint_from_goal("transition duct round to rect")
+        assert "loft" in h
+
+    def test_ops_hint_picks_up_sweep_for_volute(self):
+        from aria_os.native_planner.llm_planner import _ops_hint_from_goal
+        h = _ops_hint_from_goal("centrifugal volute spiral casing")
+        assert "sweep" in h
+
+    def test_retrieval_injects_into_system_prompt(self, monkeypatch):
+        """When the LLM is invoked, the system prompt MUST include the
+        Reference API block (retrieved from the doc index) and the
+        Working examples block (from the few-shots) for the goal."""
+        captured = {}
+
+        def fake_structured(prompt, system, *, quality, repo_root=None):
+            captured["system"] = system
+            captured["prompt"] = prompt
+            # Return a minimal valid plan so the caller is happy
+            return [{"kind": "beginPlan", "params": {}, "label": "stub"},
+                    {"kind": "newSketch",
+                     "params": {"plane": "XY", "alias": "s"}},
+                    {"kind": "sketchCircle",
+                     "params": {"sketch": "s", "r": 5}},
+                    {"kind": "extrude",
+                     "params": {"sketch": "s", "distance": 5,
+                                  "operation": "new", "alias": "b"}}]
+        monkeypatch.setattr(
+            "aria_os.native_planner.structured_llm.plan_from_llm_structured",
+            fake_structured)
+
+        from aria_os.native_planner.llm_planner import plan_from_llm
+        plan_from_llm("M16x2 socket head cap screw, 60mm long",
+                       {}, quality="balanced")
+        sys_prompt = captured.get("system", "")
+        assert "## Reference API" in sys_prompt, (
+            "API retrieval block missing from system prompt")
+        assert "## Working examples" in sys_prompt, (
+            "Few-shot block missing from system prompt")
+
+    def test_volute_prompt_retrieves_volute_shot(self, monkeypatch):
+        captured = {}
+
+        def fake_structured(prompt, system, *, quality, repo_root=None):
+            captured["system"] = system
+            return [{"kind": "beginPlan", "params": {}, "label": "stub"},
+                    {"kind": "newSketch",
+                     "params": {"plane": "XY", "alias": "s"}},
+                    {"kind": "sketchCircle",
+                     "params": {"sketch": "s", "r": 5}},
+                    {"kind": "extrude",
+                     "params": {"sketch": "s", "distance": 5,
+                                  "operation": "new", "alias": "b"}}]
+        monkeypatch.setattr(
+            "aria_os.native_planner.structured_llm.plan_from_llm_structured",
+            fake_structured)
+
+        from aria_os.native_planner.llm_planner import plan_from_llm
+        plan_from_llm("centrifugal pump volute, 80mm impeller",
+                       {}, quality="balanced")
+        sys_prompt = captured.get("system", "")
+        # Volute few-shot's goal contains "Centrifugal pump volute"
+        assert "volute" in sys_prompt.lower(), (
+            "Sweep/volute few-shot didn't make it into the prompt")
+
+
+# --- W2 Few-shot library ----------------------------------------------
+
+class TestFewShotLibrary:
+    """Every few-shot must (a) parse, (b) pass the validator, (c) be
+    retrievable by its own goal text. Without this, a malformed shot
+    poisons every LLM call that retrieves it."""
+
+    def test_library_loads_at_least_5_shots(self):
+        from aria_os.native_planner.fewshots import all_shots
+        shots = all_shots()
+        assert len(shots) >= 5, (
+            f"Few-shot library is too sparse: only {len(shots)}")
+
+    def test_every_shot_validates(self):
+        """A few-shot that fails the validator means the LLM is being
+        shown a broken example — guaranteed to make output worse."""
+        from aria_os.native_planner.fewshots import all_shots
+        from aria_os.native_planner.validator import validate_plan
+        shots = all_shots()
+        failures = []
+        for s in shots:
+            ok, issues = validate_plan(s.plan)
+            if not ok:
+                failures.append((s.id, issues[:3]))
+        assert not failures, (
+            f"Few-shot plans failing validation: {failures}")
+
+    def test_every_shot_uses_only_declared_ops(self):
+        """ops_used must match the actual op kinds in the plan, so the
+        retriever's `prefer_ops` boost is honest."""
+        from aria_os.native_planner.fewshots import all_shots
+        for s in all_shots():
+            actual = {op.get("kind") for op in s.plan}
+            declared = set(s.ops_used)
+            missing = declared - actual
+            assert not missing, (
+                f"{s.id}: declared ops {missing} not actually in plan")
+
+    def test_self_retrieval(self):
+        """A shot's own goal should rank that shot in the top-2 — sanity
+        check the tag/goal tokenization works."""
+        from aria_os.native_planner.fewshots import all_shots, retrieve
+        for s in all_shots():
+            hits = retrieve(s.goal, k=3)
+            ids = [h.id for h in hits]
+            assert s.id in ids, (
+                f"Self-retrieval failed for {s.id} (hits: {ids})")
+
+    def test_op_preference_boost(self):
+        """A goal with 'sweep' ops_pref should rank the volute (sweep)
+        above the flange (no sweep)."""
+        from aria_os.native_planner.fewshots import retrieve
+        hits = retrieve("centrifugal pump assembly",
+                          k=3, prefer_ops=["sweep"])
+        # The volute should be top-ranked when sweep is preferred
+        assert hits and "volute" in hits[0].id, (
+            f"Sweep-preferring query didn't surface volute first: "
+            f"{[h.id for h in hits]}")
+
+
 # --- W2 API retrieval -------------------------------------------------
 
 class TestApiRetrieval:

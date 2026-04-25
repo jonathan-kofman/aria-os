@@ -302,13 +302,25 @@ def validate_plan(plan: list[dict]) -> tuple[bool, list[str]]:
                         issues.append(f"Op #{i}: helix height must be > 0")
                 except (TypeError, ValueError):
                     issues.append(f"Op #{i}: helix height not numeric")
-            else:  # coil — needs profile section
+            else:  # coil — needs profile section, and IS body-creating
                 if params.get("section") not in sketch_aliases:
                     issues.append(
                         f"Op #{i}: coil section {params.get('section')!r} unknown")
+                op_mode = params.get("operation", "new")
+                if op_mode not in _BOOLEAN_OPS:
+                    issues.append(
+                        f"Op #{i}: coil operation must be {'/'.join(_BOOLEAN_OPS)} "
+                        f"(got {op_mode!r})")
+                if op_mode == "new":
+                    saw_new_body = True
+                elif not saw_new_body:
+                    issues.append(
+                        f"Op #{i}: cannot {op_mode} before a body exists")
             alias = params.get("alias")
             if alias:
                 feature_aliases.add(alias)
+                if kind == "coil":
+                    extrude_op[alias] = params.get("operation", "new")
 
         elif kind == "rib":
             if params.get("sketch") not in sketch_aliases:

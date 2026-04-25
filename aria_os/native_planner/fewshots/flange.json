@@ -1,0 +1,19 @@
+{
+  "id": "flange",
+  "goal": "Flange 100mm OD, 4 M6 holes on 80mm PCD, 6mm thick, 20mm bore",
+  "tags": ["flange", "pipe flange", "blind flange", "raised face flange", "bolt circle", "pcd flange"],
+  "ops_used": ["beginPlan", "newSketch", "sketchCircle", "extrude", "circularPattern"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_body", "name": "Body"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_body", "cx": 0, "cy": 0, "r": 50}},
+    {"kind": "extrude", "params": {"sketch": "sk_body", "distance": 6, "operation": "new", "alias": "body"}, "label": "Disc ⌀100×6"},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_bore", "name": "Bore"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_bore", "cx": 0, "cy": 0, "r": 10}},
+    {"kind": "extrude", "params": {"sketch": "sk_bore", "distance": 9, "operation": "cut", "alias": "bore"}, "label": "Center bore ⌀20"},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_hole", "name": "Bolt hole"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_hole", "cx": 40, "cy": 0, "r": 3.3}, "label": "M6 clearance ⌀6.6 (ISO 273)"},
+    {"kind": "extrude", "params": {"sketch": "sk_hole", "distance": 9, "operation": "cut", "alias": "cut_hole"}},
+    {"kind": "circularPattern", "params": {"feature": "cut_hole", "axis": "Z", "count": 4, "alias": "pat"}, "label": "Pattern × 4 around Z"}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "id": "bottle_shell",
+  "goal": "Plastic bottle, 80mm OD body, 30mm neck, 200mm tall, 1.5mm wall thickness",
+  "tags": ["bottle", "plastic bottle", "vessel", "container", "shelled bottle", "thin-wall vessel", "lid"],
+  "ops_used": ["beginPlan", "newSketch", "sketchPolyline", "revolve", "shell"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}},
+    {"kind": "newSketch", "params": {"plane": "XZ", "alias": "sk_p", "name": "Bottle profile"}},
+    {"kind": "sketchPolyline", "params": {"sketch": "sk_p", "points": [[0,0],[40,0],[40,140],[20,160],[15,180],[15,200],[0,200]], "closed": true}, "label": "Body→shoulder→neck"},
+    {"kind": "revolve", "params": {"sketch": "sk_p", "axis": "Z", "angle": 360, "operation": "new", "alias": "body"}, "label": "Revolve 360°"},
+    {"kind": "shell", "params": {"body": "body", "thickness": 1.5, "faces": ["top"], "alias": "shelled"}, "label": "Hollow with open neck"}
+  ]
+}

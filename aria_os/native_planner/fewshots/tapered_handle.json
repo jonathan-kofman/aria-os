@@ -1,0 +1,13 @@
+{
+  "id": "tapered_handle",
+  "goal": "Ergonomic grip handle, 30mm at base tapering to 25mm over 120mm, slight waist mid-length",
+  "tags": ["ergonomic handle", "grip handle", "tapered handle", "tool handle", "revolved handle", "knob"],
+  "ops_used": ["beginPlan", "newSketch", "sketchPolyline", "revolve", "fillet"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}},
+    {"kind": "newSketch", "params": {"plane": "XZ", "alias": "sk_prof", "name": "Profile"}},
+    {"kind": "sketchPolyline", "params": {"sketch": "sk_prof", "points": [[0,0],[15,0],[15,40],[13.5,60],[14,80],[12.5,120],[0,120]], "closed": true}, "label": "R-Z profile (X=radius, Z=axial)"},
+    {"kind": "revolve", "params": {"sketch": "sk_prof", "axis": "Z", "angle": 360, "operation": "new", "alias": "handle"}, "label": "Revolve 360° about Z"},
+    {"kind": "fillet", "params": {"body": "handle", "r": 1.0, "alias": "fil"}, "label": "Soften all edges"}
+  ]
+}

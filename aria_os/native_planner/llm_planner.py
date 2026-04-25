@@ -294,6 +294,39 @@ def plan_from_llm(goal: str, spec: dict,
             "existing user parameters by name where appropriate.\n"
         )
 
+    # W2.3: pull retrieval context. Top-5 API/recipe snippets + top-2
+    # working few-shots, both ranked by goal-text overlap. We pass a
+    # quick keyword-derived ops_pref so few-shots that already use the
+    # likely-needed ops outrank generic ones. Best-effort: any failure
+    # in retrieval just means the LLM works without the boost.
+    api_block = ""
+    fewshot_block = ""
+    retrieved_meta: dict = {}
+    try:
+        from .api_retrieval import retrieve as _api_retrieve, render_for_prompt as _api_render
+        from .fewshots import retrieve as _fs_retrieve, render_for_prompt as _fs_render
+        ops_pref = _ops_hint_from_goal(goal)
+        api_hits = _api_retrieve(goal, k=5)
+        fs_hits = _fs_retrieve(goal, k=2, prefer_ops=ops_pref)
+        api_block = _api_render(api_hits)
+        fewshot_block = _fs_render(fs_hits)
+        retrieved_meta = {
+            "api_doc_ids":  [h.doc.id for h in api_hits],
+            "fewshot_ids":  [s.id for s in fs_hits],
+            "ops_pref":     ops_pref,
+        }
+    except Exception as _re:
+        print(f"[LLM] retrieval skipped ({type(_re).__name__}: {_re})")
+
+    # Persist retrieval choices to the run dir for telemetry/debugging.
+    # Failure here is non-fatal — retrieval already happened; the log
+    # is just for post-mortem.
+    try:
+        if retrieved_meta:
+            _log_llm_context(repo_root, goal, retrieved_meta)
+    except Exception:
+        pass
+
     user_prompt = (
         f"## Part description\n{goal.strip()}\n\n"
         f"## Parsed spec\n{json.dumps(spec, indent=2, default=str)}\n\n"
@@ -302,12 +335,22 @@ def plan_from_llm(goal: str, spec: dict,
         + "Produce the JSON feature-op array now."
     )
 
+    # Build a per-call system prompt by appending the retrieval blocks
+    # to the static one. We keep the static prompt cached for the
+    # common case and only recompute when retrieval fired.
+    if api_block or fewshot_block:
+        system_prompt = (_SYSTEM_PROMPT
+                          + ("\n\n" + api_block if api_block else "")
+                          + ("\n\n" + fewshot_block if fewshot_block else ""))
+    else:
+        system_prompt = _SYSTEM_PROMPT
+
     # PREFERRED: structured output (tool_use / responseSchema).
     # Guarantees valid JSON matching the plan schema.
     try:
         from .structured_llm import plan_from_llm_structured
         structured = plan_from_llm_structured(
-            user_prompt, _SYSTEM_PROMPT,
+            user_prompt, system_prompt,
             quality=quality, repo_root=repo_root)
         if structured:
             plan = []
@@ -323,7 +366,7 @@ def plan_from_llm(goal: str, spec: dict,
         print(f"[LLM] structured output failed, falling back: {_se}")
 
     # FALLBACK: free-text LLM + tolerant JSON parser.
-    raw = call_llm(user_prompt, _SYSTEM_PROMPT,
+    raw = call_llm(user_prompt, system_prompt,
                     repo_root=repo_root, quality=quality)
     if not raw:
         raise ValueError("No LLM backend available for native planning")
@@ -336,6 +379,75 @@ def plan_from_llm(goal: str, spec: dict,
         op.setdefault("label", op.get("kind", "op"))
         op.setdefault("params", {})
     return plan
+
+
+# --- Retrieval helpers ---------------------------------------------------
+
+# Cheap keyword → likely-needed-ops mapping, used to bias the few-shot
+# retriever toward shots that already use the right ops. Keep these
+# simple — the LLM still does the actual classification, we're only
+# breaking ranking ties.
+_GOAL_TO_OPS_HINT: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+    (("thread", "screw", "bolt", "fastener", "tapped", "npt"), ("threadFeature",)),
+    (("gear", "pinion", "involute", "spur"),                    ("gearFeature",)),
+    (("revolve", "axisymmetric", "shaft", "bottle", "lid",
+      "nozzle", "vase"),                                          ("revolve",)),
+    (("loft", "transition", "round to rect", "rect to round",
+      "duct", "manifold transition"),                             ("loft",)),
+    (("sweep", "volute", "tube", "pipe", "bent pipe",
+      "swept", "snake"),                                           ("sweep",)),
+    (("helix", "spring", "coil", "helical", "leadscrew",
+      "auger", "screw conveyor"),                                  ("coil", "helix")),
+    (("shell", "hollow", "thin wall", "container", "enclosure"), ("shell",)),
+    (("draft", "moldable", "draft angle"),                       ("draft",)),
+    (("impeller", "fan rotor", "blower wheel"),
+        ("circularPattern", "extrude")),
+    (("flange", "bolt circle", "pcd", "pitch circle"),
+        ("circularPattern", "extrude")),
+]
+
+
+def _ops_hint_from_goal(goal: str) -> list[str]:
+    """Cheap keyword scan returning the union of all matching op-hints.
+    Used by the retriever to bias few-shot ranking; never authoritative."""
+    g = (goal or "").lower()
+    hints: set[str] = set()
+    for keywords, ops in _GOAL_TO_OPS_HINT:
+        if any(k in g for k in keywords):
+            hints.update(ops)
+    return sorted(hints)
+
+
+def _log_llm_context(repo_root: Path | None, goal: str,
+                      meta: dict) -> None:
+    """Persist retrieval choices to outputs/runs/<id>/llm_context.json
+    so we can later debug why a particular plan was poor.
+
+    No-op if no current run dir (e.g. unit tests, dashboard fast-path).
+    Uses the most recent dir under outputs/runs/ as a heuristic — we
+    don't currently thread run_id through the planner."""
+    base = (Path(repo_root) if repo_root else Path.cwd()) / "outputs" / "runs"
+    if not base.is_dir():
+        return
+    candidates = sorted(
+        (p for p in base.iterdir() if p.is_dir()),
+        key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        return
+    log_path = candidates[0] / "llm_context.json"
+    payload = {"goal": goal[:500], **meta}
+    # Append-style: read-modify-write so concurrent calls don't lose data.
+    existing = []
+    if log_path.is_file():
+        try:
+            existing = json.loads(log_path.read_text(encoding="utf-8"))
+            if not isinstance(existing, list):
+                existing = []
+        except Exception:
+            existing = []
+    existing.append(payload)
+    log_path.write_text(json.dumps(existing, indent=2, default=str),
+                         encoding="utf-8")
 
 
 # --- Helpers -------------------------------------------------------------

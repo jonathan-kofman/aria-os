@@ -1,0 +1,15 @@
+{
+  "id": "transition_duct",
+  "goal": "Transition duct, 100mm round inlet to 80x40mm rect outlet, 200mm long, 1.5mm wall",
+  "tags": ["transition duct", "round to rectangular", "round to rect", "transition piece", "ductwork", "hvac transition", "loft duct"],
+  "ops_used": ["beginPlan", "newSketch", "sketchCircle", "sketchRect", "loft", "shell"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_in", "name": "Inlet round", "offset": 0}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_in", "cx": 0, "cy": 0, "r": 50}},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_out", "name": "Outlet rect", "offset": 200}},
+    {"kind": "sketchRect", "params": {"sketch": "sk_out", "cx": 0, "cy": 0, "w": 80, "h": 40}},
+    {"kind": "loft", "params": {"sections": ["sk_in", "sk_out"], "operation": "new", "alias": "duct"}, "label": "Loft round → rect"},
+    {"kind": "shell", "params": {"body": "duct", "thickness": 1.5, "faces": ["inlet", "outlet"], "alias": "shelled"}, "label": "Hollow, both ends open"}
+  ]
+}

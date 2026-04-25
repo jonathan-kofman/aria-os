@@ -1,0 +1,15 @@
+{
+  "id": "centrifugal_volute",
+  "goal": "Centrifugal pump volute, 80mm impeller, spiral cross-section, 5mm wall",
+  "tags": ["volute", "centrifugal volute", "pump volute", "spiral casing", "centrifugal pump", "volute casing", "scroll housing"],
+  "ops_used": ["beginPlan", "newSketch", "sketchSpline", "sketchCircle", "sweep", "shell"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_path", "name": "Volute spiral"}},
+    {"kind": "sketchSpline", "params": {"sketch": "sk_path", "points": [[42,0],[30,30],[0,42],[-32,30],[-48,0],[-32,-32],[0,-50],[35,-32],[60,0]]}, "label": "Archimedean spiral around impeller"},
+    {"kind": "newSketch", "params": {"plane": "YZ", "alias": "sk_prof", "name": "Tube cross-section"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_prof", "cx": 42, "cy": 0, "r": 12}},
+    {"kind": "sweep", "params": {"profile_sketch": "sk_prof", "path_sketch": "sk_path", "operation": "new", "alias": "volute"}, "label": "Sweep tube along spiral"},
+    {"kind": "shell", "params": {"body": "volute", "thickness": 5, "faces": ["volute.inlet"], "alias": "shelled"}, "label": "5mm wall, suction inlet open"}
+  ]
+}

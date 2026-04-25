@@ -1,0 +1,14 @@
+{
+  "id": "spur_gear",
+  "goal": "24-tooth involute spur gear, module 2, 10mm face width, 10mm bore",
+  "tags": ["spur gear", "involute gear", "gear teeth", "module gear", "pitch gear"],
+  "ops_used": ["beginPlan", "newSketch", "gearFeature", "sketchCircle", "extrude"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_gear", "name": "Gear blank"}},
+    {"kind": "gearFeature", "params": {"sketch": "sk_gear", "module": 2, "n_teeth": 24, "thickness": 10, "pressure_angle": 20, "alias": "gear"}, "label": "Involute spur, m=2, N=24, b=10"},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_bore", "name": "Bore"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_bore", "cx": 0, "cy": 0, "r": 5}},
+    {"kind": "extrude", "params": {"sketch": "sk_bore", "distance": 15, "operation": "cut", "alias": "bore"}, "label": "⌀10 bore through"}
+  ]
+}

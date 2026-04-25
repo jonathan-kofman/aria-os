@@ -1,0 +1,12 @@
+{
+  "id": "helical_spring",
+  "goal": "Compression spring, 20mm coil OD, 2mm wire, 50mm free length, 10 turns",
+  "tags": ["spring", "compression spring", "coil spring", "helical spring", "wire spring"],
+  "ops_used": ["beginPlan", "newSketch", "sketchCircle", "coil"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}},
+    {"kind": "newSketch", "params": {"plane": "XZ", "alias": "sk_wire", "name": "Wire section"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_wire", "cx": 9, "cy": 0, "r": 1.0}, "label": "Wire ⌀2mm at radius 9mm"},
+    {"kind": "coil", "params": {"axis": "Z", "pitch": 5.0, "turns": 10, "diameter": 18, "section": "sk_wire", "operation": "new", "alias": "spring"}, "label": "10 turns × 5mm pitch = 50mm free length"}
+  ]
+}

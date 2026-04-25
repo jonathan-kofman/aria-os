@@ -1,0 +1,16 @@
+{
+  "id": "cap_screw",
+  "goal": "M16x2 socket head cap screw, 60mm long, head 24mm dia × 16mm tall",
+  "tags": ["cap screw", "socket head cap screw", "shcs", "bolt", "fastener", "threaded screw", "iso 4762"],
+  "ops_used": ["beginPlan", "newSketch", "sketchCircle", "extrude", "threadFeature"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}, "label": "Reset"},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_head", "name": "Cap head"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_head", "cx": 0, "cy": 0, "r": 12}},
+    {"kind": "extrude", "params": {"sketch": "sk_head", "distance": 16, "operation": "new", "alias": "head"}, "label": "Cap head ⌀24×16"},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_shank", "name": "Shank"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_shank", "cx": 0, "cy": 0, "r": 8}},
+    {"kind": "extrude", "params": {"sketch": "sk_shank", "distance": -60, "operation": "join", "alias": "shank"}, "label": "Shank ⌀16 × 60mm down"},
+    {"kind": "threadFeature", "params": {"face": "shank.cyl", "spec": "M16X2", "length": 50, "modeled": true, "alias": "thread"}, "label": "M16×2 thread, 50mm length (ISO 261)"}
+  ]
+}

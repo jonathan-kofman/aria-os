@@ -1,0 +1,19 @@
+{
+  "id": "impeller",
+  "goal": "Centrifugal impeller, 100mm OD, 6 backward-swept blades, 8mm bore",
+  "tags": ["impeller", "centrifugal impeller", "fan rotor", "blower wheel", "turbine rotor", "bladed wheel", "open impeller"],
+  "ops_used": ["beginPlan", "newSketch", "sketchCircle", "extrude", "sketchSpline", "circularPattern"],
+  "plan": [
+    {"kind": "beginPlan", "params": {}},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_hub", "name": "Hub"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_hub", "cx": 0, "cy": 0, "r": 50}},
+    {"kind": "extrude", "params": {"sketch": "sk_hub", "distance": 4, "operation": "new", "alias": "hub"}, "label": "Hub disc Ø100×4mm"},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_blade", "name": "One blade", "offset": 4}},
+    {"kind": "sketchSpline", "params": {"sketch": "sk_blade", "points": [[20,-2],[30,-3],[42,-3],[48,2],[50,4],[42,3],[30,2],[22,2]]}, "label": "Backward-swept airfoil"},
+    {"kind": "extrude", "params": {"sketch": "sk_blade", "distance": 12, "operation": "join", "alias": "blade1"}, "label": "Blade 1 join"},
+    {"kind": "circularPattern", "params": {"feature": "blade1", "axis": "Z", "count": 6, "alias": "blades"}, "label": "Pattern × 6"},
+    {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_bore", "name": "Bore"}},
+    {"kind": "sketchCircle", "params": {"sketch": "sk_bore", "cx": 0, "cy": 0, "r": 4}},
+    {"kind": "extrude", "params": {"sketch": "sk_bore", "distance": 6, "operation": "cut", "alias": "bore"}, "label": "M8 clearance bore"}
+  ]
+}
