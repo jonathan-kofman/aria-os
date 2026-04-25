@@ -44,9 +44,12 @@ function Start-InNewWindow {
 Write-Host ">> Launching ARIA Onshape stack..." -ForegroundColor Cyan
 Write-Host "   Repo: $repoRoot"
 
-# 1. ARIA backend (planner -- emits native_op events on /api/generate)
+# 1. ARIA backend (planner -- emits native_op events on /api/generate).
+# Launched as `python -m dashboard.aria_server` so the uvicorn reload
+# subprocess can import the `dashboard` package (otherwise sys.path
+# only has dashboard/ itself, not the repo root that owns the package).
 Start-InNewWindow -Title "ARIA backend (8000)" -WorkDir $repoRoot `
-    -Cmd "& '$python' dashboard\aria_server.py"
+    -Cmd "`$env:PYTHONPATH = '$repoRoot'; & '$python' -m dashboard.aria_server"
 
 Start-Sleep -Seconds 1
 
