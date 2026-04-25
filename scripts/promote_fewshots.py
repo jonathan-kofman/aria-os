@@ -129,13 +129,17 @@ def write_fewshot_files(ranked: dict[str, list[dict]],
             if target.exists() and ph in existing_hashes:
                 continue
             payload = {
-                "id":       f"auto_{fam}_{ph}",
-                "goal":     e.get("goal", ""),
-                "tags":     [fam] + _ops_used(e["plan"]),
-                "ops_used": _ops_used(e["plan"]),
-                "plan":     e["plan"],
-                "_source":  "auto-promoted from feedback",
-                "_run_id":  e.get("run_id"),
+                "id":         f"auto_{fam}_{ph}",
+                "goal":       e.get("goal", ""),
+                "tags":       [fam] + _ops_used(e["plan"]),
+                "ops_used":   _ops_used(e["plan"]),
+                "plan":       e["plan"],
+                # plan_hash is required by prune_stale_auto_shots
+                # to keep this file across runs. Without it every
+                # auto file would be pruned on the next promote run.
+                "plan_hash":  ph,
+                "_source":    "auto-promoted from feedback",
+                "_run_id":    e.get("run_id"),
                 "_promoted_at": e.get("timestamp_utc"),
             }
             if not dry_run:
