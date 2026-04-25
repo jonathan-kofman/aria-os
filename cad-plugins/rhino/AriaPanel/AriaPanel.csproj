@@ -7,6 +7,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>AriaPanel</AssemblyName>
     <RootNamespace>AriaPanel</RootNamespace>
+    <!-- Rhino discovers plug-ins by file extension. Without this the
+         build emits AriaPanel.dll which Rhino ignores. -->
+    <TargetExt>.rhp</TargetExt>
+    <!-- Don't generate the runtime AppHost (we're a class library
+         loaded by Rhino, not a standalone exe). -->
+    <UseAppHost>false</UseAppHost>
+    <!-- Skip Rhino's own DLLs in the output dir — they ship with
+         Rhino and conflict if duplicated. -->
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
     <!--
       Rhino 8 ships with .NET 7 on Windows. The RhinoCommon SDK NuGet below
       pulls in the correct RhinoCommon.dll reference so you do NOT need to

@@ -271,7 +271,10 @@ namespace AriaPanel
             return parentIdx;
         }
 
-        private object ExecuteFeature(string kind, JObject p)
+        // W12.2: exposed as `internal` so the IntegrationRunner can
+        // dispatch ops directly without going through the WebView.
+        // Call site doesn't change.
+        internal object ExecuteFeature(string kind, JObject p)
         {
             var doc = RhinoDoc.ActiveDoc
                       ?? throw new InvalidOperationException("No active Rhino document");
