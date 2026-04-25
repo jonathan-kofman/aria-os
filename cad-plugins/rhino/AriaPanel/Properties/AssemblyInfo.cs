@@ -6,8 +6,10 @@
 using System.Runtime.InteropServices;
 using Rhino.PlugIns;
 
-// Unique plugin id — must match what Rhino uses to identify the plugin
-[assembly: Guid("a1b2c3d4-e5f6-7890-abcd-ef1234567890")]
+// Unique plugin id — must match what Rhino uses to identify the plugin.
+// Real random UUIDv4 (was a placeholder UUIDv7 pattern that some
+// loaders reject when validating version bits).
+[assembly: Guid("cb47750c-49dd-442e-a5f4-53217755539a")]
 
 // PlugInDescription fills the "About" box in Rhino's plugin manager
 [assembly: PlugInDescription(DescriptionType.Organization, "ARIA-OS")]
