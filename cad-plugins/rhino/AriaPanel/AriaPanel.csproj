@@ -13,9 +13,12 @@
     <!-- Don't generate the runtime AppHost (we're a class library
          loaded by Rhino, not a standalone exe). -->
     <UseAppHost>false</UseAppHost>
-    <!-- Skip Rhino's own DLLs in the output dir — they ship with
-         Rhino and conflict if duplicated. -->
-    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <!-- Lock-file assemblies (Newtonsoft.Json, WebView2) MUST be
+         copied next to the .rhp so Rhino can resolve them at load
+         time. The RhinoCommon NuGet's .props file already marks
+         RhinoCommon + Eto + Rhino.UI as <Private>false</Private>,
+         so they won't be copied even when this is true. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <!--
       Rhino 8 ships with .NET 7 on Windows. The RhinoCommon SDK NuGet below
       pulls in the correct RhinoCommon.dll reference so you do NOT need to
@@ -26,11 +29,17 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- RhinoCommon SDK (Rhino 8 / .NET 7) -->
-    <PackageReference Include="RhinoCommon" Version="8.*" />
-    <!-- WebView2 runtime binding -->
+    <!-- RhinoCommon SDK (Rhino 8 / .NET 7).
+         ExcludeAssets=runtime stops MSBuild from copying RhinoCommon.dll
+         + Rhino.UI.dll into the output dir. Rhino supplies its own
+         versions at runtime and the SDK NuGet only exists so we can
+         compile against it. Without this exclusion the loaded plug-in
+         binds to the WRONG RhinoCommon and fails with cryptic
+         TypeInitializationException at first call into RhinoApp. -->
+    <PackageReference Include="RhinoCommon" Version="8.*" ExcludeAssets="runtime" />
+    <!-- WebView2 runtime binding (we DO need to ship these). -->
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.*" />
-    <!-- Newtonsoft for clean JSON round-trip -->
+    <!-- Newtonsoft for clean JSON round-trip (we DO need to ship). -->
     <PackageReference Include="Newtonsoft.Json" Version="13.*" />
   </ItemGroup>
 

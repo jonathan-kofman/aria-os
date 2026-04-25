@@ -16,7 +16,7 @@
           "Microsoft.Web.WebView2.Wpf": "1.0.3912.50"
         },
         "runtime": {
-          "AriaPanel.dll": {}
+          "AriaPanel.rhp": {}
         }
       },
       "Microsoft.Web.WebView2/1.0.3912.50": {
@@ -50,24 +50,6 @@
       "RhinoCommon/8.30.26103.11001": {
         "dependencies": {
           "System.Drawing.Common": "7.0.0"
-        },
-        "runtime": {
-          "lib/net7.0/Ed.Eto.dll": {
-            "assemblyVersion": "1.0.0.0",
-            "fileVersion": "1.0.0.0"
-          },
-          "lib/net7.0/Eto.dll": {
-            "assemblyVersion": "2.11.0.0",
-            "fileVersion": "2.11.9600.27991"
-          },
-          "lib/net7.0/Rhino.UI.dll": {
-            "assemblyVersion": "8.30.26103.11001",
-            "fileVersion": "8.30.26103.11001"
-          },
-          "lib/net7.0/RhinoCommon.dll": {
-            "assemblyVersion": "8.30.26103.11001",
-            "fileVersion": "8.30.26103.11001"
-          }
         }
       },
       "System.Drawing.Common/7.0.0": {
