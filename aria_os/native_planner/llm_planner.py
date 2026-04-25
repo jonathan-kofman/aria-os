@@ -23,60 +23,204 @@ from ..llm_client import call_llm
 
 _OPS_SCHEMA = r"""
 Emit a JSON array of feature operations. Each op has:
-  - kind:    one of beginPlan | newSketch | sketchCircle | sketchRect
-             | extrude | circularPattern | fillet
+  - kind:    one of the kinds listed below
   - params:  kind-specific (see below)
   - label:   short human description (shown in the feature tree)
 
-Op kinds and their params:
+## Core ops
 
   beginPlan:        {}                                                      — MUST be first op
-  newSketch:        {plane: "XY"|"XZ"|"YZ", alias: str, name: str}          — alias is a reference used by later ops
+  newSketch:        {plane: "XY"|"XZ"|"YZ", alias: str, name: str, offset?: mm}
+                                                                            — offset shifts the sketch plane along its normal (for lofts/cross-sections)
   sketchCircle:     {sketch: alias, cx: mm, cy: mm, r: mm}
   sketchRect:       {sketch: alias, cx: mm, cy: mm, w: mm, h: mm}
-  extrude:          {sketch: alias, distance: mm, operation: "new"|"cut"|"join",
+  extrude:          {sketch: alias, distance: mm, operation: "new"|"cut"|"join"|"intersect",
                      alias: str}                                             — positive distance = up, negative = down
   circularPattern:  {feature: alias, axis: "X"|"Y"|"Z", count: int, alias: str}
   fillet:           {body: alias, r: mm, alias: str}
 
-Rules:
+## Extended sketch primitives — use whenever a circle/rect won't capture the profile
+
+  sketchSpline:        {sketch: alias, points: [[x,y], …], tangents?: [[dx,dy], …]}
+                       — fitted spline through ≥3 points. Use for cam profiles, airfoils, organic outlines.
+  sketchPolyline:      {sketch: alias, points: [[x,y], …], closed?: bool}
+                       — straight-segment chain. Use for non-rect polygons, weld outlines, port shapes.
+  sketchTangentArc:    {sketch: alias, start: [x,y], end: [x,y], tangent: [dx,dy]}
+                       — arc tangent to an existing curve. Use for fillet-like blends in 2D.
+  sketchOffset:        {sketch: alias, source: alias, distance: mm}
+                       — offset another curve outward (positive) or inward (negative).
+  sketchProjection:    {sketch: alias, edge: face_or_edge_id}
+                       — project a 3D edge onto the sketch plane (for wrapping a feature around existing geom).
+  sketchEquationCurve: {sketch: alias, expr: "x=cos(t),y=sin(t)", t_min, t_max}
+                       — parametric curve from a math expression (involutes, lemniscates, lissajous).
+
+## Extended solid features — REQUIRED for swept, lofted, revolved, helical parts
+
+  revolve:    {sketch: alias, axis: "X"|"Y"|"Z"|alias, angle: deg,
+               operation: "new"|"cut"|"join"|"intersect", alias: str}
+              — spin a 2D profile around an axis. Use for shafts, nozzles, bottles, lids, anything axisymmetric.
+  sweep:      {profile_sketch: alias, path_sketch: alias,
+               operation: "new"|"cut"|"join"|"intersect", alias: str}
+              — drag a profile along a path. Use for pipes, hoses, ducts, threaded sections,
+                  cooling passages. profile and path MUST be different sketches.
+  loft:       {sections: [alias, alias, …], rails?: [alias, …],
+               operation: "new"|"cut"|"join"|"intersect", alias: str}
+              — blend ≥2 cross-section sketches. Use for transitions (rect→round), boat hulls,
+                  turbine blades, ergonomic handles, draft-aware bosses.
+  helix:      {axis: "X"|"Y"|"Z"|alias, pitch: mm, height: mm, diameter: mm, alias: str}
+              — pure helical curve. Pair with sweep to make a thread or coiled pipe.
+  coil:       {axis: "X"|"Y"|"Z"|alias, pitch: mm, turns: int, diameter: mm,
+               section: sketch_alias, alias: str}
+              — helix + section profile in one op (Fusion `coil` feature). Use for springs,
+                  ACME lead screws, helical gears.
+  rib:        {sketch: alias, thickness: mm, alias: str}
+              — auto-thickened rib from an open profile sketch. Stress-stiffening webs.
+  shell:      {body: alias, thickness: mm, faces: [face_id, …], alias: str}
+              — hollow out a body, removing the listed faces. Use for housings, enclosures, cups.
+  draft:      {body: alias, faces: [face_id, …], pull_direction: vec, angle: deg, alias: str}
+              — taper faces for moldability. Always add for cast/molded parts (1-3°).
+  boundarySurface: {edges: [edge_id, …], alias: str}
+              — fill a closed loop of edges with a surface. Use to cap lofts/revolves into a solid.
+  thicken:    {surface: alias, thickness: mm, operation: "new"|"join"|"cut", alias: str}
+              — turn a surface into a solid with given thickness. Use for sheet-like parts.
+
+## Standard hardware — saves 20+ low-level ops each
+
+  threadFeature: {face: face_id, spec: "M8x1.25"|"1/4-20-UNC"|"1/4-NPT", length?: mm,
+                  modeled: bool, alias: str}
+                — adds a real threaded face per ISO/ANSI/NPT standards. Auto-picks pitch
+                  from `spec`. Set `modeled: true` for visible thread geometry, false for cosmetic.
+  gearFeature:   {sketch: alias, module: mm, n_teeth: int, thickness: mm,
+                  pressure_angle?: deg, helix_angle?: deg, alias: str}
+                — emits a real involute spur (or helical if helix_angle set) gear.
+                  This is body-creating — equivalent to extrude(operation="new").
+
+## Rules
+
   1. First op MUST be beginPlan.
   2. Every sketch alias must be created by newSketch before being referenced.
-  3. First extrude MUST use operation="new" — it creates the body.
-  4. Subsequent extrudes usually use "cut" (bolt holes, bores) or "join".
-  5. Cut extrudes should use distance = thickness * 1.5 to ensure through-cut.
-  6. circularPattern.feature must reference a previously created cut/extrude alias.
-  7. All dimensions in millimetres. Use the numeric values from the spec.
-  8. Emit 6-20 ops — avoid both trivial plans and bloated 100-op plans.
-  9. Return ONLY the JSON array. No markdown fences, no commentary.
+  3. First body-creating op (extrude/revolve/loft/sweep with operation="new", OR gearFeature)
+     MUST come before any cut/join feature.
+  4. Cut features use distance = thickness * 1.5 to ensure through-cut.
+  5. circularPattern.feature must reference a CUT or JOIN feature — never a "new" body.
+  6. revolve angle is in degrees; use 360 for a full revolve.
+  7. sweep profile and path sketches MUST be different sketches.
+  8. loft needs ≥2 sections; place each on a separate sketch with appropriate `offset`.
+  9. helix is a curve only — pair with sweep + a profile sketch to get geometry.
+ 10. coil is helix + section in one step — preferred for threads, springs, leadscrews.
+ 11. shell needs an existing body and ≥1 face to remove (typically the open top).
+ 12. threadFeature attaches to an existing cylindrical face — emit the bore extrude first.
+ 13. All dimensions in millimetres. Use the numeric values from the spec.
+ 14. Emit 6-30 ops — avoid both trivial plans and bloated 100-op plans.
+ 15. Return ONLY the JSON array. No markdown fences, no commentary.
+
+## When to pick which body-creating op
+
+  Axisymmetric (shafts, nozzles, bottles, lids, flanges):  revolve
+  Constant cross-section (plates, brackets, blocks, ribs): extrude
+  Variable cross-section (transitions, blades, hulls):     loft
+  Profile dragged along a curve (pipes, threads):          sweep / coil
+  Standard threaded fastener / hole:                       threadFeature
+  Real involute gear:                                      gearFeature
 """.strip()
 
 
 _FEW_SHOT_EXAMPLE = r"""
-## Example output (for a flange 100mm OD, 4 M6 holes on 80mm PCD, 6mm thick)
+## Example 1 — Flange 100mm OD, 4 M6 holes on 80mm PCD, 6mm thick (extrude + cut + circularPattern)
 [
   {"kind": "beginPlan", "params": {}, "label": "Reset registry"},
   {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_body", "name": "Body"}, "label": "Sketch on XY"},
   {"kind": "sketchCircle", "params": {"sketch": "sk_body", "cx": 0, "cy": 0, "r": 50}, "label": "Outer Ø100mm"},
   {"kind": "extrude", "params": {"sketch": "sk_body", "distance": 6, "operation": "new", "alias": "body"}, "label": "Extrude 6mm"},
   {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_hole", "name": "Bolt Hole"}, "label": "Sketch for hole"},
-  {"kind": "sketchCircle", "params": {"sketch": "sk_hole", "cx": 40, "cy": 0, "r": 3}, "label": "Bolt hole Ø6mm"},
+  {"kind": "sketchCircle", "params": {"sketch": "sk_hole", "cx": 40, "cy": 0, "r": 3.3}, "label": "M6 clearance Ø6.6mm (ISO 273)"},
   {"kind": "extrude", "params": {"sketch": "sk_hole", "distance": 9, "operation": "cut", "alias": "cut_hole"}, "label": "Cut through"},
   {"kind": "circularPattern", "params": {"feature": "cut_hole", "axis": "Z", "count": 4, "alias": "pat"}, "label": "Pattern × 4"}
 ]
 
-CRITICAL RULES for circularPattern:
-  - NEVER pattern a body created with operation="new" — rotating the whole body
-    is a no-op that produces the same part back.
-  - ALWAYS pattern a CUT or JOIN feature (like one blade slot, one bolt hole)
-    so the pattern actually replicates the feature around the axis.
+## Example 2 — Bottle (revolve a profile around axis)
+[
+  {"kind": "beginPlan", "params": {}},
+  {"kind": "newSketch", "params": {"plane": "XZ", "alias": "sk_p", "name": "Profile"}},
+  {"kind": "sketchPolyline", "params": {"sketch": "sk_p",
+       "points": [[0,0],[35,0],[35,80],[15,100],[15,120],[0,120]], "closed": false},
+   "label": "Bottle outline (R-axis x H-axis)"},
+  {"kind": "revolve", "params": {"sketch": "sk_p", "axis": "Z", "angle": 360,
+       "operation": "new", "alias": "body"}, "label": "Revolve 360°"},
+  {"kind": "shell", "params": {"body": "body", "thickness": 1.5, "faces": ["top"],
+       "alias": "shelled"}, "label": "Hollow, open top"}
+]
 
-CRITICAL RULES for impellers / fans / turbines:
-  - Build the hub first (circle + extrude operation="new")
-  - Sketch ONE blade as a narrow rectangle or airfoil cross-section OFF-CENTER
-  - Extrude with operation="join" to add it to the hub
-  - circularPattern that ONE joined blade N times around Z
-  - THEN add the bore (small circle + extrude operation="cut")
+## Example 3 — Transition duct (loft round → rect)
+[
+  {"kind": "beginPlan", "params": {}},
+  {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_in", "name": "Inlet round", "offset": 0}},
+  {"kind": "sketchCircle", "params": {"sketch": "sk_in", "cx": 0, "cy": 0, "r": 50}},
+  {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_out", "name": "Outlet rect", "offset": 200}},
+  {"kind": "sketchRect", "params": {"sketch": "sk_out", "cx": 0, "cy": 0, "w": 80, "h": 40}},
+  {"kind": "loft", "params": {"sections": ["sk_in", "sk_out"],
+       "operation": "new", "alias": "duct"}, "label": "Loft round → rect"},
+  {"kind": "shell", "params": {"body": "duct", "thickness": 1.5,
+       "faces": ["inlet", "outlet"], "alias": "shelled"},
+   "label": "Hollow, both ends open"}
+]
+
+## Example 4 — M16x2 socket-head cap screw, 60mm long (extrude + threadFeature + helix-cosmetic alternative)
+[
+  {"kind": "beginPlan", "params": {}},
+  {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_head", "name": "Head"}},
+  {"kind": "sketchCircle", "params": {"sketch": "sk_head", "cx": 0, "cy": 0, "r": 12}},
+  {"kind": "extrude", "params": {"sketch": "sk_head", "distance": 16, "operation": "new", "alias": "head"},
+   "label": "Cap head Ø24×16mm"},
+  {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_shank", "name": "Shank"}},
+  {"kind": "sketchCircle", "params": {"sketch": "sk_shank", "cx": 0, "cy": 0, "r": 8}},
+  {"kind": "extrude", "params": {"sketch": "sk_shank", "distance": -60, "operation": "join", "alias": "shank"},
+   "label": "Shank Ø16×60mm down"},
+  {"kind": "threadFeature", "params": {"face": "shank.cyl", "spec": "M16X2",
+       "length": 50, "modeled": true, "alias": "thread"},
+   "label": "M16×2 thread, 50mm length"}
+]
+
+## Example 5 — Centrifugal pump volute (sweep a circle along a spline path)
+[
+  {"kind": "beginPlan", "params": {}},
+  {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_path", "name": "Volute spiral"}},
+  {"kind": "sketchSpline", "params": {"sketch": "sk_path",
+       "points": [[40,0],[28,28],[0,40],[-28,28],[-45,0],[-30,-30],[0,-50],[35,-30],[60,0]]},
+   "label": "Archimedean spiral"},
+  {"kind": "newSketch", "params": {"plane": "YZ", "alias": "sk_prof", "name": "Tube profile"}},
+  {"kind": "sketchCircle", "params": {"sketch": "sk_prof", "cx": 40, "cy": 0, "r": 12}},
+  {"kind": "sweep", "params": {"profile_sketch": "sk_prof", "path_sketch": "sk_path",
+       "operation": "new", "alias": "volute"}, "label": "Sweep tube along spiral"},
+  {"kind": "shell", "params": {"body": "volute", "thickness": 2,
+       "faces": ["volute.inlet"], "alias": "shelled"},
+   "label": "2mm wall, inlet open"}
+]
+
+## Example 6 — Spur gear, module 2, 24 teeth (gearFeature one-liner)
+[
+  {"kind": "beginPlan", "params": {}},
+  {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_gear", "name": "Gear blank"}},
+  {"kind": "gearFeature", "params": {"sketch": "sk_gear", "module": 2, "n_teeth": 24,
+       "thickness": 10, "pressure_angle": 20, "alias": "gear"},
+   "label": "Involute spur, m=2, N=24, b=10"},
+  {"kind": "newSketch", "params": {"plane": "XY", "alias": "sk_bore", "name": "Bore"}},
+  {"kind": "sketchCircle", "params": {"sketch": "sk_bore", "cx": 0, "cy": 0, "r": 5}},
+  {"kind": "extrude", "params": {"sketch": "sk_bore", "distance": 15, "operation": "cut", "alias": "bore"},
+   "label": "Ø10 bore through"}
+]
+
+## CRITICAL RULES
+
+  - circularPattern: NEVER pattern a body created with operation="new". ALWAYS pattern a CUT or JOIN feature.
+  - sweep: profile and path MUST be different sketches; the path can be a spline.
+  - loft: place each section on a sketch with appropriate `offset`; ≥2 sections required.
+  - helix vs coil: helix is a curve only (pair with sweep). coil is one-shot helix + profile.
+  - threadFeature is the standard way to add threads — do NOT model threads with helix+sweep
+    unless the user asks for a "modeled thread for FEA" or similar.
+  - gearFeature is body-creating (counts as operation="new"); the bore comes after as a cut.
+  - Impellers / fans / turbines: hub first (extrude new) → ONE blade off-center (extrude join)
+    → circularPattern that one blade → bore last (extrude cut).
 """.strip()
 
 

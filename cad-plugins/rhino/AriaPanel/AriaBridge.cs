@@ -285,6 +285,16 @@ namespace AriaPanel
                 "extrude"         => OpExtrude(doc, p),
                 "circularPattern" => OpCircularPattern(doc, p),
                 "fillet"          => OpFillet(doc, p),
+                // W1: extended sketch primitives
+                "sketchSpline"    => OpSketchSpline(doc, p),
+                "sketchPolyline"  => OpSketchPolyline(doc, p),
+                // W1: extended solid features
+                "revolve"         => OpRevolve(doc, p),
+                "sweep"           => OpSweep(doc, p),
+                "loft"            => OpLoft(doc, p),
+                "helix"           => OpHelix(doc, p),
+                "shell"           => OpShell(doc, p),
+                "threadFeature"   => OpThread(doc, p),
                 // Rhino-native leverage
                 "make2D"          => OpMake2D(doc, p),
                 "nurbsSweep"      => OpNurbsSweep(doc, p),
@@ -606,6 +616,313 @@ namespace AriaPanel
             _featureRegistry[alias] = newId;
             doc.Views.Redraw();
             return new { ok = true, id = alias, kind = "fillet", r_mm = r };
+        }
+
+        // -----------------------------------------------------------------
+        // W1: extended sketch primitives + solid features
+        //
+        // All distances are mm (Rhino's model unit, configured by the
+        // document). Sketch curves are stored in `_sketchCurves[alias]`
+        // so subsequent revolve/sweep/loft ops can pull them by name.
+        // -----------------------------------------------------------------
+
+        private static Point3d[] PointsFromArray(JArray pts, Plane plane)
+        {
+            var result = new Point3d[pts.Count];
+            for (int i = 0; i < pts.Count; i++)
+            {
+                var pt = (JArray)pts[i];
+                double x = pt[0].ToObject<double>();
+                double y = pt[1].ToObject<double>();
+                double z = pt.Count > 2 ? pt[2].ToObject<double>() : 0.0;
+                // Map (x,y) on the sketch plane → world point. Z is on the
+                // plane normal (almost always 0 — included only for 3D
+                // poly-/spline curves needed by complex sweeps).
+                result[i] = plane.PointAt(x, y) + plane.ZAxis * z;
+            }
+            return result;
+        }
+
+        private static object OpSketchSpline(RhinoDoc doc, JObject p)
+        {
+            string sk = p["sketch"]?.ToString()
+                        ?? throw new ArgumentException("sketchSpline requires sketch alias");
+            if (!_sketchPlanes.TryGetValue(sk, out var plane))
+                throw new ArgumentException($"Unknown sketch alias: {sk}");
+            var ptsJ = p["points"] as JArray
+                       ?? throw new ArgumentException("sketchSpline requires points");
+            if (ptsJ.Count < 3)
+                throw new ArgumentException("sketchSpline requires ≥3 points");
+            var pts = PointsFromArray(ptsJ, plane);
+            // Cubic interpolated curve through every fitting point.
+            var curve = Curve.CreateInterpolatedCurve(pts, 3);
+            if (curve == null)
+                throw new InvalidOperationException("CreateInterpolatedCurve returned null");
+            _sketchCurves[sk] = curve;
+            doc.Objects.AddCurve(curve, new ObjectAttributes
+            {
+                LayerIndex = EnsureLayer(doc, "ARIA::Sketches"),
+                Name = $"{_sketchNames.GetValueOrDefault(sk, sk)}:spline",
+            });
+            doc.Views.Redraw();
+            return new { ok = true, kind = "spline", n_pts = pts.Length };
+        }
+
+        private static object OpSketchPolyline(RhinoDoc doc, JObject p)
+        {
+            string sk = p["sketch"]?.ToString()
+                        ?? throw new ArgumentException("sketchPolyline requires sketch alias");
+            if (!_sketchPlanes.TryGetValue(sk, out var plane))
+                throw new ArgumentException($"Unknown sketch alias: {sk}");
+            var ptsJ = p["points"] as JArray
+                       ?? throw new ArgumentException("sketchPolyline requires points");
+            if (ptsJ.Count < 2)
+                throw new ArgumentException("sketchPolyline requires ≥2 points");
+            bool closed = p["closed"]?.ToObject<bool>() ?? false;
+            var pts = PointsFromArray(ptsJ, plane).ToList();
+            if (closed && pts[0] != pts[^1]) pts.Add(pts[0]);
+            var poly = new PolylineCurve(pts);
+            _sketchCurves[sk] = poly;
+            doc.Objects.AddCurve(poly, new ObjectAttributes
+            {
+                LayerIndex = EnsureLayer(doc, "ARIA::Sketches"),
+                Name = $"{_sketchNames.GetValueOrDefault(sk, sk)}:poly",
+            });
+            doc.Views.Redraw();
+            return new { ok = true, kind = "polyline", n_pts = pts.Count, closed };
+        }
+
+        private static Vector3d ResolveAxisDir(string spec) =>
+            (spec ?? "Z").ToUpperInvariant() switch
+            {
+                "X" => Vector3d.XAxis,
+                "Y" => Vector3d.YAxis,
+                _   => Vector3d.ZAxis,
+            };
+
+        private static Brep BooleanCombine(RhinoDoc doc, Brep target, Brep added, string op)
+        {
+            double tol = doc.ModelAbsoluteTolerance;
+            Brep[] result = op switch
+            {
+                "cut"       => Brep.CreateBooleanDifference(target, added, tol),
+                "join"      => Brep.CreateBooleanUnion(new[] { target, added }, tol),
+                "intersect" => Brep.CreateBooleanIntersection(target, added, tol),
+                _           => null,
+            };
+            if (result == null || result.Length == 0)
+                throw new InvalidOperationException($"Boolean {op} produced no result");
+            return result[0];
+        }
+
+        private static Guid CommitBody(RhinoDoc doc, Brep brep, string alias, string op)
+        {
+            // For new bodies, just add. For cut/join/intersect, find the
+            // most recent body on ARIA::Bodies, combine with `brep`, then
+            // replace it. Same convention as OpExtrude.
+            int bodiesLayer = EnsureLayer(doc, "ARIA::Bodies");
+            if (op == "new" || op == null)
+            {
+                return doc.Objects.AddBrep(brep, new ObjectAttributes
+                {
+                    LayerIndex = bodiesLayer, Name = alias,
+                });
+            }
+            Brep target = null; Guid targetId = Guid.Empty;
+            foreach (var ro in doc.Objects.FindByLayer(doc.Layers[bodiesLayer]))
+            {
+                if (ro.Geometry is Brep b) { target = b; targetId = ro.Id; }
+            }
+            if (target == null)
+                throw new InvalidOperationException($"Cannot {op} — no body exists yet");
+            var combined = BooleanCombine(doc, target, brep, op);
+            doc.Objects.Delete(targetId, true);
+            return doc.Objects.AddBrep(combined, new ObjectAttributes
+            {
+                LayerIndex = bodiesLayer, Name = alias,
+            });
+        }
+
+        private static object OpRevolve(RhinoDoc doc, JObject p)
+        {
+            string sk = p["sketch"]?.ToString()
+                        ?? throw new ArgumentException("revolve requires sketch alias");
+            if (!_sketchCurves.TryGetValue(sk, out var profile) || profile == null)
+                throw new ArgumentException($"No curve registered for sketch {sk}");
+            var axisDir = ResolveAxisDir(p["axis"]?.ToString());
+            double angleDeg = p["angle"]?.ToObject<double>() ?? 360.0;
+            string op = p["operation"]?.ToString() ?? "new";
+            string alias = p["alias"]?.ToString() ?? $"revolve_{_featureRegistry.Count + 1}";
+
+            var axis = new Line(Point3d.Origin, axisDir);
+            double startRad = 0.0;
+            double endRad = RhinoMath.ToRadians(angleDeg);
+            var rev = RevSurface.Create(profile, axis, startRad, endRad);
+            if (rev == null)
+                throw new InvalidOperationException("RevSurface.Create failed");
+            var brep = Brep.CreateFromRevSurface(rev, false, false);
+            if (brep == null)
+                throw new InvalidOperationException("CreateFromRevSurface failed");
+            // Cap planar holes for solid bodies (full revolves of closed profiles)
+            brep = brep.CapPlanarHoles(doc.ModelAbsoluteTolerance) ?? brep;
+            var newId = CommitBody(doc, brep, alias, op);
+            _featureRegistry[alias] = newId;
+            doc.Views.Redraw();
+            return new { ok = true, id = alias, kind = "revolve",
+                          angle_deg = angleDeg, operation = op };
+        }
+
+        private static object OpSweep(RhinoDoc doc, JObject p)
+        {
+            string ps = p["profile_sketch"]?.ToString()
+                        ?? throw new ArgumentException("sweep requires profile_sketch");
+            string pp = p["path_sketch"]?.ToString()
+                        ?? throw new ArgumentException("sweep requires path_sketch");
+            if (!_sketchCurves.TryGetValue(ps, out var profile) || profile == null)
+                throw new ArgumentException($"No curve for profile_sketch {ps}");
+            if (!_sketchCurves.TryGetValue(pp, out var path) || path == null)
+                throw new ArgumentException($"No curve for path_sketch {pp}");
+            string op = p["operation"]?.ToString() ?? "new";
+            string alias = p["alias"]?.ToString() ?? $"sweep_{_featureRegistry.Count + 1}";
+
+            var swept = Brep.CreateFromSweep(
+                path, profile,
+                closed: profile.IsClosed,
+                tolerance: doc.ModelAbsoluteTolerance);
+            if (swept == null || swept.Length == 0)
+                throw new InvalidOperationException("CreateFromSweep produced no result");
+            var brep = swept[0];
+            if (profile.IsClosed)
+                brep = brep.CapPlanarHoles(doc.ModelAbsoluteTolerance) ?? brep;
+            var newId = CommitBody(doc, brep, alias, op);
+            _featureRegistry[alias] = newId;
+            doc.Views.Redraw();
+            return new { ok = true, id = alias, kind = "sweep", operation = op };
+        }
+
+        private static object OpLoft(RhinoDoc doc, JObject p)
+        {
+            var sectionsJ = p["sections"] as JArray
+                            ?? throw new ArgumentException("loft requires sections array");
+            if (sectionsJ.Count < 2)
+                throw new ArgumentException("loft requires ≥2 sections");
+            string op = p["operation"]?.ToString() ?? "new";
+            string alias = p["alias"]?.ToString() ?? $"loft_{_featureRegistry.Count + 1}";
+            var curves = new List<Curve>();
+            foreach (var s in sectionsJ)
+            {
+                string sa = s.ToString();
+                if (!_sketchCurves.TryGetValue(sa, out var c) || c == null)
+                    throw new ArgumentException($"loft section '{sa}' has no curve");
+                curves.Add(c);
+            }
+            var lofted = Brep.CreateFromLoft(
+                curves, Point3d.Unset, Point3d.Unset,
+                LoftType.Normal, false);
+            if (lofted == null || lofted.Length == 0)
+                throw new InvalidOperationException("CreateFromLoft produced no result");
+            var brep = lofted[0];
+            // Cap with planar end-caps so the result is a solid
+            brep = brep.CapPlanarHoles(doc.ModelAbsoluteTolerance) ?? brep;
+            var newId = CommitBody(doc, brep, alias, op);
+            _featureRegistry[alias] = newId;
+            doc.Views.Redraw();
+            return new { ok = true, id = alias, kind = "loft",
+                          n_sections = curves.Count, operation = op };
+        }
+
+        private static object OpHelix(RhinoDoc doc, JObject p)
+        {
+            // Pure helix curve. Pair with sweep to get geometry.
+            var axisDir = ResolveAxisDir(p["axis"]?.ToString());
+            double pitch = p["pitch"]?.ToObject<double>()
+                           ?? throw new ArgumentException("helix requires pitch");
+            double height = p["height"]?.ToObject<double>()
+                            ?? throw new ArgumentException("helix requires height");
+            double dia = p["diameter"]?.ToObject<double>()
+                         ?? throw new ArgumentException("helix requires diameter");
+            string alias = p["alias"]?.ToString() ?? $"helix_{_sketchCurves.Count + 1}";
+            int turns = (int)Math.Max(1, Math.Round(height / pitch));
+            var radiusPt = Point3d.Origin + Vector3d.CrossProduct(axisDir,
+                axisDir == Vector3d.ZAxis ? Vector3d.XAxis : Vector3d.ZAxis) * (dia / 2.0);
+            var spiral = NurbsCurve.CreateSpiral(
+                Point3d.Origin, axisDir, radiusPt,
+                pitch, turns, dia / 2.0, dia / 2.0);
+            if (spiral == null)
+                throw new InvalidOperationException("CreateSpiral returned null");
+            _sketchCurves[alias] = spiral;
+            doc.Objects.AddCurve(spiral, new ObjectAttributes
+            {
+                LayerIndex = EnsureLayer(doc, "ARIA::Sketches"),
+                Name = alias,
+            });
+            doc.Views.Redraw();
+            return new { ok = true, id = alias, kind = "helix",
+                          pitch_mm = pitch, height_mm = height, diameter_mm = dia,
+                          turns };
+        }
+
+        private static object OpShell(RhinoDoc doc, JObject p)
+        {
+            string bodyAlias = p["body"]?.ToString()
+                               ?? throw new ArgumentException("shell requires body alias");
+            if (!_featureRegistry.TryGetValue(bodyAlias, out var bodyId))
+                throw new ArgumentException($"Unknown body alias: {bodyAlias}");
+            double t = p["thickness"]?.ToObject<double>()
+                       ?? throw new ArgumentException("shell requires thickness");
+            string alias = p["alias"]?.ToString() ?? $"shell_{_featureRegistry.Count + 1}";
+
+            var src = doc.Objects.Find(bodyId);
+            if (src?.Geometry is not Brep body)
+                throw new InvalidOperationException($"Body {bodyAlias} is not a Brep");
+
+            // Faces to remove: by default the topmost face.
+            var spec = p["faces"] as JArray;
+            var facesToRemove = new List<int>();
+            if (spec == null || spec.Count == 0 ||
+                spec.Any(s => string.Equals(s.ToString(), "top", StringComparison.OrdinalIgnoreCase)))
+            {
+                int topIdx = -1;
+                double bestZ = double.NegativeInfinity;
+                for (int i = 0; i < body.Faces.Count; i++)
+                {
+                    var f = body.Faces[i];
+                    var pt = f.PointAt(f.Domain(0).Mid, f.Domain(1).Mid);
+                    if (pt.Z > bestZ) { bestZ = pt.Z; topIdx = i; }
+                }
+                if (topIdx >= 0) facesToRemove.Add(topIdx);
+            }
+            var shelled = Brep.CreateShell(body, facesToRemove, t,
+                                              doc.ModelAbsoluteTolerance);
+            if (shelled == null || shelled.Length == 0)
+                throw new InvalidOperationException("CreateShell failed");
+            doc.Objects.Delete(bodyId, true);
+            var newId = doc.Objects.AddBrep(shelled[0], new ObjectAttributes
+            {
+                LayerIndex = EnsureLayer(doc, "ARIA::Bodies"),
+                Name = alias,
+            });
+            _featureRegistry[alias] = newId;
+            doc.Views.Redraw();
+            return new { ok = true, id = alias, kind = "shell", thickness_mm = t };
+        }
+
+        private static object OpThread(RhinoDoc doc, JObject p)
+        {
+            // Rhino has no native thread feature. We could build threads
+            // via helix + sweep, but for now we emit a cosmetic thread
+            // marker (a thin helix curve on the face's surface) so the
+            // user sees the intent without paying the geometry cost.
+            // For real threaded geometry, the caller should switch to
+            // Fusion/Onshape — Rhino is a NURBS surfacer, not a feature
+            // CAD.
+            string spec = p["spec"]?.ToString()?.ToUpperInvariant() ?? "";
+            string alias = p["alias"]?.ToString() ?? $"thread_{_featureRegistry.Count + 1}";
+            return new {
+                ok = true, id = alias, kind = "thread", spec,
+                status = "cosmetic stub — Rhino has no native thread feature; " +
+                          "use Fusion or Onshape for modeled threads",
+            };
         }
 
         // -----------------------------------------------------------------

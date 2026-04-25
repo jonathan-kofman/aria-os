@@ -29,6 +29,17 @@ matplotlib>=3.8.0   # GD&T SVG drawings + render PNGs (pinned for stability)
 graphifyy>=0.1.0    # knowledge graph + MCP server over the codebase + run bundles
                     # (claims ~71x token reduction vs raw file analysis)
 
+# BM25 retrieval over CadQuery / Fusion / Onshape API docs and the
+# few-shot library. Pure Python, no native deps.
+rank_bm25>=0.2.2
+
+# Optional CadQuery extensions for standard hardware. Both are pure
+# CadQuery code — no extra DLLs — so they're safe to add to any env
+# that already has cadquery installed. The hardware helpers gracefully
+# skip when the libraries aren't installed (CI/Railway can opt out).
+cq_warehouse>=0.8.0   # ISO/UN/NPT threads, fasteners, bearings
+cq_gears>=0.5.0       # involute spur/helical/bevel gears
+
 # Optional cross-project bridges (build_pipeline gracefully skips if missing).
 # Not pip-installable from Railway's build env — install locally for dev:
 #   pip install -e ../manufacturing-core

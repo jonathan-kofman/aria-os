@@ -32,6 +32,14 @@ _OP_KINDS = [
     "beginPlan", "addParameter",
     "newSketch", "sketchCircle", "sketchRect",
     "extrude", "circularPattern", "fillet",
+    # W1: extended sketch primitives
+    "sketchSpline", "sketchPolyline", "sketchTangentArc",
+    "sketchOffset", "sketchProjection", "sketchEquationCurve",
+    # W1: extended solid features
+    "revolve", "sweep", "loft", "helix", "coil",
+    "rib", "shell", "draft", "boundarySurface", "thicken",
+    # W1: standard hardware
+    "threadFeature", "gearFeature",
     "asmBegin", "addComponent", "joint",
     "beginDrawing", "newSheet", "addView", "addTitleBlock",
     # ECAD (Fusion Electronics)

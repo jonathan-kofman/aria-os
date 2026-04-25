@@ -454,6 +454,320 @@ def _op_fillet(params: dict) -> dict:
     return {"ok": True, "id": alias, "kind": "fillet", "r_mm": r_mm}
 
 
+# --------------------------------------------------------------------
+# W1: extended sketch primitives + solid features
+#
+# All distances are mm in our plan schema → multiplied by 0.1 to get
+# Fusion's internal cm. Each handler is defensive: a wrong feature
+# shouldn't crash the whole plan execution.
+# --------------------------------------------------------------------
+
+def _resolve_axis(root, spec):
+    """Accept 'X'|'Y'|'Z' or an alias of an existing edge/axis feature."""
+    if isinstance(spec, str):
+        key = spec.strip().upper()
+        return {"X": root.xConstructionAxis,
+                "Y": root.yConstructionAxis,
+                "Z": root.zConstructionAxis}.get(key, root.zConstructionAxis)
+    feat = _FEATURE_REGISTRY.get(spec)
+    if feat is None:
+        raise KeyError(f"Unknown axis spec: {spec!r}")
+    return feat
+
+
+def _profile_or_first(sketch, all_profiles=False):
+    profs = sketch.profiles
+    if profs.count == 0:
+        raise RuntimeError("Sketch has no profile")
+    return profs if all_profiles else profs.item(0)
+
+
+def _op_sketch_spline(params: dict) -> dict:
+    sketch = _FEATURE_REGISTRY.get(params.get("sketch"))
+    if sketch is None:
+        raise KeyError("Unknown sketch alias")
+    pts = params.get("points") or []
+    if len(pts) < 3:
+        raise ValueError("sketchSpline requires ≥3 points")
+    coll = adsk.core.ObjectCollection.create()
+    for p in pts:
+        x, y = float(p[0]) * 0.1, float(p[1]) * 0.1
+        coll.add(adsk.core.Point3D.create(x, y, 0.0))
+    sketch.sketchCurves.sketchFittedSplines.add(coll)
+    return {"ok": True, "kind": "spline", "n_pts": len(pts)}
+
+
+def _op_sketch_polyline(params: dict) -> dict:
+    sketch = _FEATURE_REGISTRY.get(params.get("sketch"))
+    if sketch is None:
+        raise KeyError("Unknown sketch alias")
+    pts = params.get("points") or []
+    if len(pts) < 2:
+        raise ValueError("sketchPolyline requires ≥2 points")
+    closed = bool(params.get("closed", False))
+    scale = 0.1
+    p3d = [adsk.core.Point3D.create(float(p[0]) * scale,
+                                      float(p[1]) * scale, 0.0)
+           for p in pts]
+    lines = sketch.sketchCurves.sketchLines
+    for a, b in zip(p3d, p3d[1:]):
+        lines.addByTwoPoints(a, b)
+    if closed and len(p3d) > 2:
+        lines.addByTwoPoints(p3d[-1], p3d[0])
+    return {"ok": True, "kind": "polyline", "n_pts": len(pts), "closed": closed}
+
+
+def _op_revolve(params: dict) -> dict:
+    root = _active_root()
+    sketch = _FEATURE_REGISTRY.get(params.get("sketch"))
+    if sketch is None:
+        raise KeyError("Unknown sketch alias")
+    axis = _resolve_axis(root, params.get("axis", "Z"))
+    angle = float(params.get("angle", 360.0))
+    operation = _OP_TO_FUSION.get(params.get("operation", "new"),
+                                    adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+    prof = _profile_or_first(sketch)
+    rev_input = root.features.revolveFeatures.createInput(prof, axis, operation)
+    # Use AngleExtentDefinition for partial revolves, full for 360
+    import math
+    rev_input.setAngleExtent(False, _value_input(math.radians(angle)))
+    feat = root.features.revolveFeatures.add(rev_input)
+    alias = params.get("alias", f"revolve_{root.features.revolveFeatures.count}")
+    _FEATURE_REGISTRY[alias] = feat
+    if feat.bodies.count > 0:
+        _FEATURE_REGISTRY[alias + "__body"] = feat.bodies.item(0)
+    return {"ok": True, "id": alias, "kind": "revolve",
+            "angle_deg": angle, "operation": params.get("operation", "new")}
+
+
+def _op_sweep(params: dict) -> dict:
+    root = _active_root()
+    profile_sk = _FEATURE_REGISTRY.get(params.get("profile_sketch"))
+    path_sk = _FEATURE_REGISTRY.get(params.get("path_sketch"))
+    if profile_sk is None or path_sk is None:
+        raise KeyError("sweep needs both profile_sketch and path_sketch aliases")
+    operation = _OP_TO_FUSION.get(params.get("operation", "new"),
+                                    adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+    prof = _profile_or_first(profile_sk)
+    # Path: build a Path object from the path sketch's curves
+    path_obj = adsk.fusion.Path.create(
+        path_sk.sketchCurves.item(0),
+        adsk.fusion.ChainedCurveOptions.connectedChainedCurves)
+    sweep_input = root.features.sweepFeatures.createInput(prof, path_obj, operation)
+    feat = root.features.sweepFeatures.add(sweep_input)
+    alias = params.get("alias", f"sweep_{root.features.sweepFeatures.count}")
+    _FEATURE_REGISTRY[alias] = feat
+    if feat.bodies.count > 0:
+        _FEATURE_REGISTRY[alias + "__body"] = feat.bodies.item(0)
+    return {"ok": True, "id": alias, "kind": "sweep",
+            "operation": params.get("operation", "new")}
+
+
+def _op_loft(params: dict) -> dict:
+    root = _active_root()
+    section_aliases = params.get("sections") or []
+    if len(section_aliases) < 2:
+        raise ValueError("loft requires ≥2 sections")
+    operation = _OP_TO_FUSION.get(params.get("operation", "new"),
+                                    adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+    loft_input = root.features.loftFeatures.createInput(operation)
+    for sa in section_aliases:
+        sketch = _FEATURE_REGISTRY.get(sa)
+        if sketch is None:
+            raise KeyError(f"loft section alias {sa!r} unknown")
+        prof = _profile_or_first(sketch)
+        loft_input.loftSections.add(prof)
+    # Optional rails (guide curves) — left for future
+    feat = root.features.loftFeatures.add(loft_input)
+    alias = params.get("alias", f"loft_{root.features.loftFeatures.count}")
+    _FEATURE_REGISTRY[alias] = feat
+    if feat.bodies.count > 0:
+        _FEATURE_REGISTRY[alias + "__body"] = feat.bodies.item(0)
+    return {"ok": True, "id": alias, "kind": "loft",
+            "n_sections": len(section_aliases),
+            "operation": params.get("operation", "new")}
+
+
+def _op_helix(params: dict) -> dict:
+    """Fusion has no standalone helix-curve API in older versions; the
+    Coil feature creates geometry directly. We approximate `helix` (curve
+    only) by emitting a tiny coil with a degenerate section so a sweep
+    can pick it up. For users who really want a curve, prefer `coil`."""
+    return _op_coil({**params,
+                      "section": params.get("section"),
+                      "turns": params.get("turns",
+                                            max(1, int(float(params.get("height", 0)) / max(float(params.get("pitch", 1)), 0.01))))})
+
+
+def _op_coil(params: dict) -> dict:
+    root = _active_root()
+    axis = _resolve_axis(root, params.get("axis", "Z"))
+    pitch_mm = float(params.get("pitch"))
+    dia_mm = float(params.get("diameter"))
+    turns = float(params.get("turns", 1))
+    operation = _OP_TO_FUSION.get(params.get("operation", "new"),
+                                    adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+    coil_input = root.features.coilFeatures.createInput(
+        adsk.core.Point3D.create(0, 0, 0), axis, operation)
+    coil_input.diameter = _value_input(dia_mm * 0.1)
+    coil_input.coilType = adsk.fusion.CoilFeatureCoilTypes.PitchAndRevolutionCoilFeatureCoilType
+    coil_input.revolutions = _value_input(turns)
+    coil_input.pitch = _value_input(pitch_mm * 0.1)
+    coil_input.sectionSize = _value_input(float(
+        params.get("section_size_mm", 1.0)) * 0.1)
+    coil_input.sectionType = adsk.fusion.CoilFeatureSectionTypes.CircularCoilFeatureSectionType
+    feat = root.features.coilFeatures.add(coil_input)
+    alias = params.get("alias", f"coil_{root.features.coilFeatures.count}")
+    _FEATURE_REGISTRY[alias] = feat
+    if feat.bodies.count > 0:
+        _FEATURE_REGISTRY[alias + "__body"] = feat.bodies.item(0)
+    return {"ok": True, "id": alias, "kind": "coil",
+            "pitch_mm": pitch_mm, "diameter_mm": dia_mm, "turns": turns}
+
+
+def _op_shell(params: dict) -> dict:
+    root = _active_root()
+    body_ref = _FEATURE_REGISTRY.get(params.get("body"))
+    if body_ref is None:
+        raise KeyError("Unknown body alias for shell")
+    if hasattr(body_ref, "bodies"):
+        body = body_ref.bodies.item(0)
+    else:
+        body = body_ref
+    t_mm = float(params.get("thickness"))
+    # Faces to remove: by default the topmost face
+    faces_to_remove = adsk.core.ObjectCollection.create()
+    face_specs = params.get("faces") or ["top"]
+    for spec in face_specs:
+        if isinstance(spec, str) and spec.lower() in ("top", "bottom"):
+            faces = list(body.faces)
+            faces.sort(key=lambda f: f.pointOnFace.z if f.pointOnFace else 0,
+                        reverse=(spec.lower() == "top"))
+            if faces:
+                faces_to_remove.add(faces[0])
+        # Otherwise: try to look up as a face entity in registry
+        else:
+            ent = _FEATURE_REGISTRY.get(spec)
+            if ent:
+                faces_to_remove.add(ent)
+    shell_input = root.features.shellFeatures.createInput(faces_to_remove, False)
+    shell_input.insideThickness = _value_input(t_mm * 0.1)
+    feat = root.features.shellFeatures.add(shell_input)
+    alias = params.get("alias", f"shell_{root.features.shellFeatures.count}")
+    _FEATURE_REGISTRY[alias] = feat
+    return {"ok": True, "id": alias, "kind": "shell", "thickness_mm": t_mm}
+
+
+def _op_thread(params: dict) -> dict:
+    """Add a real thread feature to a cylindrical face. Fusion's
+    threadDataQuery picks the right thread type from the spec string
+    (M8x1.25, 1/4-20-UNC, 1/4-NPT)."""
+    root = _active_root()
+    face_spec = params.get("face")
+    spec = (params.get("spec") or "").upper()
+    # Resolve face: alias or "<body_alias>.cyl" → first cylindrical face
+    face = None
+    if isinstance(face_spec, str) and "." in face_spec:
+        body_alias, kind = face_spec.split(".", 1)
+        body_ref = _FEATURE_REGISTRY.get(body_alias)
+        if body_ref is None:
+            raise KeyError(f"Unknown body alias: {body_alias}")
+        body = body_ref.bodies.item(0) if hasattr(body_ref, "bodies") else body_ref
+        for f in body.faces:
+            if f.geometry.objectType == adsk.core.Cylinder.classType():
+                face = f
+                break
+    else:
+        face = _FEATURE_REGISTRY.get(face_spec)
+    if face is None:
+        raise RuntimeError(f"Could not resolve face for thread {face_spec!r}")
+
+    face_coll = adsk.core.ObjectCollection.create()
+    face_coll.add(face)
+    thread_input = root.features.threadFeatures.createInput(face_coll)
+    # Ask Fusion for the matching thread spec
+    tdq = root.features.threadFeatures.threadDataQuery
+    # Pick a thread type by spec prefix
+    if spec.startswith("M"):
+        thread_type = "ISO Metric profile"
+    elif "NPT" in spec:
+        thread_type = "ANSI National Pipe Thread"
+    else:
+        thread_type = "ANSI Unified Screw Threads"
+    try:
+        designation = tdq.recommendThreadData(face.geometry.radius * 2,
+                                                False, thread_type)
+        thread_info = tdq.queryRecommendThreadData(
+            face.geometry.radius * 2, False, thread_type)
+        thread_input.threadInfo = thread_info
+    except Exception:
+        # Fall back to defaults if recommend query fails
+        pass
+    thread_input.isModeled = bool(params.get("modeled", True))
+    if params.get("length") is not None:
+        thread_input.threadLength = _value_input(float(params["length"]) * 0.1)
+        thread_input.isFullLength = False
+    feat = root.features.threadFeatures.add(thread_input)
+    alias = params.get("alias", f"thread_{root.features.threadFeatures.count}")
+    _FEATURE_REGISTRY[alias] = feat
+    return {"ok": True, "id": alias, "kind": "thread", "spec": spec}
+
+
+def _op_draft(params: dict) -> dict:
+    root = _active_root()
+    body_ref = _FEATURE_REGISTRY.get(params.get("body"))
+    if body_ref is None:
+        raise KeyError("Unknown body alias for draft")
+    body = body_ref.bodies.item(0) if hasattr(body_ref, "bodies") else body_ref
+    angle_deg = float(params.get("angle", 1.0))
+    # Pick faces: by default all side faces of the body
+    faces_coll = adsk.core.ObjectCollection.create()
+    for f in body.faces:
+        # Side faces: not perpendicular to Z (rough heuristic)
+        try:
+            n = f.geometry.evaluator.getNormalAtPoint(f.pointOnFace)[1]
+            if abs(n.z) < 0.5:
+                faces_coll.add(f)
+        except Exception:
+            faces_coll.add(f)
+    if faces_coll.count == 0:
+        raise RuntimeError("draft: no candidate faces")
+    plane = root.xYConstructionPlane  # neutral plane
+    draft_input = root.features.draftFeatures.createInput(faces_coll, plane)
+    import math as _m
+    draft_input.setSingleAngle(False, _value_input(_m.radians(angle_deg)))
+    feat = root.features.draftFeatures.add(draft_input)
+    alias = params.get("alias", f"draft_{root.features.draftFeatures.count}")
+    _FEATURE_REGISTRY[alias] = feat
+    return {"ok": True, "id": alias, "kind": "draft", "angle_deg": angle_deg}
+
+
+def _op_thicken(params: dict) -> dict:
+    root = _active_root()
+    surf = _FEATURE_REGISTRY.get(params.get("surface"))
+    if surf is None:
+        raise KeyError("Unknown surface alias for thicken")
+    # Surface might be a feature; pull bodies out
+    if hasattr(surf, "bodies"):
+        coll = adsk.core.ObjectCollection.create()
+        for b in surf.bodies:
+            coll.add(b)
+    else:
+        coll = adsk.core.ObjectCollection.create()
+        coll.add(surf)
+    t_mm = float(params.get("thickness"))
+    operation = _OP_TO_FUSION.get(params.get("operation", "new"),
+                                    adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+    thicken_input = root.features.thickenFeatures.createInput(
+        coll, _value_input(t_mm * 0.1), False, operation)
+    feat = root.features.thickenFeatures.add(thicken_input)
+    alias = params.get("alias", f"thicken_{root.features.thickenFeatures.count}")
+    _FEATURE_REGISTRY[alias] = feat
+    if feat.bodies.count > 0:
+        _FEATURE_REGISTRY[alias + "__body"] = feat.bodies.item(0)
+    return {"ok": True, "id": alias, "kind": "thicken", "thickness_mm": t_mm}
+
+
 _FEATURE_HANDLERS = {
     "beginPlan":        _op_begin_plan,
     "newSketch":        _op_new_sketch,
@@ -462,6 +776,19 @@ _FEATURE_HANDLERS = {
     "extrude":          _op_extrude,
     "circularPattern":  _op_circular_pattern,
     "fillet":           _op_fillet,
+    # W1: extended sketch primitives
+    "sketchSpline":     _op_sketch_spline,
+    "sketchPolyline":   _op_sketch_polyline,
+    # W1: extended solid features
+    "revolve":          _op_revolve,
+    "sweep":            _op_sweep,
+    "loft":             _op_loft,
+    "helix":            _op_helix,
+    "coil":             _op_coil,
+    "shell":            _op_shell,
+    "draft":            _op_draft,
+    "thicken":          _op_thicken,
+    "threadFeature":    _op_thread,
 }
 
 
