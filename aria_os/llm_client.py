@@ -6,12 +6,12 @@ Unified LLM client. Two priority chains depending on task type:
 Code generation tasks (call_llm):
 1. Anthropic Claude  — if ANTHROPIC_API_KEY is set (best code quality)
 2. Google Gemini     — if GOOGLE_API_KEY is set (fast, good code gen)
-3. Gemma 4 31B      — if pulled in Ollama (strong local code gen)
+3. Gemma 4 26B MoE   — if pulled in Ollama (strong local code gen, RAM-light)
 4. Ollama default    — if Ollama is running (fallback local model)
 5. Returns None      — caller falls back to heuristics
 
 Non-code tasks (call_llm_local_first):
-1. Gemma 4 31B      — if pulled in Ollama (free, fast, good reasoning)
+1. Gemma 4 26B MoE   — if pulled in Ollama (free, fast, good reasoning)
 2. Google Gemini     — if GOOGLE_API_KEY is set
 3. Anthropic Claude  — if ANTHROPIC_API_KEY is set
 4. Ollama default    — if Ollama is running
@@ -24,9 +24,15 @@ Environment variables
 GOOGLE_API_KEY     — Google Gemini API key (optional; enables Gemini backend)
 ANTHROPIC_API_KEY  — Anthropic API key (optional; enables Anthropic backend)
 GEMINI_MODEL       — Gemini model name (default: gemini-2.0-flash)
-GEMMA_MODEL        — Gemma 4 model name for Ollama (default: gemma4:31b)
+GEMMA_MODEL        — Gemma 4 model name override. If unset, the tag is
+                     auto-selected from host RAM (see recommended_gemma_model):
+                       >= 32 GB  → gemma4:31b   (dense, full quality)
+                       >= 16 GB  → gemma4:26b   (MoE, RAM-light)
+                       >=  8 GB  → gemma4:4b    (dense 4B)
+                       >=  4 GB  → gemma4:1b    (tiny)
+                        <  4 GB  → Gemma skipped entirely
 OLLAMA_HOST        — Ollama base URL (default: http://localhost:11434)
-OLLAMA_MODEL       — Model name for Ollama (default: deepseek-coder)
+OLLAMA_MODEL       — Model name for Ollama (default: qwen2.5-coder:7b)
 """
 from __future__ import annotations
 
@@ -45,7 +51,88 @@ from typing import Any
 _DEFAULT_OLLAMA_HOST   = "http://localhost:11434"
 _DEFAULT_OLLAMA_MODEL  = "qwen2.5-coder:7b"
 _DEFAULT_GEMINI_MODEL  = "gemini-2.0-flash"
-_DEFAULT_GEMMA_MODEL   = "gemma4:31b"
+_DEFAULT_GEMMA_MODEL   = "gemma4:4b"   # safe baseline when RAM detect fails
+
+# RAM tiers for Gemma model auto-selection. First entry whose threshold
+# is met (highest first) wins. Approximate Q4-quantized footprints:
+# weights + KV cache + Ollama overhead. Below the smallest tier we skip
+# Gemma entirely so we don't pull a model the host can't run.
+_GEMMA_RAM_TIERS: tuple[tuple[float, str], ...] = (
+    (32.0, "gemma4:31b"),   # dense, full quality
+    (16.0, "gemma4:26b"),   # MoE, ~3.8B active params per token
+    ( 8.0, "gemma4:4b"),    # dense 4B
+    ( 4.0, "gemma4:1b"),    # tiny — fits 4GB RAM machines
+)
+
+
+def _total_ram_gb() -> float | None:
+    """Total system RAM in GB. Pure stdlib; returns None if undetectable."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MemStatus()
+            stat.dwLength = ctypes.sizeof(_MemStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return stat.ullTotalPhys / (1024 ** 3)
+        except Exception:
+            return None
+        return None
+
+    # Linux: sysconf is reliable. macOS lacks SC_PHYS_PAGES, falls through.
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return pages * page_size / (1024 ** 3)
+    except (ValueError, OSError, AttributeError):
+        pass
+
+    # macOS: parse `sysctl hw.memsize`.
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode == 0:
+            return int(out.stdout.strip()) / (1024 ** 3)
+    except Exception:
+        pass
+
+    return None
+
+
+def recommended_gemma_model() -> str | None:
+    """Largest Gemma tag this host's RAM can run, or None if it can't run any.
+
+    Pure RAM-based recommendation — does NOT consult GEMMA_MODEL env var.
+    Use this from setup/install tooling to decide what to `ollama pull`.
+    Use _gemma_model() from runtime code (it layers env override on top).
+
+    When RAM detection fails, returns the smallest tier as a safe default
+    rather than None — better to attempt Gemma and have Ollama fail than
+    to silently skip on hosts where detection happens to be flaky.
+    """
+    ram = _total_ram_gb()
+    if ram is None:
+        return _DEFAULT_GEMMA_MODEL
+    for threshold, tag in _GEMMA_RAM_TIERS:
+        if ram >= threshold:
+            return tag
+    return None
 
 # Note injected into system prompt when using a local model
 _LOCAL_MODEL_NOTE = (
@@ -208,7 +295,15 @@ def _record_llm_call(provider: str) -> None:
 
 
 def _gemma_model() -> str:
-    return _read_env_var("GEMMA_MODEL", _DEFAULT_GEMMA_MODEL)
+    """Resolved Gemma tag for this host. Empty string means skip Gemma.
+
+    Priority: explicit GEMMA_MODEL env/.env override → RAM-based recommendation
+    → empty string when host RAM is below the smallest Gemma tier.
+    """
+    override = _read_env_var("GEMMA_MODEL", "")
+    if override:
+        return override
+    return recommended_gemma_model() or ""
 
 
 def _ensure_lightning_tunnel() -> None:
@@ -276,18 +371,18 @@ def _ensure_lightning_tunnel() -> None:
 
 
 def is_gemma_available() -> bool:
-    """Check if Gemma 4 is available via a remote Ollama (Lightning AI).
+    """Check if a Gemma model fits this host's RAM AND is pulled in Ollama.
 
-    Gemma 4 31B requires >16GB VRAM — it must NOT run on the local GPU
-    (RTX 1000 Ada, 6GB). Only check if OLLAMA_HOST points to a remote
-    instance (non-default port, e.g. localhost:11435 for the Lightning tunnel).
+    Returns False without contacting Ollama when host RAM is below the
+    smallest tier (4 GB). On a 16-32 GB host, Ollama pages MoE experts
+    between VRAM and system RAM on demand — runs acceptably on small
+    GPUs (e.g. RTX 1000 Ada, 6 GB).
     """
-    host = _ollama_host()
-    # Only allow gemma on a remote Ollama instance (not local default port)
-    if host == _DEFAULT_OLLAMA_HOST or host == "http://localhost:11434":
-        return False
     model = _gemma_model()
-    model_base = model.split(":")[0]  # e.g. "gemma4" from "gemma4:31b"
+    if not model:
+        return False
+    host = _ollama_host()
+    model_base = model.split(":")[0]  # e.g. "gemma4" from "gemma4:26b"
     try:
         req = urllib.request.Request(f"{host}/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
@@ -558,22 +653,34 @@ def _try_ollama(prompt: str, system: str) -> str | None:
 def _try_gemma(prompt: str, system: str) -> str | None:
     """Try Gemma 4 via Ollama. Returns text or None.
 
-    Gemma 4 31B (Apache 2.0) is a strong local model for both code generation
-    and reasoning tasks. It runs via Ollama: ``ollama pull gemma4:31b``
+    Gemma 4 26B MoE (Apache 2.0) is the default: ~3.8B active params per token,
+    multimodal, configurable thinking mode. Runs locally on modest GPUs because
+    Ollama pages experts between VRAM and system RAM. Pull with:
+        ``ollama pull gemma4:26b``
 
-    Uses the same Ollama /api/chat endpoint but targets the Gemma model
-    specifically, separate from the default Ollama model configuration.
-    Falls through gracefully if Gemma 4 is not pulled or Ollama is down.
+    Uses the Ollama /api/chat endpoint targeting GEMMA_MODEL specifically,
+    separate from OLLAMA_MODEL. Falls through gracefully if Gemma is not
+    pulled or Ollama is down.
+
+    If a Lightning AI session file exists at repo_root/.lightning_session,
+    the tunnel is auto-reconnected before probing — kept for backward compat
+    but no longer required.
     """
     if _cloud_only():
         return None  # ARIA_CLOUD_ONLY=1 — skip local LLM probe
+    model = _gemma_model()
+    if not model:
+        ram = _total_ram_gb()
+        ram_str = f"{ram:.1f} GB" if ram is not None else "unknown"
+        print(f"[LLM] gemma skipped — host RAM ({ram_str}) below smallest Gemma tier (4 GB)")
+        return None
     if not is_gemma_available():
-        # Try auto-reconnecting the Lightning AI tunnel
+        # Optional: auto-reconnect Lightning tunnel if a session file exists.
+        # No-op when running purely locally.
         _ensure_lightning_tunnel()
         if not is_gemma_available():
             host = _ollama_host()
-            if host == _DEFAULT_OLLAMA_HOST:
-                print("[LLM] gemma4 skipped — requires remote GPU. Set OLLAMA_HOST=http://localhost:11435 and start Lightning AI tunnel")
+            print(f"[LLM] gemma skipped — model '{model}' not found in Ollama at {host} (try: ollama pull {model})")
             return None
 
     host = _ollama_host()
@@ -934,8 +1041,8 @@ def call_llm(
                        one-liners, classification — anywhere a premium
                        model is overkill. ~5-10× cheaper than premium.
 
-      - "balanced"  : Gemini 2.0 flash → Gemma 4 (remote GPU) →
-                       Claude Sonnet → local Ollama → None. DEFAULT.
+      - "balanced"  : Gemini 2.0 flash → Gemma 4 26B MoE (local Ollama) →
+                       Claude Sonnet → local Ollama default → None. DEFAULT.
                        Use for code generation where Gemini produces
                        acceptable CadQuery/Rhino code and Sonnet is
                        reserved for actual retries.
@@ -1002,7 +1109,7 @@ def call_llm_local_first(
     For non-code tasks (spec extraction, routing, refinement) where local
     models are adequate and free. Uses expensive cloud models only as fallback.
 
-    Priority: Gemma 4 31B (Ollama) → Gemini Flash → Anthropic → Ollama default → None
+    Priority: Gemma 4 26B MoE (Ollama) → Gemini Flash → Anthropic → Ollama default → None
 
     Parameters
     ----------
@@ -1015,7 +1122,7 @@ def call_llm_local_first(
     Response text, or None if all backends unavailable.
     Never raises.
     """
-    # 1. Try Gemma 4 31B via Ollama (free, fast, good reasoning)
+    # 1. Try Gemma 4 26B MoE via Ollama (free, fast, good reasoning)
     try:
         result = _try_gemma(prompt, system)
         if result is not None:

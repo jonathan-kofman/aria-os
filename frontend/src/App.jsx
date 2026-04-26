@@ -1032,7 +1032,7 @@ const PIPELINE_STAGES = [
 const PROVIDER_TABLE = [
   { provider: "Gemini 2.5 Flash", role: "Primary vision", quota: "Free daily", latency: "~2s", status: "online" },
   { provider: "Groq Llama 4 Scout", role: "Cross-validate", quota: "Free tier", latency: "~1.5s", status: "online" },
-  { provider: "Ollama Gemma4", role: "Local fallback", quota: "Unlimited", latency: "~8s", status: "online" },
+  { provider: "Ollama Gemma4 26B MoE", role: "Local fallback", quota: "Unlimited", latency: "~4s", status: "online" },
   { provider: "Anthropic Claude", role: "Authoritative (no CV)", quota: "Paid", latency: "~3s", status: "online" },
   { provider: "Ollama (LLM agent)", role: "Code generation", quota: "Unlimited", latency: "~12s", status: "offline" },
 ];

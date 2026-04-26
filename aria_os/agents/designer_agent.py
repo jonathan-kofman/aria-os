@@ -265,6 +265,9 @@ class DesignerAgent(BaseAgent):
             iteration → `balanced` tier (Gemini first, Sonnet as fallback)
           - iteration >= 2 falls back to `balanced` regardless of skill so
             refinement passes don't repeatedly burn premium credit.
+
+        Local fallback in every tier is Gemma 4 26B MoE via Ollama
+        (see llm_client._DEFAULT_GEMMA_MODEL; override with GEMMA_MODEL).
         """
         if self._prefer_cloud and self.domain == "cad":
             iteration = getattr(self, "_current_iteration", 1)

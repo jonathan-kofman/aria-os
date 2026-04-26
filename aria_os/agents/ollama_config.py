@@ -1,30 +1,46 @@
 """Per-agent Ollama model configuration.
 
-Local GPU: RTX 1000 Ada (4GB VRAM) — can only run 7B or smaller models.
-For bigger models (Gemma 4 31B, DeepSeek-R1-32B), use:
-  - Lightning AI free tier (22 GPU-hours/month, A10G/L4/L40S)
-  - Kaggle (30 hours/week, T4 16GB)
-  - Remote Ollama: set OLLAMA_HOST=http://<cloud-ip>:11434
+Local GPU: RTX 1000 Ada (6GB VRAM). Gemma 4 26B MoE activates only ~3.8B
+params per token; with 16–32GB system RAM, Ollama pages experts between
+VRAM and RAM and the model runs acceptably on-device. No Lightning AI or
+other remote GPU required.
+
+The Gemma tag is auto-selected from host RAM via
+llm_client.recommended_gemma_model() — different machines (PC vs laptop)
+get different defaults without code changes. GEMMA_MODEL env var still
+overrides if set explicitly.
+
+For fully cloud-hosted options, still supported via:
+  OLLAMA_HOST=http://<cloud-ip>:11434
 """
 from __future__ import annotations
 
 import os
 
+from ..llm_client import recommended_gemma_model
+
 # Models per agent role. Override via env vars:
 #   ARIA_AGENT_DESIGNER_MODEL=qwen2.5-coder:32b
 #   ARIA_AGENT_SPEC_MODEL=llama3.1:8b
-#   ARIA_AGENT_MODEL=gemma4:31b  (use Gemma 4 for all agents — needs cloud GPU)
+#   ARIA_AGENT_MODEL=gemma4:26b   (use Gemma 4 MoE for all agents)
 
-# Local GPU (4GB VRAM): only qwen2.5-coder:7b fits.
-# For Gemma 4: set OLLAMA_HOST to a remote server with >=16GB VRAM.
+# Default small coder model — used by agents that don't need Gemma.
 _DEFAULT_MODEL = os.environ.get("ARIA_AGENT_MODEL", "qwen2.5-coder:7b")
 
-# Gemma 4 31B (Apache 2.0) — strong local model for code gen + reasoning.
-# Competitive with much larger models on coding benchmarks.
-# Supports function calling + structured JSON output.
-# Install: ollama pull gemma4:31b
-# Override model tag: GEMMA_MODEL=gemma4:latest
-_GEMMA_MODEL = os.environ.get("GEMMA_MODEL", "gemma4:31b")
+# Gemma 4 (Apache 2.0) — strong local model for code gen + reasoning.
+# Auto-selected from host RAM:
+#   >= 32 GB → gemma4:31b (dense, full quality)
+#   >= 16 GB → gemma4:26b (MoE, ~3.8B active params per token, RAM-light)
+#   >=  8 GB → gemma4:4b  (dense 4B)
+#   >=  4 GB → gemma4:1b  (tiny, fits 4GB-class machines)
+#    <  4 GB → falls back to qwen2.5-coder:7b (Gemma skipped at runtime)
+# Multimodal (text + image), supports configurable thinking mode +
+# function calling / structured JSON output. Override with GEMMA_MODEL.
+_GEMMA_MODEL = (
+    os.environ.get("GEMMA_MODEL")
+    or recommended_gemma_model()
+    or _DEFAULT_MODEL
+)
 
 AGENT_MODELS: dict[str, str] = {
     "spec":     os.environ.get("ARIA_AGENT_SPEC_MODEL",     _DEFAULT_MODEL),
@@ -46,12 +62,13 @@ DESIGNER_MODELS: dict[str, str] = {
 
 # Gemma 4 model configurations per agent role.
 # When Gemma 4 is available in Ollama, it is preferred over the default
-# qwen2.5-coder:7b for most tasks due to its larger parameter count (31B).
-# The designer agent uses Gemma 4 as a fallback between cloud LLMs and
-# template generation (see designer_agent.py _call_llm).
+# qwen2.5-coder:7b for most tasks: the MoE design gives a large-model quality
+# ceiling at 7B-like inference cost. The designer agent uses Gemma 4 as a
+# fallback between cloud LLMs and template generation (see
+# designer_agent.py _call_llm).
 GEMMA_MODELS: dict[str, str] = {
     "spec":     _GEMMA_MODEL,   # spec extraction, structured output
-    "designer": _GEMMA_MODEL,   # CadQuery code generation (31B >> 7B quality)
+    "designer": _GEMMA_MODEL,   # CadQuery code generation
     "eval":     _GEMMA_MODEL,   # geometry validation reasoning
     "refiner":  _GEMMA_MODEL,   # code fix suggestions
 }
