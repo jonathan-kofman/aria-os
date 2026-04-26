@@ -101,7 +101,13 @@ namespace AriaSW
                 _store[intent] = args;
                 Save();
             }
-            AriaSwAddin.FileLog($"RecipeDb: recorded '{intent}' -> {args.ToString(Formatting.None)}");
+            // Use JsonConvert.SerializeObject — JToken.ToString(Formatting)
+            // overload isn't present on every Newtonsoft.Json version SW
+            // may have already loaded into its app domain at runtime.
+            string preview;
+            try { preview = JsonConvert.SerializeObject(args); }
+            catch { preview = "(serialize failed)"; }
+            AriaSwAddin.FileLog($"RecipeDb: recorded '{intent}' -> {preview}");
         }
 
         private static void Save()
@@ -141,6 +147,7 @@ namespace AriaSW
                     method        = "FeatureCut4",
                     blind         = true,
                     flip          = false,
+                    dir           = false,
                     selectBody    = false,
                     useAutoSelect = true,
                 }),
@@ -149,6 +156,7 @@ namespace AriaSW
                     method        = "FeatureCut4",
                     blind         = false,
                     flip          = false,
+                    dir           = false,
                     selectBody    = false,
                     useAutoSelect = true,
                 }),

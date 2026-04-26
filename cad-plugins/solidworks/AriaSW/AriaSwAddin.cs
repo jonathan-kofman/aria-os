@@ -436,90 +436,86 @@ namespace AriaSW
 
                 // (0) Recipe-driven first attempt — bypasses the entire
                 //     fallback chain when a known-good combo exists.
-                bool[] recipeUsedBlind = { false };
-                bool[] recipeUsedFlip  = { false };
-                bool[] recipeUsedSelB  = { false };
-                bool[] recipeUsedAuto  = { true  };
+                bool recipeBlind = true;
+                bool recipeFlip  = false;
+                bool recipeDir   = false;
+                bool recipeSelB  = false;
+                bool recipeAuto  = true;
                 if (recipe != null)
                 {
-                    recipeUsedBlind[0] = recipe.Value<bool?>("blind") ?? true;
-                    recipeUsedFlip[0]  = recipe.Value<bool?>("flip") ?? false;
-                    recipeUsedSelB[0]  = recipe.Value<bool?>("selectBody") ?? false;
-                    recipeUsedAuto[0]  = recipe.Value<bool?>("useAutoSelect") ?? true;
-                    FileLog($"  cut: recipe '{cutIntent}' -> blind={recipeUsedBlind[0]} flip={recipeUsedFlip[0]} selBody={recipeUsedSelB[0]} auto={recipeUsedAuto[0]}");
+                    recipeBlind = recipe.Value<bool?>("blind") ?? true;
+                    recipeFlip  = recipe.Value<bool?>("flip") ?? false;
+                    recipeDir   = recipe.Value<bool?>("dir") ?? false;
+                    recipeSelB  = recipe.Value<bool?>("selectBody") ?? false;
+                    recipeAuto  = recipe.Value<bool?>("useAutoSelect") ?? true;
+                    FileLog($"  cut: recipe '{cutIntent}' -> blind={recipeBlind} flip={recipeFlip} dir={recipeDir} selBody={recipeSelB} auto={recipeAuto}");
                     cutFeat = TryFeatureCut(sketchFeatName, dist,
-                        blind: recipeUsedBlind[0], selectBody: recipeUsedSelB[0],
-                        useAutoSelect: recipeUsedAuto[0], flip: recipeUsedFlip[0]);
+                        blind: recipeBlind, selectBody: recipeSelB,
+                        useAutoSelect: recipeAuto, flip: recipeFlip, dir: recipeDir);
                 }
 
                 // Helper for recording the winning combo on success.
-                void RecordCut(bool b, bool f, bool sb, bool au)
+                // Wrapped in try/catch so persistence failures (e.g. JSON
+                // serialization issues on this user's Newtonsoft version)
+                // never tank the actual op result.
+                void RecordCut(bool b, bool f, bool d, bool sb, bool au)
                 {
-                    RecipeDb.RecordSuccess(cutIntent, JObject.FromObject(new
+                    try
                     {
-                        method        = "FeatureCut4",
-                        blind         = b,
-                        flip          = f,
-                        selectBody    = sb,
-                        useAutoSelect = au,
-                    }));
+                        RecipeDb.RecordSuccess(cutIntent, JObject.FromObject(new
+                        {
+                            method        = "FeatureCut4",
+                            blind         = b,
+                            flip          = f,
+                            dir           = d,
+                            selectBody    = sb,
+                            useAutoSelect = au,
+                        }));
+                    }
+                    catch (Exception ex)
+                    {
+                        FileLog($"  RecordCut failed (op still succeeded): {ex.Message}");
+                    }
                 }
 
                 if (cutFeat != null)
-                {
-                    RecordCut(recipeUsedBlind[0], recipeUsedFlip[0],
-                              recipeUsedSelB[0],  recipeUsedAuto[0]);
-                }
+                    RecordCut(recipeBlind, recipeFlip, recipeDir, recipeSelB, recipeAuto);
 
-                // (a) sketch-only + auto-select bodies + blind cut
-                if (cutFeat == null)
+                // Fallback grid: try every {Dir, Flip, Blind/ThroughAll}
+                // combination before giving up. Dir matters most (reverses
+                // extrude direction); Flip rarely (cuts outside the loop).
+                // Skip the recipe combo to avoid running it twice.
+                bool TryAttempt(bool b, bool f, bool d, bool sb, bool au)
                 {
+                    if (cutFeat != null) return true;
+                    // Skip if same as the recipe attempt above (already tried)
+                    if (recipe != null && b == recipeBlind && f == recipeFlip
+                        && d == recipeDir && sb == recipeSelB && au == recipeAuto)
+                        return false;
                     cutFeat = TryFeatureCut(sketchFeatName, dist,
-                        blind: true, selectBody: false, useAutoSelect: true,
-                        flip: false);
-                    if (cutFeat != null) RecordCut(true, false, false, true);
+                        blind: b, selectBody: sb, useAutoSelect: au, flip: f, dir: d);
+                    if (cutFeat != null) { RecordCut(b, f, d, sb, au); return true; }
+                    return false;
                 }
 
-                // (b) sketch-only + ThroughAll + flip=false
-                if (cutFeat == null)
-                {
-                    cutFeat = TryFeatureCut(sketchFeatName, dist,
-                        blind: false, selectBody: false, useAutoSelect: true,
-                        flip: false);
-                    if (cutFeat != null) RecordCut(false, false, false, true);
-                }
+                // 1. Dir variations on auto-select sketch-only path
+                TryAttempt(true,  false, false, false, true);   // blind, +normal
+                TryAttempt(true,  false, true,  false, true);   // blind, -normal (flip dir)
+                TryAttempt(false, false, false, false, true);   // through-all, +normal
+                TryAttempt(false, false, true,  false, true);   // through-all, -normal
 
-                // (c) flip=true: cut direction reversed. If SW's "default
-                //     direction" puts the cut going AWAY from the body,
-                //     the cut removes nothing and returns null. flip=true
-                //     reverses to the other side.
-                if (cutFeat == null)
-                {
-                    cutFeat = TryFeatureCut(sketchFeatName, dist,
-                        blind: true, selectBody: false, useAutoSelect: true,
-                        flip: true);
-                    if (cutFeat != null) RecordCut(true, true, false, true);
-                }
+                // 2. Flip side (cut outside loop) — useful for unusual sketches
+                TryAttempt(true,  true,  false, false, true);
+                TryAttempt(true,  true,  true,  false, true);
+                TryAttempt(false, true,  false, false, true);
+                TryAttempt(false, true,  true,  false, true);
 
-                // (d) flip=true + ThroughAll
-                if (cutFeat == null)
-                {
-                    cutFeat = TryFeatureCut(sketchFeatName, dist,
-                        blind: false, selectBody: false, useAutoSelect: true,
-                        flip: true);
-                    if (cutFeat != null) RecordCut(false, true, false, true);
-                }
+                // 3. Explicit body select (Mark=4) — for cases where SW
+                //    can't auto-pick the target body (multi-body parts)
+                TryAttempt(true,  false, false, true,  false);
+                TryAttempt(true,  false, true,  true,  false);
 
-                // (e) explicit body select (Mark=4) + blind + flip=false
-                if (cutFeat == null)
-                {
-                    cutFeat = TryFeatureCut(sketchFeatName, dist,
-                        blind: true, selectBody: true, useAutoSelect: false,
-                        flip: false);
-                    if (cutFeat != null) RecordCut(true, false, true, false);
-                }
-
-                // (f) feature scope DISABLED — last-ditch
+                // Last-ditch: feature scope DISABLED, cut affects every body
                 if (cutFeat == null)
                     cutFeat = TryFeatureCutNoScope(sketchFeatName, dist);
 
@@ -542,7 +538,8 @@ namespace AriaSW
         }
 
         private IFeature TryFeatureCut(string sketchName, double dist,
-            bool blind, bool selectBody, bool useAutoSelect, bool flip)
+            bool blind, bool selectBody, bool useAutoSelect,
+            bool flip, bool dir)
         {
             _model.ClearSelection2(true);
             bool selSketch = _model.Extension.SelectByID2(
@@ -550,7 +547,7 @@ namespace AriaSW
                 (int)swSelectOption_e.swSelectOptionDefault);
             if (!selSketch)
             {
-                FileLog($"  cut.try (blind={blind} body={selectBody} auto={useAutoSelect} flip={flip}): SelectByID2 sketch={false}");
+                FileLog($"  cut.try (blind={blind} body={selectBody} auto={useAutoSelect} flip={flip} dir={dir}): SelectByID2 sketch={false}");
                 return null;
             }
             if (selectBody && _lastBodyFeature != null)
@@ -569,13 +566,17 @@ namespace AriaSW
 
             try
             {
-                FileLog($"  cut.try blind={blind} body={selectBody} auto={useAutoSelect} flip={flip} T1={endCond1} sel={selCount} featCount={featCountBefore}");
+                FileLog($"  cut.try blind={blind} body={selectBody} auto={useAutoSelect} flip={flip} dir={dir} T1={endCond1} sel={selCount} featCount={featCountBefore}");
                 const double DEG = 0.01745329251994;
-                // Capture as object first (no IFeature cast) so we can
-                // see the actual COM type — null vs cast failure.
+                // Args:
+                //   Flip = FlipSideToCut: cut OUTSIDE the closed loop (rare)
+                //   Dir  = ReverseDirection: -sketch_normal instead of +
+                // Most cut failures are direction issues, fixed by Dir=true.
+                // Capture as object first (no IFeature cast) so we can see
+                // the actual COM type — null vs cast failure.
                 object raw = _model.FeatureManager.FeatureCut4(
                     true,                                 // Sd (single-direction)
-                    flip, false,                          // Flip, Dir
+                    flip, dir,                            // Flip (side), Dir (direction)
                     endCond1, endCond2,
                     d1, d2,
                     false, false,
@@ -1017,6 +1018,8 @@ namespace AriaSW
 
                 RecipeDb.Init();
                 FileLog($"RecipeDb init OK (count={RecipeDb.Count})");
+
+                AriaHttpListener.Start();
             }
             catch (Exception ex)
             {
@@ -1033,6 +1036,7 @@ namespace AriaSW
 
         public bool DisconnectFromSW()
         {
+            try { AriaHttpListener.Stop(); } catch { }
             try
             {
                 if (_taskPane != null)

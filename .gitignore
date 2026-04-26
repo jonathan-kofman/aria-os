@@ -65,3 +65,7 @@ cad-plugins/rhino/AriaPanel/bin/
 cad-plugins/rhino/AriaPanel/obj/
 cad-plugins/solidworks/AriaSW/bin/
 cad-plugins/solidworks/AriaSW/obj/
+# Test artifacts produced by the autonomous SW driver
+cad-plugins/solidworks/AriaSW/aria_sw_test_*.png
+cad-plugins/solidworks/AriaSW/aria_sw_test_*.step
+cad-plugins/solidworks/AriaSW/aria_sw_test_*.bmp
