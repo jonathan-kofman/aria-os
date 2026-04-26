@@ -19,6 +19,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
+using Newtonsoft.Json.Linq;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using SolidWorks.Interop.swpublished;
@@ -426,37 +427,97 @@ namespace AriaSW
 
                 IFeature cutFeat = null;
 
+                // Recipe lookup: prefer "blind" intent if a finite distance
+                // is requested; treat very large distances as "through all".
+                string cutIntent = (dist >= 1.0)
+                    ? "cut_extrude_through_all"
+                    : "cut_extrude_blind";
+                JObject recipe = RecipeDb.Lookup(cutIntent);
+
+                // (0) Recipe-driven first attempt — bypasses the entire
+                //     fallback chain when a known-good combo exists.
+                bool[] recipeUsedBlind = { false };
+                bool[] recipeUsedFlip  = { false };
+                bool[] recipeUsedSelB  = { false };
+                bool[] recipeUsedAuto  = { true  };
+                if (recipe != null)
+                {
+                    recipeUsedBlind[0] = recipe.Value<bool?>("blind") ?? true;
+                    recipeUsedFlip[0]  = recipe.Value<bool?>("flip") ?? false;
+                    recipeUsedSelB[0]  = recipe.Value<bool?>("selectBody") ?? false;
+                    recipeUsedAuto[0]  = recipe.Value<bool?>("useAutoSelect") ?? true;
+                    FileLog($"  cut: recipe '{cutIntent}' -> blind={recipeUsedBlind[0]} flip={recipeUsedFlip[0]} selBody={recipeUsedSelB[0]} auto={recipeUsedAuto[0]}");
+                    cutFeat = TryFeatureCut(sketchFeatName, dist,
+                        blind: recipeUsedBlind[0], selectBody: recipeUsedSelB[0],
+                        useAutoSelect: recipeUsedAuto[0], flip: recipeUsedFlip[0]);
+                }
+
+                // Helper for recording the winning combo on success.
+                void RecordCut(bool b, bool f, bool sb, bool au)
+                {
+                    RecipeDb.RecordSuccess(cutIntent, JObject.FromObject(new
+                    {
+                        method        = "FeatureCut4",
+                        blind         = b,
+                        flip          = f,
+                        selectBody    = sb,
+                        useAutoSelect = au,
+                    }));
+                }
+
+                if (cutFeat != null)
+                {
+                    RecordCut(recipeUsedBlind[0], recipeUsedFlip[0],
+                              recipeUsedSelB[0],  recipeUsedAuto[0]);
+                }
+
                 // (a) sketch-only + auto-select bodies + blind cut
-                cutFeat = TryFeatureCut(sketchFeatName, dist,
-                    blind: true, selectBody: false, useAutoSelect: true,
-                    flip: false);
+                if (cutFeat == null)
+                {
+                    cutFeat = TryFeatureCut(sketchFeatName, dist,
+                        blind: true, selectBody: false, useAutoSelect: true,
+                        flip: false);
+                    if (cutFeat != null) RecordCut(true, false, false, true);
+                }
 
                 // (b) sketch-only + ThroughAll + flip=false
                 if (cutFeat == null)
+                {
                     cutFeat = TryFeatureCut(sketchFeatName, dist,
                         blind: false, selectBody: false, useAutoSelect: true,
                         flip: false);
+                    if (cutFeat != null) RecordCut(false, false, false, true);
+                }
 
                 // (c) flip=true: cut direction reversed. If SW's "default
                 //     direction" puts the cut going AWAY from the body,
                 //     the cut removes nothing and returns null. flip=true
                 //     reverses to the other side.
                 if (cutFeat == null)
+                {
                     cutFeat = TryFeatureCut(sketchFeatName, dist,
                         blind: true, selectBody: false, useAutoSelect: true,
                         flip: true);
+                    if (cutFeat != null) RecordCut(true, true, false, true);
+                }
 
                 // (d) flip=true + ThroughAll
                 if (cutFeat == null)
+                {
                     cutFeat = TryFeatureCut(sketchFeatName, dist,
                         blind: false, selectBody: false, useAutoSelect: true,
                         flip: true);
+                    if (cutFeat != null) RecordCut(false, true, false, true);
+                }
 
                 // (e) explicit body select (Mark=4) + blind + flip=false
                 if (cutFeat == null)
+                {
                     cutFeat = TryFeatureCut(sketchFeatName, dist,
                         blind: true, selectBody: true, useAutoSelect: false,
                         flip: false);
+                    if (cutFeat != null) RecordCut(true, false, true, false);
+                }
 
                 // (f) feature scope DISABLED — last-ditch
                 if (cutFeat == null)
@@ -953,6 +1014,9 @@ namespace AriaSW
 
                 CreateTaskPane();
                 FileLog("CreateTaskPane OK");
+
+                RecipeDb.Init();
+                FileLog($"RecipeDb init OK (count={RecipeDb.Count})");
             }
             catch (Exception ex)
             {

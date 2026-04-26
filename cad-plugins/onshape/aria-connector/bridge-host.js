@@ -365,6 +365,22 @@
       "intersect": "INTERSECT",
     };
     const opEnum = opMap[p.operation] || "NEW";
+
+    // Recipe lookup — pick intent by op, then read tuning knobs.
+    const intentMap = {
+      "NEW":       "extrude_solid_new",
+      "ADD":       "extrude_solid_join",
+      "REMOVE":    "extrude_solid_cut",
+      "INTERSECT": "extrude_solid_intersect",
+    };
+    const intent = intentMap[opEnum] || "extrude_solid_new";
+    const recipe = (window.AriaRecipeDb && window.AriaRecipeDb.lookup(intent)) || {};
+    const endBound          = recipe.endBound          || "BLIND";
+    const bodyType          = recipe.bodyType          || "SOLID";
+    const oppositeDirection = recipe.oppositeDirection !== undefined
+      ? Boolean(recipe.oppositeDirection)
+      : (dist < 0);
+
     const feature = {
       btType: "BTMFeature-134",
       featureType: "extrude",
@@ -374,16 +390,15 @@
           btType: "BTMIndividualSketchRegionQuery-140",
           featureId: sk.featureId,
         }]),
-        _enumParam("endBound", "BoundingType", "BLIND", "BLIND"),
-        _enumParam("bodyType", "ExtendedToolBodyType",
-                    opEnum === "NEW" ? "SOLID" : "SOLID", "SOLID"),
+        _enumParam("endBound", "BoundingType", endBound, endBound),
+        _enumParam("bodyType", "ExtendedToolBodyType", bodyType, bodyType),
         _enumParam("operationType", "NewBodyOperationType",
                     opEnum, opEnum),
         _lengthParam("depth", Math.abs(dist)),
         {
           btType: "BTMParameterBoolean-144",
           parameterId: "oppositeDirection",
-          value: dist < 0,
+          value: oppositeDirection,
         },
       ],
     };
@@ -393,6 +408,20 @@
       featureId: _onshapeLastFeatureId,
       operation: opEnum,
     };
+
+    // Record the winning combo so the next request hits the recipe.
+    try {
+      if (window.AriaRecipeDb) {
+        window.AriaRecipeDb.recordSuccess(intent, {
+          method:            "feature/extrude",
+          endBound:          endBound,
+          bodyType:          bodyType,
+          oppositeDirection: oppositeDirection,
+          operationType:     opEnum,
+        });
+      }
+    } catch (e) {}
+
     return { ok: true, id: alias, kind: "extrude",
               distance_mm: dist, operation: p.operation,
               onshape: reply.feature?.featureId };

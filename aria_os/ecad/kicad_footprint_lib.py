@@ -310,10 +310,14 @@ def lookup_footprint(value: str, package: str | None = None,
     """Map a BOM value + optional package hint to a real .kicad_mod entry.
 
     Resolution order:
+    0. Recipe cache lookup (persists previous wins across runs)
     1. Exact normalized-name match in by_name (full descriptor)
     2. Candidate-key cascade (strip dimensions, then family)
     3. Package-alias map -> preferred lib -> search prefix
     4. Heuristic: family prefix longest-prefix scan
+
+    On a successful resolution from steps 1-4, the (lib, fp) is written
+    to the recipe cache so the next call hits it on step 0.
 
     Parameters
     ----------
@@ -331,21 +335,41 @@ def lookup_footprint(value: str, package: str | None = None,
     if not idx.get("by_name"):
         return None
 
+    # 0. Recipe cache — instant hit on repeat queries.
+    try:
+        from . import recipe_db
+        cached = recipe_db.lookup_footprint_recipe(value, package)
+        if cached and cached.get("lib") and cached.get("fp"):
+            # Verify the cached entry still resolves in the current
+            # index — KiCad library updates can rename footprints.
+            cached_norm = _normalize_fp_name(cached["fp"])
+            if cached_norm in idx["by_name"]:
+                return idx["by_name"][cached_norm]
+    except Exception:
+        pass
+
     queries = []
     if package:
         queries.append(package)
     queries.append(value)
 
+    hit_result: dict | None = None
     for q in queries:
         # 1. Exact normalized match
         norm = _normalize_fp_name(q)
         if norm in idx["by_name"]:
-            return idx["by_name"][norm]
+            hit_result = idx["by_name"][norm]
+            break
 
         # 2. Candidate key cascade
+        found = False
         for key in _candidate_keys(q):
             if key in idx["by_name"]:
-                return idx["by_name"][key]
+                hit_result = idx["by_name"][key]
+                found = True
+                break
+        if found:
+            break
 
         # 3. Package-alias map
         norm_q = _normalize_fp_name(q)
@@ -353,7 +377,8 @@ def lookup_footprint(value: str, package: str | None = None,
             pref_lib, search_prefix = _PKG_ALIAS_MAP[norm_q]
             hit = _first_in_lib(idx, pref_lib, search_prefix)
             if hit:
-                return hit
+                hit_result = hit
+                break
 
         # Also try alias map on the stripped (no-dims) version
         stripped = re.sub(r"\d+X\d+.*$", "", norm_q).rstrip("-")
@@ -361,14 +386,24 @@ def lookup_footprint(value: str, package: str | None = None,
             pref_lib, search_prefix = _PKG_ALIAS_MAP[stripped]
             hit = _first_in_lib(idx, pref_lib, search_prefix)
             if hit:
-                return hit
+                hit_result = hit
+                break
 
         # 4. Prefix scan across all by_name entries
         hit = _heuristic_lookup(idx, q)
         if hit:
-            return hit
+            hit_result = hit
+            break
 
-    return None
+    # Persist successful resolution to the recipe cache so the next
+    # call hits step 0 instead of running the full cascade again.
+    if hit_result is not None:
+        try:
+            from . import recipe_db
+            recipe_db.record_footprint_success(value, package, hit_result)
+        except Exception:
+            pass
+    return hit_result
 
 
 # --------------------------------------------------------------------------- #

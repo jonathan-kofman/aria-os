@@ -45,6 +45,9 @@ namespace AriaPanel
                 // Wire up toolbar command handlers.
                 AriaCommands.Register();
 
+                // Auto-learning recipe cache for native RhinoCommon ops.
+                RecipeDb.Init();
+
                 return LoadReturnCode.Success;
             }
             catch (Exception ex)

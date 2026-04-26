@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .client import OnshapeClient, get_client
+from . import recipe_db
 
 # Onshape uses meters internally. All ARIA ops pass mm.
 _MM_TO_M = 0.001
@@ -29,6 +30,8 @@ class OnshapeExecutor:
         self.sketches: dict[str, dict] = {}   # alias -> {feature_id, entities}
         self.features: dict[str, str] = {}    # alias -> feature_id
         self._ops_applied = 0
+        # Auto-learning recipe cache for native Onshape ops.
+        recipe_db.init()
 
     def execute(self, kind: str, params: dict) -> dict:
         handler = getattr(self, f"_op_{kind}", None)
@@ -111,6 +114,21 @@ class OnshapeExecutor:
         op_enum = op_map.get(p.get("operation", "new"), "NEW")
         dist_m = abs(float(p["distance"])) * _MM_TO_M
         alias = p.get("alias") or f"extrude_{len(self.features) + 1}"
+
+        # Recipe lookup — pick intent from op_enum, read tuning knobs.
+        intent_map = {"NEW": "extrude_solid_new",
+                       "ADD": "extrude_solid_join",
+                       "REMOVE": "extrude_solid_cut",
+                       "INTERSECT": "extrude_solid_intersect"}
+        intent = intent_map.get(op_enum, "extrude_solid_new")
+        recipe = recipe_db.lookup(intent) or {}
+        end_bound = recipe.get("endBound", "BLIND")
+        body_type = recipe.get("bodyType", "SOLID")
+        opposite_direction = (
+            bool(recipe["oppositeDirection"])
+            if "oppositeDirection" in recipe
+            else float(p["distance"]) < 0)
+
         feature = {
             "btType": "BTMFeature-134",
             "featureType": "extrude",
@@ -125,7 +143,11 @@ class OnshapeExecutor:
                 {"btType": "BTMParameterEnum-145",
                  "parameterId": "endBound",
                  "enumName": "BoundingType", "namespace": "",
-                 "value": "BLIND"},
+                 "value": end_bound},
+                {"btType": "BTMParameterEnum-145",
+                 "parameterId": "bodyType",
+                 "enumName": "ExtendedToolBodyType", "namespace": "",
+                 "value": body_type},
                 {"btType": "BTMParameterEnum-145",
                  "parameterId": "operationType",
                  "enumName": "NewBodyOperationType", "namespace": "",
@@ -137,7 +159,7 @@ class OnshapeExecutor:
                  "isInteger": False},
                 {"btType": "BTMParameterBoolean-144",
                  "parameterId": "oppositeDirection",
-                 "value": float(p["distance"]) < 0},
+                 "value": opposite_direction},
             ],
         }
         reply = self.client.add_feature(
@@ -145,6 +167,19 @@ class OnshapeExecutor:
         fid = (reply.get("feature", {}).get("featureId")
                 or reply.get("featureId") or "")
         self.features[alias] = fid
+
+        # Record the winning combo.
+        try:
+            recipe_db.record_success(intent, {
+                "method":            "feature/extrude",
+                "endBound":          end_bound,
+                "bodyType":          body_type,
+                "oppositeDirection": opposite_direction,
+                "operationType":     op_enum,
+            })
+        except Exception:
+            pass
+
         return {"id": alias, "kind": "extrude",
                  "distance_mm": p["distance"],
                  "operation": p.get("operation", "new"),

@@ -484,14 +484,29 @@ namespace AriaPanel
             string op = p["operation"]?.ToString() ?? "new";
             string alias = p["alias"]?.ToString() ?? $"extrude_{_featureRegistry.Count + 1}";
 
+            // Recipe lookup — pick intent by op, defaults if no cache hit.
+            string intent = op switch
+            {
+                "new"       => "extrude_solid_new",
+                "cut"       => "extrude_solid_cut",
+                "join"      => "extrude_solid_join",
+                "intersect" => "extrude_solid_intersect",
+                _           => "extrude_solid_new",
+            };
+            JObject? recipe = RecipeDb.Lookup(intent);
+            bool capPlanar       = recipe?.Value<bool?>("capPlanarHoles") ?? true;
+            bool reverseDir      = recipe?.Value<bool?>("reverseDirection") ?? false;
+            double tolMultiple   = recipe?.Value<double?>("toleranceMultiple") ?? 1.0;
+
             var plane = _sketchPlanes.GetValueOrDefault(sk, Plane.WorldXY);
-            var direction = plane.ZAxis * distance;
+            var direction = plane.ZAxis * (reverseDir ? -distance : distance);
             // Build a capped solid by extruding the (closed) curve
             var extrusion = Extrusion.CreateExtrusion(curve, direction);
             if (extrusion == null)
                 throw new InvalidOperationException("Extrusion.CreateExtrusion failed — curve must be planar and closed");
             var brep = extrusion.ToBrep();
-            brep = brep.CapPlanarHoles(doc.ModelAbsoluteTolerance) ?? brep;
+            if (capPlanar)
+                brep = brep.CapPlanarHoles(doc.ModelAbsoluteTolerance) ?? brep;
 
             Guid newId;
             if (op == "new")
@@ -502,6 +517,12 @@ namespace AriaPanel
                     Name = alias,
                 };
                 newId = doc.Objects.AddBrep(brep, attrs);
+                RecipeDb.RecordSuccess(intent, JObject.FromObject(new
+                {
+                    method           = "Extrusion.CreateExtrusion",
+                    capPlanarHoles   = capPlanar,
+                    reverseDirection = reverseDir,
+                }));
             }
             else if (op == "cut" || op == "join" || op == "intersect")
             {
@@ -516,15 +537,32 @@ namespace AriaPanel
                 if (target == null)
                     throw new InvalidOperationException($"Cannot {op} — no body exists yet");
 
-                Brep[] combined = op switch
+                // Try the recipe's tolerance first; fall back to looser tols
+                // on null/empty result. Boolean ops in Rhino sometimes need
+                // 10x or 100x the doc tolerance to converge on coincident
+                // edges. The winning multiple is recorded for next time.
+                double baseTol = doc.ModelAbsoluteTolerance;
+                double[] tolLadder = { tolMultiple, 1.0, 10.0, 100.0 };
+                Brep[]? combined = null;
+                double winningTol = tolMultiple;
+                foreach (double mult in tolLadder)
                 {
-                    "cut"       => Brep.CreateBooleanDifference(target, brep, doc.ModelAbsoluteTolerance),
-                    "join"      => Brep.CreateBooleanUnion(new[] { target, brep }, doc.ModelAbsoluteTolerance),
-                    "intersect" => Brep.CreateBooleanIntersection(target, brep, doc.ModelAbsoluteTolerance),
-                    _ => throw new InvalidOperationException(),
-                };
+                    double tol = baseTol * mult;
+                    combined = op switch
+                    {
+                        "cut"       => Brep.CreateBooleanDifference(target, brep, tol),
+                        "join"      => Brep.CreateBooleanUnion(new[] { target, brep }, tol),
+                        "intersect" => Brep.CreateBooleanIntersection(target, brep, tol),
+                        _ => throw new InvalidOperationException(),
+                    };
+                    if (combined != null && combined.Length > 0)
+                    {
+                        winningTol = mult;
+                        break;
+                    }
+                }
                 if (combined == null || combined.Length == 0)
-                    throw new InvalidOperationException($"Boolean {op} produced no result");
+                    throw new InvalidOperationException($"Boolean {op} produced no result at any tolerance");
                 // Replace the existing body with the result
                 doc.Objects.Delete(targetId, true);
                 var attrs = new ObjectAttributes
@@ -533,6 +571,19 @@ namespace AriaPanel
                     Name = alias,
                 };
                 newId = doc.Objects.AddBrep(combined[0], attrs);
+                RecipeDb.RecordSuccess(intent, JObject.FromObject(new
+                {
+                    method            = op switch
+                    {
+                        "cut"       => "Brep.CreateBooleanDifference",
+                        "join"      => "Brep.CreateBooleanUnion",
+                        "intersect" => "Brep.CreateBooleanIntersection",
+                        _ => "",
+                    },
+                    capPlanarHoles    = capPlanar,
+                    reverseDirection  = reverseDir,
+                    toleranceMultiple = winningTol,
+                }));
             }
             else
             {

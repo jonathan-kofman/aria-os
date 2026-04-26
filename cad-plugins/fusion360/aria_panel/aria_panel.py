@@ -47,6 +47,12 @@ from pathlib import Path
 import adsk.core  # type: ignore
 import adsk.fusion  # type: ignore
 
+# Local module — sibling file in this add-in directory.
+try:
+    from . import recipe_db  # when imported as a package
+except (ImportError, ValueError):
+    import recipe_db  # type: ignore  # when Fusion runs the file directly
+
 
 # --------------------------------------------------------------------
 # Config
@@ -383,21 +389,42 @@ def _op_extrude(params: dict) -> dict:
     if sketch is None:
         raise KeyError("Unknown sketch alias")
     dist_mm = float(params.get("distance"))
-    operation = _OP_TO_FUSION.get(params.get("operation", "new"),
+    op_str = params.get("operation", "new")
+    operation = _OP_TO_FUSION.get(op_str,
                                    adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+
+    # Recipe lookup — pick intent by op, then read tuning knobs.
+    intent = {
+        "new":       "extrude_solid_new",
+        "join":      "extrude_solid_join",
+        "cut":       "extrude_solid_cut",
+        "intersect": "extrude_solid_intersect",
+    }.get(op_str, "extrude_solid_new")
+    recipe = recipe_db.lookup(intent) or {}
+    flip_distance     = bool(recipe.get("flipDistance", False))
+    extent_direction  = recipe.get("extentDirection", "positive")
+    use_all_profiles  = bool(recipe.get("allProfiles",
+                                         params.get("all_profiles", False)))
+
     # Pick profile(s): first one, or all if requested
     profs = sketch.profiles
     if profs.count == 0:
         raise RuntimeError("Sketch has no profile to extrude")
-    prof = profs.item(0) if not params.get("all_profiles") else profs
-    dist_input = _value_input(dist_mm * 0.1)  # mm→cm
+    prof = profs.item(0) if not use_all_profiles else profs
+
+    effective_dist = -dist_mm if flip_distance else dist_mm
+    dist_input = _value_input(effective_dist * 0.1)  # mm→cm
     extr_input = root.features.extrudeFeatures.createInput(prof, operation)
-    # Distance extent — positive = one side, negative = opposite
     distance_extent = adsk.fusion.DistanceExtentDefinition.create(dist_input)
-    # Direction: default PositiveExtentDirection if distance > 0
-    direction = (adsk.fusion.ExtentDirections.PositiveExtentDirection
-                  if dist_mm >= 0
-                  else adsk.fusion.ExtentDirections.NegativeExtentDirection)
+    # Direction from recipe (override) or sign of distance.
+    if extent_direction == "negative":
+        direction = adsk.fusion.ExtentDirections.NegativeExtentDirection
+    elif extent_direction == "symmetric":
+        direction = adsk.fusion.ExtentDirections.SymmetricExtentDirection
+    else:
+        direction = (adsk.fusion.ExtentDirections.PositiveExtentDirection
+                      if effective_dist >= 0
+                      else adsk.fusion.ExtentDirections.NegativeExtentDirection)
     extr_input.setOneSideExtent(distance_extent, direction)
     extr_feature = root.features.extrudeFeatures.add(extr_input)
     alias = params.get("alias", f"extrude_{root.features.extrudeFeatures.count}")
@@ -405,8 +432,20 @@ def _op_extrude(params: dict) -> dict:
     # Also register the resulting body (if any) for face-picking later
     if extr_feature.bodies.count > 0:
         _FEATURE_REGISTRY[alias + "__body"] = extr_feature.bodies.item(0)
+
+    # Record the winning combo so the next request hits the recipe.
+    try:
+        recipe_db.record_success(intent, {
+            "method": f"extrudeFeatures.add ({op_str})",
+            "extentDirection": extent_direction,
+            "flipDistance": flip_distance,
+            "allProfiles": use_all_profiles,
+        })
+    except Exception:
+        pass
+
     return {"ok": True, "id": alias, "kind": "extrude",
-            "distance_mm": dist_mm, "operation": params.get("operation", "new")}
+            "distance_mm": dist_mm, "operation": op_str}
 
 
 def _op_circular_pattern(params: dict) -> dict:
@@ -1980,6 +2019,13 @@ def run(_context):
     try:
         _app = adsk.core.Application.get()
         _ui = _app.userInterface
+
+        # Auto-learning recipe cache for native Fusion ops.
+        try:
+            recipe_db.init()
+        except Exception:
+            pass  # cache is best-effort; addin still works without it
+
         cmd_defs = _ui.commandDefinitions
         existing = cmd_defs.itemById(_CMD_ID)
         if existing:

@@ -13,6 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from aria_os.ecad import recipe_db
+
 
 def _try_import_pcbnew():
     try:
@@ -34,6 +36,8 @@ class KicadExecutor:
         self._nets: dict[str, int] = {}        # name → netcode
         self._components: dict[str, Any] = {}  # ref → footprint object
         self._ops_applied = 0
+        # Auto-learning recipe cache for native KiCad/pcbnew ops.
+        recipe_db.init()
 
     # ---- Public API ----------------------------------------------------
 
@@ -107,20 +111,40 @@ class KicadExecutor:
             lib_name, fp_name = fp_id.split(":", 1)
         except ValueError:
             raise ValueError(f"Footprint id must be 'lib:name' (got {fp_id!r})")
-        # FootprintLoad signature has varied across KiCad versions
+        # FootprintLoad signature has varied across KiCad versions.
+        # Try the recipe-recommended form first, then fall back to the
+        # other and persist the winner so subsequent calls hit the
+        # right path on the first try.
+        sig_recipe = recipe_db.lookup("place_component_signature") or {}
+        preferred_form = sig_recipe.get("form", "lib_nickname")
+        forms_to_try = (
+            ["lib_nickname", "lib_path"]
+            if preferred_form == "lib_nickname"
+            else ["lib_path", "lib_nickname"])
         fp = None
-        try:
-            fp = self._pcbnew.FootprintLoad(lib_name, fp_name)
-        except Exception:
-            # Fallback: some installs expect the library path not the nickname
+        winning_form = None
+        last_exc: Exception | None = None
+        for form in forms_to_try:
             try:
-                fp = self._pcbnew.FootprintLoad(
-                    self._pcbnew.GetOSPath(lib_name), fp_name)
+                if form == "lib_nickname":
+                    fp = self._pcbnew.FootprintLoad(lib_name, fp_name)
+                else:
+                    fp = self._pcbnew.FootprintLoad(
+                        self._pcbnew.GetOSPath(lib_name), fp_name)
+                if fp is not None:
+                    winning_form = form
+                    break
             except Exception as exc:
-                raise RuntimeError(
-                    f"FootprintLoad failed for {fp_id}: {exc}")
+                last_exc = exc
         if fp is None:
-            raise RuntimeError(f"Footprint {fp_id} not found")
+            raise RuntimeError(
+                f"FootprintLoad failed for {fp_id}: {last_exc}")
+        # Persist the winning signature variant.
+        try:
+            recipe_db.record_success("place_component_signature",
+                                      {"form": winning_form})
+        except Exception:
+            pass
         fp.SetReference(ref)
         fp.SetPosition(self._pcbnew.VECTOR2I_MM(x, y))
         if rot:
