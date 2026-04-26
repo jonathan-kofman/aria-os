@@ -1763,6 +1763,28 @@ async def insights_view():
     return FileResponse(str(p), media_type="text/html")
 
 
+@app.get("/viewer")
+@app.get("/viewer.html")
+async def standalone_viewer():
+    """Serve the single-file three.js viewer (dashboard/static/viewer.html).
+    Loads STL/GLB/StructSight-JSON via drag-drop or ?stl=, ?glb=, ?ss=
+    query params. Used as a headset-less inspection surface for ARIA
+    pipeline output."""
+    p = Path(__file__).resolve().parent / "static" / "viewer.html"
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="viewer.html missing")
+    return FileResponse(str(p), media_type="text/html")
+
+
+@app.get("/static/structsight_stub.json")
+async def structsight_stub():
+    """Sample StructSight overlay for testing /viewer."""
+    p = Path(__file__).resolve().parent / "static" / "structsight_stub.json"
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="stub missing")
+    return FileResponse(str(p), media_type="application/json")
+
+
 @app.get("/api/insights/eval_history")
 async def insights_eval_history(limit: int = 20):
     """Return the last N eval runs from outputs/eval/<ts>/results.json
