@@ -23,6 +23,8 @@ Endpoints (all bound to http://localhost:7505/):
   POST /save_pcb       — body:{ path }
   POST /export_gerbers — body:{ out_dir }
   GET  /screenshot     — SVG render of the active board
+  GET  /render         — 3D PNG render via `kicad-cli pcb render`
+                         (?side=top|bottom|... &quality=basic|high)
   POST /run_drc        — kicad-cli pcb drc
   POST /quit           — clear state, returns { ok }
 
@@ -451,6 +453,49 @@ def _save_pcb(out_path: Path) -> dict:
         except Exception: pass
 
 
+def _render_3d_png(side: str = "top", width: int = 1024,
+                    height: int = 768, quality: str = "basic"
+                    ) -> tuple[bytes, str]:
+    """Run kicad-cli pcb render to produce a 3D PNG of the active board.
+
+    Vision LLMs can actually read these (the SVG /screenshot is too
+    abstract for vision models to interpret). Used by the visual
+    verification path that compares "what was asked" vs "what was made".
+    """
+    cli = _kicad_cli()
+    if not cli:
+        raise RuntimeError("kicad-cli not on PATH")
+    if not _STATE.last_save_path or not Path(_STATE.last_save_path).is_file():
+        tmp = Path(tempfile.gettempdir()) / f"aria_kicad_render_{uuid4().hex}.kicad_pcb"
+        _save_pcb(tmp)
+    out_png = Path(tempfile.gettempdir()) / f"aria_kicad_render_{uuid4().hex}.png"
+    if side not in ("top", "bottom", "left", "right", "front", "back"):
+        side = "top"
+    if quality not in ("basic", "high", "user", "job_settings"):
+        quality = "basic"
+    try:
+        proc = subprocess.run(
+            [cli, "pcb", "render",
+             "--output", str(out_png),
+             "--width", str(width),
+             "--height", str(height),
+             "--side", side,
+             "--quality", quality,
+             "--background", "opaque",
+             str(_STATE.last_save_path)],
+            capture_output=True, timeout=90,
+        )
+        if proc.returncode != 0 or not out_png.exists():
+            raise RuntimeError(
+                f"kicad-cli render failed: "
+                f"{proc.stderr.decode('utf-8', errors='replace')[:500]}")
+        data = out_png.read_bytes()
+    finally:
+        try: out_png.unlink()
+        except Exception: pass
+    return data, "image/png"
+
+
 def _render_screenshot() -> tuple[bytes, str]:
     """Run kicad-cli pcb export svg on the last saved board. Returns
     (bytes, content-type). If kicad-cli isn't available, raises
@@ -566,7 +611,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        path = self.path.rstrip("/").lower() or "/"
+        path = self.path.split("?", 1)[0].rstrip("/").lower() or "/"
         try:
             with _LOCK:
                 if path == "/status":
@@ -598,6 +643,22 @@ class _Handler(BaseHTTPRequestHandler):
                     data, ct = _render_screenshot()
                     self._binary(200, data, ct)
                     return
+                if path == "/render":
+                    # Query string parsing for ?side=top&quality=high
+                    qs = {}
+                    if "?" in self.path:
+                        for kv in self.path.split("?", 1)[1].split("&"):
+                            if "=" in kv:
+                                k, v = kv.split("=", 1)
+                                qs[k.lower()] = v
+                    data, ct = _render_3d_png(
+                        side=qs.get("side", "top"),
+                        width=int(qs.get("width", 1024)),
+                        height=int(qs.get("height", 768)),
+                        quality=qs.get("quality", "basic"),
+                    )
+                    self._binary(200, data, ct)
+                    return
             self._json(404, {"ok": False, "error": f"unknown route GET {path}"})
         except Exception as ex:
             self._json(500, {"ok": False,
@@ -605,7 +666,7 @@ class _Handler(BaseHTTPRequestHandler):
                               "trace": traceback.format_exc(limit=4)})
 
     def do_POST(self):
-        path = self.path.rstrip("/").lower() or "/"
+        path = self.path.split("?", 1)[0].rstrip("/").lower() or "/"
         try:
             body = self._read_body()
             with _LOCK:
