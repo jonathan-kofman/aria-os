@@ -473,40 +473,60 @@ namespace AriaSW
                 FileLog($"  cut.try: append body '{_lastBodyFeature.Name}' Mark=4 -> {b}");
             }
 
+            // For "through all" cuts use swEndCondThroughAll (1), NOT
+            // swEndCondThroughAllBoth (9). ThroughAllBoth implies two
+            // directions and conflicts with Sd=true (single direction)
+            // — SW silently rejects the inconsistent combo.
             int endCond1 = blind ? (int)swEndConditions_e.swEndCondBlind
-                                 : (int)swEndConditions_e.swEndCondThroughAllBoth;
-            int endCond2 = blind ? (int)swEndConditions_e.swEndCondBlind
-                                 : (int)swEndConditions_e.swEndCondBlind;
-            double d1 = blind ? dist : 0.001;   // dummy depth ignored for ThroughAll*
-            double d2 = 0;
+                                 : (int)swEndConditions_e.swEndCondThroughAll;
+            int endCond2 = (int)swEndConditions_e.swEndCondBlind;
+            double d1 = blind ? dist : 0.01;   // some non-zero dummy for ThroughAll
+            double d2 = 0.01;                  // SW wants both depths > 0
 
             try
             {
-                FileLog($"  cut.try blind={blind} body={selectBody} auto={useAutoSelect}");
-                // Dang1/Dang2: SW expects a non-zero draft angle (1°
-                //   in radians) even when no draft is applied. 0 makes
-                //   FeatureCut4 silently return null on some builds.
-                // AssemblyFeatureScope=true / AutoSelectComponents=false
-                //   is the part-context combo (recorded macros use this).
-                //   Mixing in AutoSelectComponents=true confuses the
-                //   API into looking for an assembly that isn't there.
+                FileLog($"  cut.try blind={blind} body={selectBody} auto={useAutoSelect} T1={endCond1}");
+                // NormalCut=false: NormalCut is a sheet-metal-only flag.
+                //   When true on a regular part SW silently nulls the
+                //   feature on some 2024+ builds.
+                // AssemblyFeatureScope=true, AutoSelectComponents=true:
+                //   matches the canonical SW recorded macro for an
+                //   extruded cut on a part.
+                // Dang1/Dang2 = 1° in radians: SW expects non-zero even
+                //   when no draft is applied.
                 const double DEG = 0.01745329251994;
-                return _model.FeatureManager.FeatureCut4(
+                IFeature feat = _model.FeatureManager.FeatureCut4(
                     true,                                 // Sd (single-direction)
                     false, false,                         // Flip, Dir
                     endCond1, endCond2,
                     d1, d2,
                     false, false,                         // Dchk1, Dchk2
                     false, false,                         // Ddir1, Ddir2
-                    DEG, DEG,                             // Dang1, Dang2 (1° — SW requires non-zero)
+                    DEG, DEG,                             // Dang1, Dang2
                     false, false,                         // OffsetReverse1, OffsetReverse2
                     false, false,                         // TranslateSurface1, TranslateSurface2
-                    true,                                 // NormalCut
+                    false,                                // NormalCut (false for non-sheet-metal)
                     true, useAutoSelect,                  // UseFeatScope, UseAutoSelect
-                    true, false,                          // AssemblyFeatureScope, AutoSelectComponents
+                    true, true,                           // AssemblyFeatureScope, AutoSelectComponents
                     false,                                // PropagateFeatureToParts
                     (int)swStartConditions_e.swStartSketchPlane,
                     0, false, false) as IFeature;
+                // FeatureCut4 sometimes returns null even when the
+                // feature was actually created. Probe the most-recent
+                // feature; if its name starts with "Cut-" or "Boss-",
+                // SW just made one — adopt it as the result.
+                if (feat == null)
+                {
+                    var recent = _model.FeatureByPositionReverse(0) as IFeature;
+                    string nm = recent?.Name ?? "";
+                    if (!string.IsNullOrEmpty(nm) &&
+                        (nm.StartsWith("Cut-") || nm.StartsWith("Cut Extrude")))
+                    {
+                        FileLog($"  cut.try: FeatureCut4 returned null but found '{nm}' — adopting");
+                        feat = recent;
+                    }
+                }
+                return feat;
             }
             catch (Exception ex)
             {
@@ -525,26 +545,37 @@ namespace AriaSW
             FileLog("  cut.try noScope (UseFeatScope=false)");
             try
             {
-                // UseFeatScope=false → cut applies to every body in the part
-                // regardless of selection. Removes the scope-resolution
-                // failure mode entirely. Same Dang1/Dang2 + scope-flag
-                // fixes as TryFeatureCut.
+                // Last-ditch: UseFeatScope=false → cut affects every body
+                // in the part regardless of selection. ThroughAll(1) +
+                // Sd=true (single direction) is the simplest valid combo.
                 const double DEG = 0.01745329251994;
-                return _model.FeatureManager.FeatureCut4(
+                IFeature feat = _model.FeatureManager.FeatureCut4(
                     true,
                     false, false,
-                    (int)swEndConditions_e.swEndCondThroughAllBoth,
+                    (int)swEndConditions_e.swEndCondThroughAll,
                     (int)swEndConditions_e.swEndCondBlind,
-                    0.001, 0,
+                    0.01, 0.01,
                     false, false, false, false,
                     DEG, DEG,
                     false, false, false, false,
-                    true,
+                    false,                                 // NormalCut=false
                     false, false,                          // UseFeatScope=false
-                    true, false,
+                    true, true,
                     false,
                     (int)swStartConditions_e.swStartSketchPlane,
                     0, false, false) as IFeature;
+                if (feat == null)
+                {
+                    var recent = _model.FeatureByPositionReverse(0) as IFeature;
+                    string nm = recent?.Name ?? "";
+                    if (!string.IsNullOrEmpty(nm) &&
+                        (nm.StartsWith("Cut-") || nm.StartsWith("Cut Extrude")))
+                    {
+                        FileLog($"  noScope: FeatureCut4 returned null but found '{nm}' — adopting");
+                        feat = recent;
+                    }
+                }
+                return feat;
             }
             catch (Exception ex)
             {

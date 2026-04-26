@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ARIA · Standalone Viewer (STL / GLB / StructSight)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin:0; height:100%; background:#15171c; color:#e6e6e6;
+               font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif; }
+  #stage { position:fixed; inset:0; }
+  #panel {
+    position:fixed; top:12px; left:12px; max-width:340px;
+    background:rgba(20,22,28,.92); border:1px solid #2a2e36;
+    border-radius:10px; padding:12px 14px; font-size:13px;
+    box-shadow:0 8px 24px rgba(0,0,0,.4); z-index:10;
+  }
+  #panel h1 { margin:0 0 6px; font-size:14px; font-weight:600;
+              letter-spacing:.02em; color:#9bb6ff; }
+  #panel .row { display:flex; gap:6px; margin:6px 0; align-items:center; }
+  #panel input[type=file] { font-size:11px; color:#aaa; }
+  #panel button {
+    background:#2a2e36; color:#e6e6e6; border:1px solid #3a3f4a;
+    padding:4px 10px; border-radius:6px; font-size:12px;
+    cursor:pointer; font-family:inherit;
+  }
+  #panel button:hover { background:#363b46; }
+  #panel .hint { color:#8a8e96; font-size:11px; margin-top:6px; }
+  #panel .key { color:#cbd2dd; font-family:ui-monospace,monospace; }
+  #info { color:#9bb6ff; font-size:11px; margin-top:8px;
+          font-family:ui-monospace,monospace; word-break:break-word; }
+  #risk-legend { margin-top:8px; display:none; }
+  #risk-legend .swatch { display:inline-block; width:10px; height:10px;
+                          border-radius:2px; vertical-align:middle; margin-right:4px; }
+  .drop-overlay {
+    position:fixed; inset:0; pointer-events:none;
+    background:rgba(40,80,160,.18); border:3px dashed #6c9bff;
+    display:none; align-items:center; justify-content:center;
+    font-size:24px; color:#9bb6ff; z-index:99;
+  }
+  .drop-overlay.active { display:flex; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="panel">
+  <h1>ARIA Standalone Viewer</h1>
+  <div class="row">
+    <input type="file" id="file" accept=".stl,.glb,.gltf,.json" multiple>
+  </div>
+  <div class="row">
+    <button id="reset">Reset view</button>
+    <button id="wire">Toggle wireframe</button>
+    <button id="grid">Toggle grid</button>
+  </div>
+  <div class="hint">
+    Drag-drop one or more files anywhere on the page.<br>
+    <span class="key">.stl</span> / <span class="key">.glb</span> / <span class="key">.gltf</span> = geometry.<br>
+    <span class="key">.json</span> matching StructSight schema = risk overlay.
+  </div>
+  <div id="info"></div>
+  <div id="risk-legend">
+    <div><span class="swatch" style="background:#5fa05f"></span>low</div>
+    <div><span class="swatch" style="background:#d9b048"></span>medium</div>
+    <div><span class="swatch" style="background:#c8553d"></span>high</div>
+  </div>
+</div>
+<div class="drop-overlay" id="drop">drop files</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.166.1/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.166.1/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { STLLoader  } from "three/addons/loaders/STLLoader.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+const stage = document.getElementById("stage");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio || 1);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x15171c);
+renderer.shadowMap.enabled = true;
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(
+  45, window.innerWidth / window.innerHeight, 0.1, 100_000);
+camera.position.set(150, 150, 150);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+sun.position.set(200, 300, 100);
+scene.add(sun);
+
+const grid = new THREE.GridHelper(500, 50, 0x444444, 0x222222);
+scene.add(grid);
+
+const loadedRoot = new THREE.Group();
+scene.add(loadedRoot);
+
+let wireframe = false;
+let lastStructSightJson = null;
+
+function clearLoaded() {
+  while (loadedRoot.children.length) {
+    const c = loadedRoot.children.pop();
+    c.traverse?.(o => {
+      o.geometry?.dispose?.();
+      o.material?.dispose?.();
+    });
+  }
+}
+
+function fitTo(obj) {
+  const box = new THREE.Box3().setFromObject(obj);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  obj.position.sub(center);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const dist = maxDim * 2.2;
+  camera.position.set(dist, dist, dist);
+  camera.lookAt(0, 0, 0);
+  controls.target.set(0, 0, 0);
+  controls.update();
+  document.getElementById("info").textContent =
+    `bbox: ${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)} mm`;
+}
+
+function applyWireframe(obj) {
+  obj.traverse(o => {
+    if (o.material) {
+      if (Array.isArray(o.material)) {
+        o.material.forEach(m => m.wireframe = wireframe);
+      } else {
+        o.material.wireframe = wireframe;
+      }
+    }
+  });
+}
+
+function loadStl(arrayBuffer, name) {
+  clearLoaded();
+  const geom = new STLLoader().parse(arrayBuffer);
+  geom.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xc4c8d0, metalness: 0.3, roughness: 0.6,
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.name = name;
+  loadedRoot.add(mesh);
+  fitTo(loadedRoot);
+  if (lastStructSightJson) applyStructSight(lastStructSightJson);
+}
+
+function loadGlb(arrayBuffer, name) {
+  clearLoaded();
+  new GLTFLoader().parse(arrayBuffer, "", (gltf) => {
+    gltf.scene.name = name;
+    loadedRoot.add(gltf.scene);
+    fitTo(loadedRoot);
+    if (lastStructSightJson) applyStructSight(lastStructSightJson);
+  }, (err) => alert("GLB parse failed: " + err.message));
+}
+
+// StructSight risk overlay: expects JSON shaped roughly like
+//   { "risks": [ { "label", "level": "low|medium|high",
+//                  "x_mm", "y_mm", "z_mm", "radius_mm" } ] }
+// Each risk renders as a coloured sphere anchored at (x,y,z).
+function applyStructSight(json) {
+  lastStructSightJson = json;
+  const palette = { low: 0x5fa05f, medium: 0xd9b048, high: 0xc8553d };
+  const overlay = new THREE.Group();
+  overlay.name = "structsight";
+  const risks = Array.isArray(json) ? json
+              : Array.isArray(json.risks) ? json.risks
+              : Array.isArray(json.points) ? json.points
+              : [];
+  for (const r of risks) {
+    const x = +r.x_mm || +r.x || 0;
+    const y = +r.y_mm || +r.y || 0;
+    const z = +r.z_mm || +r.z || 0;
+    const radius = +r.radius_mm || +r.radius || 5;
+    const level = (r.level || r.severity || "medium").toLowerCase();
+    const color = palette[level] || 0x88aaff;
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 16, 12),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.65 }));
+    m.position.set(x, y, z);
+    overlay.add(m);
+    if (r.label) {
+      // Tiny "label" via small white sphere on top — keeps the file
+      // self-contained without text geometry.
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(radius * 0.18, 8, 6),
+        new THREE.MeshBasicMaterial({ color: 0xffffff }));
+      dot.position.set(x, y, z + radius * 1.1);
+      overlay.add(dot);
+    }
+  }
+  // Replace any prior overlay
+  const prior = scene.getObjectByName("structsight");
+  if (prior) scene.remove(prior);
+  scene.add(overlay);
+  document.getElementById("risk-legend").style.display = "block";
+}
+
+function handleFile(file) {
+  const name = file.name.toLowerCase();
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    if (name.endsWith(".stl")) loadStl(e.target.result, file.name);
+    else if (name.endsWith(".glb") || name.endsWith(".gltf")) loadGlb(e.target.result, file.name);
+    else if (name.endsWith(".json")) {
+      try { applyStructSight(JSON.parse(e.target.result)); }
+      catch (err) { alert("JSON parse failed: " + err.message); }
+    } else alert("Unsupported file: " + file.name);
+  };
+  if (name.endsWith(".json")) reader.readAsText(file);
+  else reader.readAsArrayBuffer(file);
+}
+
+document.getElementById("file").addEventListener("change", (e) => {
+  for (const f of e.target.files) handleFile(f);
+});
+document.getElementById("reset").onclick = () => fitTo(loadedRoot);
+document.getElementById("wire").onclick = () => {
+  wireframe = !wireframe; applyWireframe(loadedRoot);
+};
+document.getElementById("grid").onclick = () => grid.visible = !grid.visible;
+
+const dropOverlay = document.getElementById("drop");
+window.addEventListener("dragover", (e) => {
+  e.preventDefault(); dropOverlay.classList.add("active");
+});
+window.addEventListener("dragleave", () => dropOverlay.classList.remove("active"));
+window.addEventListener("drop", (e) => {
+  e.preventDefault(); dropOverlay.classList.remove("active");
+  for (const f of e.dataTransfer.files) handleFile(f);
+});
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Auto-load via ?stl=URL or ?glb=URL or ?ss=URL query params so the
+// dashboard / pipeline can deep-link straight into a viewer page.
+(async function autoLoadFromQuery() {
+  const p = new URLSearchParams(location.search);
+  const stl = p.get("stl"), glb = p.get("glb"), ss = p.get("ss");
+  if (stl) {
+    const r = await fetch(stl);
+    loadStl(await r.arrayBuffer(), stl.split("/").pop());
+  } else if (glb) {
+    const r = await fetch(glb);
+    loadGlb(await r.arrayBuffer(), glb.split("/").pop());
+  }
+  if (ss) {
+    const r = await fetch(ss);
+    applyStructSight(await r.json());
+  }
+})();
+
+(function loop() {
+  requestAnimationFrame(loop);
+  controls.update();
+  renderer.render(scene, camera);
+})();
+</script>
+</body>
+</html>
