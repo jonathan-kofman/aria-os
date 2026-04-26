@@ -1682,13 +1682,16 @@ export default function ChatPanel() {
                                 /^pipeline complete/i.test(msg);
             updateAssistant(m => ({
               ...m,
-              status: "done",
+              // Only flip to "done" on the terminal complete. Sub-stage
+              // completes need to leave status === "running" so the
+              // DinoRunner stays mounted for the rest of the pipeline.
+              status: isTerminal ? "done" : (m.status || "running"),
               content: m.content ||
                 (typeof msg === "string" ? msg : "Pipeline complete."),
               artifacts: payload.data?.artifacts || payload.artifacts
                           || m.artifacts || [],
             }));
-            // Sub-stage complete — just update status, don't close yet.
+            // Sub-stage complete — just append the event, don't close yet.
             if (!isTerminal) {
               appendAssistantThinking(payload);
               return;

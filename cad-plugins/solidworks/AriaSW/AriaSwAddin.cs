@@ -483,6 +483,14 @@ namespace AriaSW
             try
             {
                 FileLog($"  cut.try blind={blind} body={selectBody} auto={useAutoSelect}");
+                // Dang1/Dang2: SW expects a non-zero draft angle (1°
+                //   in radians) even when no draft is applied. 0 makes
+                //   FeatureCut4 silently return null on some builds.
+                // AssemblyFeatureScope=true / AutoSelectComponents=false
+                //   is the part-context combo (recorded macros use this).
+                //   Mixing in AutoSelectComponents=true confuses the
+                //   API into looking for an assembly that isn't there.
+                const double DEG = 0.01745329251994;
                 return _model.FeatureManager.FeatureCut4(
                     true,                                 // Sd (single-direction)
                     false, false,                         // Flip, Dir
@@ -490,12 +498,12 @@ namespace AriaSW
                     d1, d2,
                     false, false,                         // Dchk1, Dchk2
                     false, false,                         // Ddir1, Ddir2
-                    0, 0,                                 // Dang1, Dang2
+                    DEG, DEG,                             // Dang1, Dang2 (1° — SW requires non-zero)
                     false, false,                         // OffsetReverse1, OffsetReverse2
                     false, false,                         // TranslateSurface1, TranslateSurface2
                     true,                                 // NormalCut
                     true, useAutoSelect,                  // UseFeatScope, UseAutoSelect
-                    true, true,                           // AssemblyFeatureScope, AutoSelectComponents
+                    true, false,                          // AssemblyFeatureScope, AutoSelectComponents
                     false,                                // PropagateFeatureToParts
                     (int)swStartConditions_e.swStartSketchPlane,
                     0, false, false) as IFeature;
@@ -519,7 +527,9 @@ namespace AriaSW
             {
                 // UseFeatScope=false → cut applies to every body in the part
                 // regardless of selection. Removes the scope-resolution
-                // failure mode entirely.
+                // failure mode entirely. Same Dang1/Dang2 + scope-flag
+                // fixes as TryFeatureCut.
+                const double DEG = 0.01745329251994;
                 return _model.FeatureManager.FeatureCut4(
                     true,
                     false, false,
@@ -527,11 +537,11 @@ namespace AriaSW
                     (int)swEndConditions_e.swEndCondBlind,
                     0.001, 0,
                     false, false, false, false,
-                    0, 0,
+                    DEG, DEG,
                     false, false, false, false,
                     true,
                     false, false,                          // UseFeatScope=false
-                    false, false,
+                    true, false,
                     false,
                     (int)swStartConditions_e.swStartSketchPlane,
                     0, false, false) as IFeature;
