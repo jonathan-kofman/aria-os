@@ -203,7 +203,21 @@ namespace AriaSW
         private IModelDoc2 _model;
         private readonly Dictionary<string, object> _aliasMap = new();
         private string _activeSketchName;
+        private string _activeSketchPlane;   // "XY" / "XZ" / "YZ" — drives sketch-y mirror
         private IFeature _lastBodyFeature;   // most-recent extrude(op="new") — used as default cut target
+
+        /// <summary>SW's Top Plane and Right Plane sketches put sketch-y on
+        /// the NEGATIVE world-axis of the plane normal (Top: sketch-y → -Z;
+        /// Right: sketch-y → -X). Planners written with the intuitive
+        /// convention (sketch-y → +world-axis) end up with mirrored
+        /// geometry — see L-bracket leg ending at Z=-60 instead of +60.
+        /// Mirror sketch-y at the SW boundary so planner output is
+        /// correct regardless of plane.</summary>
+        private double MirrorYIfNeeded(double cy)
+        {
+            string plane = (_activeSketchPlane ?? "XY").ToUpperInvariant();
+            return plane == "XZ" || plane == "YZ" ? -cy : cy;
+        }
 
         private static double Mm(object v) => Convert.ToDouble(v) / 1000.0;
 
@@ -231,6 +245,7 @@ namespace AriaSW
             _registry.Clear();
             _aliasMap.Clear();
             _activeSketchName = null;
+            _activeSketchPlane = null;
             _lastBodyFeature = null;
             _model = EnsurePart();
             return new { ok = true, registry_cleared = true };
@@ -296,14 +311,15 @@ namespace AriaSW
             _activeSketchName = sketchFeature?.Name;
 
             _aliasMap[alias] = sketchFeature;   // store IFeature, not just name
-            FileLog($"  newSketch: alias={alias} name={_activeSketchName}");
+            _activeSketchPlane = plane;         // drives sketch-y mirror in Circle/Rect
+            FileLog($"  newSketch: alias={alias} name={_activeSketchName} plane={plane}");
             return new { ok = true, alias, plane, name = _activeSketchName };
         }
 
         private object OpSketchCircle(Dictionary<string, object> p)
         {
             double cx = Mm(p["cx"]);
-            double cy = Mm(p["cy"]);
+            double cy = MirrorYIfNeeded(Mm(p["cy"]));
             double r  = Mm(p["r"]);
             if (_model == null) return new { ok = false, error = "no model" };
 
@@ -324,7 +340,7 @@ namespace AriaSW
             double w  = Mm(p["w"]);
             double h  = Mm(p["h"]);
             double cx = p.ContainsKey("cx") ? Mm(p["cx"]) : 0;
-            double cy = p.ContainsKey("cy") ? Mm(p["cy"]) : 0;
+            double cy = MirrorYIfNeeded(p.ContainsKey("cy") ? Mm(p["cy"]) : 0);
             if (_model?.SketchManager?.ActiveSketch == null)
                 return new { ok = false, error = "no active sketch" };
 
