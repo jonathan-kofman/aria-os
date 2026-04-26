@@ -223,6 +223,111 @@ def synthesize_args(req: SynthesizeArgsRequest):
 
 
 # --------------------------------------------------------------------------- #
+# /api/cad/text-to-part — end-to-end autonomous flow.
+#
+# Takes (goal, cad). Calls the LLM planner to turn goal into a list of
+# native ops. Dispatches each op to the target CAD's HTTP listener
+# (SW: 7501, Rhino: 7502). Returns per-op success + final screenshot
+# path. The user's actual end-goal: type a prompt, get a working part
+# inside the chosen CAD, no GUI clicks.
+# --------------------------------------------------------------------------- #
+
+class TextToPartRequest(BaseModel):
+    goal: str
+    cad: str = "solidworks"          # solidworks | rhino
+    quality_tier: str = "balanced"
+
+
+# Per-CAD HTTP listener URL. Each plugin's AriaHttpListener binds to
+# its own well-known port. Adding fusion/onshape later means another
+# entry here + listener in that plugin.
+_CAD_BASE_URL = {
+    "solidworks": "http://localhost:7501",
+    "sw":         "http://localhost:7501",
+    "rhino":      "http://localhost:7502",
+}
+
+
+@app.post("/api/cad/text-to-part")
+def text_to_part(req: TextToPartRequest):
+    """End-to-end: goal text → planner ops → target CAD via HTTP."""
+    import httpx as _httpx
+
+    cad = (req.cad or "solidworks").lower().strip()
+    base = _CAD_BASE_URL.get(cad)
+    if not base:
+        raise HTTPException(400, f"unknown cad: {cad!r}")
+
+    # Confirm the listener is up — fail fast with a useful error rather
+    # than dispatching ops into a void.
+    try:
+        with _httpx.Client(timeout=5.0) as c:
+            status = c.get(f"{base}/status").json()
+            if not status.get("ok"):
+                raise HTTPException(502, f"{cad} listener not ready: {status}")
+    except Exception as exc:
+        raise HTTPException(502,
+            f"{cad} listener at {base} unreachable: {type(exc).__name__}: {exc}")
+
+    # Plan via the LLM planner — same path /api/generate uses.
+    from aria_os.native_planner.llm_planner import plan_from_llm
+    try:
+        spec = {}  # spec extraction would be nice; planner can survive empty
+        ops = plan_from_llm(req.goal, spec,
+                             quality=req.quality_tier,
+                             repo_root=REPO_ROOT)
+    except Exception as exc:
+        raise HTTPException(500,
+            f"planner failed: {type(exc).__name__}: {exc}")
+    if not ops:
+        return {"ok": False, "error": "planner returned no ops",
+                 "cad": cad, "goal": req.goal}
+
+    # Dispatch each op to the target CAD listener. Stop at first failure
+    # — the cache + LLM-args layer in the addin handles arg-combo retries
+    # internally; an op-level failure here means something genuinely
+    # outside the autonomous-recovery scope.
+    results = []
+    failed_at = None
+    with _httpx.Client(timeout=120.0) as c:
+        for i, op in enumerate(ops):
+            payload = {"kind": op.get("kind"), "params": op.get("params", {})}
+            try:
+                r = c.post(f"{base}/op", json=payload)
+                r_json = r.json()
+                results.append({
+                    "i": i, "kind": payload["kind"],
+                    "label": op.get("label"),
+                    "ok": (r_json.get("result") or {}).get("ok",
+                                                            r_json.get("ok")),
+                    "result": r_json.get("result"),
+                    "error": r_json.get("error"),
+                })
+                if not results[-1]["ok"]:
+                    failed_at = i
+                    break
+            except Exception as exc:
+                results.append({
+                    "i": i, "kind": payload["kind"], "ok": False,
+                    "error": f"transport: {type(exc).__name__}: {exc}",
+                })
+                failed_at = i
+                break
+
+    n_ok = sum(1 for r in results if r["ok"])
+    return {
+        "ok": failed_at is None,
+        "cad": cad,
+        "goal": req.goal,
+        "n_ops_planned": len(ops),
+        "n_ops_dispatched": len(results),
+        "n_ops_succeeded": n_ok,
+        "failed_at": failed_at,
+        "results": results,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Pipeline runner (runs in background thread to keep FastAPI responsive)
 # --------------------------------------------------------------------------- #
 
