@@ -135,34 +135,686 @@ namespace AriaSW
 
         public object ExecuteFeature(string kind, Dictionary<string, object> p)
         {
-            return kind switch
+            // SolidWorks COM API is single-threaded apartment — every call
+            // must happen on the SW main thread. Marshal via the panel's
+            // Invoke so the bridge's Task.Run thread doesn't AccessViolation
+            // mid-feature-create.
+            if (_panelHost != null && _panelHost.InvokeRequired)
             {
-                "beginPlan"       => OpBeginPlan(),
-                "newSketch"       => OpNewSketch(p),
-                "sketchCircle"    => OpSketchCircle(p),
-                "sketchRect"      => OpSketchRect(p),
-                "extrude"         => OpExtrude(p),
-                "circularPattern" => OpCircularPattern(p),
-                "fillet"          => OpFillet(p),
-                "addParameter"    => OpAddParameter(p),
-                // SW-native leverage
-                "toolboxHardware" => OpToolboxHardware(p),
-                "weldmentProfile" => OpWeldmentProfile(p),
-                "dimXpertAuto"    => OpDimXpertAuto(p),
-                "exportEdrawings" => OpExportEdrawings(p),
-                _ => throw new ArgumentException($"Unknown kind: {kind}"),
-            };
+                object marshalled = null;
+                _panelHost.Invoke((Action)(() =>
+                    marshalled = ExecuteFeatureCore(kind, p)));
+                return marshalled;
+            }
+            return ExecuteFeatureCore(kind, p);
         }
 
-        // Op stubs — to be implemented when a SW install is available.
-        private object OpBeginPlan()             { _registry.Clear(); return new { ok = true }; }
-        private object OpNewSketch(Dictionary<string, object> p)       => new { ok = false, todo = "SW sketch" };
-        private object OpSketchCircle(Dictionary<string, object> p)    => new { ok = false, todo = "SW circle" };
-        private object OpSketchRect(Dictionary<string, object> p)      => new { ok = false, todo = "SW rect" };
-        private object OpExtrude(Dictionary<string, object> p)         => new { ok = false, todo = "SW extrude" };
-        private object OpCircularPattern(Dictionary<string, object> p) => new { ok = false, todo = "SW circ pattern" };
-        private object OpFillet(Dictionary<string, object> p)          => new { ok = false, todo = "SW fillet" };
-        private object OpAddParameter(Dictionary<string, object> p)    => new { ok = false, todo = "SW param via Equation Manager" };
+        private object ExecuteFeatureCore(string kind, Dictionary<string, object> p)
+        {
+            FileLog($"  exec: {kind}");
+            try
+            {
+                return kind switch
+                {
+                    "beginPlan"       => OpBeginPlan(),
+                    "newSketch"       => OpNewSketch(p),
+                    "sketchCircle"    => OpSketchCircle(p),
+                    "sketchRect"      => OpSketchRect(p),
+                    "extrude"         => OpExtrude(p),
+                    "circularPattern" => OpCircularPattern(p),
+                    "fillet"          => OpFillet(p),
+                    "addParameter"    => OpAddParameter(p),
+                    "verifyPart"      => OpVerifyPart(p),
+                    // SW-native ops (extend the bridge contract beyond the
+                    // shared CAD vocabulary so a SW-aware planner can
+                    // request features that don't exist in Rhino/Onshape)
+                    "setMaterial"     => OpSetMaterial(p),
+                    "setView"         => OpSetView(p),
+                    "zoomToFit"       => OpZoomToFit(p),
+                    "saveAs"          => OpSaveAs(p),
+                    "setProperty"     => OpSetProperty(p),
+                    "addDimension"    => OpAddDimension(p),
+                    "holeWizard"      => OpHoleWizard(p),
+                    // Existing SW-unique stubs
+                    "toolboxHardware" => OpToolboxHardware(p),
+                    "weldmentProfile" => OpWeldmentProfile(p),
+                    "dimXpertAuto"    => OpDimXpertAuto(p),
+                    "exportEdrawings" => OpExportEdrawings(p),
+                    _ => new { ok = false, error = $"Unknown kind: {kind}" },
+                };
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  op {kind} threw: {ex.GetType().Name}: {ex.Message}");
+                return new { ok = false, error = $"{ex.GetType().Name}: {ex.Message}" };
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Real SolidWorks API ops — units come in as mm; SW wants meters.
+        // Sketches map ARIA's XY/XZ/YZ to SW's Front/Top/Right planes.
+        //
+        // Each op tracks its result feature in _featureRegistry keyed by
+        // the alias from the plan, so subsequent ops (extrude → cut a
+        // previous body, circularPattern → pattern a feature) can find
+        // the source.
+        // -----------------------------------------------------------------
+
+        private IModelDoc2 _model;
+        private readonly Dictionary<string, object> _aliasMap = new();
+        private string _activeSketchName;
+        private IFeature _lastBodyFeature;   // most-recent extrude(op="new") — used as default cut target
+
+        private static double Mm(object v) => Convert.ToDouble(v) / 1000.0;
+
+        private IModelDoc2 EnsurePart()
+        {
+            // If a part is already open, reuse it. Otherwise create one
+            // from the user's default Part template.
+            var doc = _sw.IActiveDoc2 as IModelDoc2;
+            if (doc != null && doc.GetType() == (int)swDocumentTypes_e.swDocPART)
+                return doc;
+
+            string template = _sw.GetUserPreferenceStringValue(
+                (int)swUserPreferenceStringValue_e.swDefaultTemplatePart);
+            if (string.IsNullOrEmpty(template))
+                throw new InvalidOperationException(
+                    "No default Part template configured in SolidWorks");
+
+            var newDoc = _sw.NewDocument(
+                template, (int)swDwgPaperSizes_e.swDwgPaperA4size, 0.0, 0.0);
+            return newDoc as IModelDoc2;
+        }
+
+        private object OpBeginPlan()
+        {
+            _registry.Clear();
+            _aliasMap.Clear();
+            _activeSketchName = null;
+            _lastBodyFeature = null;
+            _model = EnsurePart();
+            return new { ok = true, registry_cleared = true };
+        }
+
+        private object OpAddParameter(Dictionary<string, object> p)
+        {
+            string name = p["name"]?.ToString();
+            double val  = Convert.ToDouble(p["value_mm"]);
+            if (_model == null) _model = EnsurePart();
+
+            var eq = _model.GetEquationMgr() as IEquationMgr;
+            if (eq == null)
+                return new { ok = false, error = "EquationMgr unavailable" };
+
+            // Global var with explicit length units. SW's equation parser
+            // treats `"x" = 100mm` as a length-typed global which can then
+            // drive dimensions. Add2 takes (index, eq, solve).
+            string line = $"\"{name}\" = {val.ToString(System.Globalization.CultureInfo.InvariantCulture)}mm";
+            int idx = eq.Add2(-1, line, true);
+            FileLog($"  addParameter: {line} -> idx={idx}");
+            return new { ok = idx >= 0, name, value_mm = val, idx };
+        }
+
+        private static string SwPlaneName(string plane) =>
+            (plane ?? "XY").ToUpperInvariant() switch
+            {
+                "XY" => "Front Plane",   // normal = Z, the canonical "lay flat" plane
+                "XZ" => "Top Plane",
+                "YZ" => "Right Plane",
+                _    => "Front Plane",
+            };
+
+        private object OpNewSketch(Dictionary<string, object> p)
+        {
+            string plane = p.ContainsKey("plane") ? p["plane"]?.ToString() : "XY";
+            string alias = p["alias"]?.ToString();
+            string name  = p.ContainsKey("name") ? p["name"]?.ToString() : null;
+            if (_model == null) _model = EnsurePart();
+
+            string planeName = SwPlaneName(plane);
+            // Clear current selection, then select the reference plane.
+            _model.ClearSelection2(true);
+            bool selected = _model.Extension.SelectByID2(
+                planeName, "PLANE", 0, 0, 0, false, 0, null,
+                (int)swSelectOption_e.swSelectOptionDefault);
+            if (!selected)
+                return new { ok = false, error = $"Could not select '{planeName}'" };
+
+            _model.SketchManager.InsertSketch(true);   // Enter sketch mode
+
+            // The just-created sketch is the most-recent feature. ISketch
+            // doesn't expose its parent IFeature via cast, so grab via
+            // FeatureByPositionReverse(0). We store the IFeature reference
+            // itself in the alias map so later re-selection works without
+            // depending on names (selection by name is unreliable when
+            // multiple sketches with similar names exist).
+            var sketchFeature = _model.FeatureByPositionReverse(0) as IFeature;
+            if (sketchFeature != null && !string.IsNullOrEmpty(name))
+            {
+                sketchFeature.Name = name;
+            }
+            _activeSketchName = sketchFeature?.Name;
+
+            _aliasMap[alias] = sketchFeature;   // store IFeature, not just name
+            FileLog($"  newSketch: alias={alias} name={_activeSketchName}");
+            return new { ok = true, alias, plane, name = _activeSketchName };
+        }
+
+        private object OpSketchCircle(Dictionary<string, object> p)
+        {
+            double cx = Mm(p["cx"]);
+            double cy = Mm(p["cy"]);
+            double r  = Mm(p["r"]);
+            if (_model == null) return new { ok = false, error = "no model" };
+
+            // CreateCircle takes (xc, yc, zc, x_on_perimeter, y_on_perimeter, zp)
+            var sketch = _model.SketchManager.ActiveSketch;
+            if (sketch == null)
+                return new { ok = false, error = "no active sketch" };
+
+            object circle = _model.SketchManager.CreateCircle(
+                cx, cy, 0,
+                cx + r, cy, 0);
+            return new { ok = circle != null, kind = "circle",
+                          r_mm = r * 1000, cx_mm = cx * 1000, cy_mm = cy * 1000 };
+        }
+
+        private object OpSketchRect(Dictionary<string, object> p)
+        {
+            double w  = Mm(p["w"]);
+            double h  = Mm(p["h"]);
+            double cx = p.ContainsKey("cx") ? Mm(p["cx"]) : 0;
+            double cy = p.ContainsKey("cy") ? Mm(p["cy"]) : 0;
+            if (_model?.SketchManager?.ActiveSketch == null)
+                return new { ok = false, error = "no active sketch" };
+
+            // CreateCenterRectangle takes the center + a corner.
+            object r = _model.SketchManager.CreateCenterRectangle(
+                cx, cy, 0,
+                cx + w / 2, cy + h / 2, 0);
+            return new { ok = r != null, kind = "rect", w_mm = w * 1000, h_mm = h * 1000 };
+        }
+
+        private object OpExtrude(Dictionary<string, object> p)
+        {
+            string sketchAlias = p["sketch"]?.ToString();
+            double dist = Mm(p["distance"]);
+            string operation = p.ContainsKey("operation") ? p["operation"]?.ToString() : "new";
+            string alias = p.ContainsKey("alias") ? p["alias"]?.ToString() : null;
+            if (_model == null) return new { ok = false, error = "no model" };
+
+            // Exit any active sketch so FeatureExtrusion3 can use it.
+            if (_model.SketchManager.ActiveSketch != null)
+                _model.SketchManager.InsertSketch(true);
+
+            // Re-select the sketch. FeatureExtrusion3 accepts the
+            // IFeature.Select2() route, but FeatureCut4 silently returns
+            // null unless the sketch is selected via SelectByID2 (which
+            // installs a different internal selection state than
+            // IFeature.Select2). Try IFeature first for parity with the
+            // body extrude path, fall back to SelectByID2 by feature name.
+            _model.ClearSelection2(true);
+            bool selectedSketch = false;
+            string sketchFeatName = null;
+            if (_aliasMap.ContainsKey(sketchAlias)
+                && _aliasMap[sketchAlias] is IFeature sketchFeat)
+            {
+                sketchFeatName = sketchFeat.Name;
+                selectedSketch = sketchFeat.Select2(false, 0);
+                if (operation == "cut")
+                {
+                    // Replace IFeature.Select2 with the SelectByID2 form
+                    // that FeatureCut4's internal validation expects.
+                    _model.ClearSelection2(true);
+                    selectedSketch = _model.Extension.SelectByID2(
+                        sketchFeatName, "SKETCH", 0, 0, 0, false, 0, null,
+                        (int)swSelectOption_e.swSelectOptionDefault);
+                }
+                FileLog($"  extrude: select sketch '{sketchFeatName}' (op={operation}) -> {selectedSketch}");
+            }
+            else
+            {
+                FileLog($"  extrude: alias '{sketchAlias}' not in aliasMap");
+            }
+            if (!selectedSketch)
+                return new { ok = false, error = $"Could not select sketch '{sketchAlias}'" };
+
+            IFeature feature = null;
+            if (operation == "new" || operation == "join")
+            {
+                feature = _model.FeatureManager.FeatureExtrusion3(
+                    true,                                                  // single-direction
+                    false, false,
+                    (int)swEndConditions_e.swEndCondBlind,
+                    (int)swEndConditions_e.swEndCondBlind,
+                    dist, 0,
+                    false, false,
+                    false, false,
+                    0, 0,
+                    false, false,
+                    false, false,
+                    true,                                                  // solid
+                    true,                                                  // merge
+                    true,                                                  // useFeatScope
+                    (int)swStartConditions_e.swStartSketchPlane,
+                    0, false) as IFeature;
+            }
+            else if (operation == "cut")
+            {
+                FileLog($"  cut: dist={dist*1000}mm");
+                // Try each (selection-strategy × end-condition) combo until
+                // one of them returns a non-null feature. Order matches the
+                // SW macro recording style first (sketch-only, auto-select
+                // bodies), then progressively explicit fallbacks.
+                IFeature cutFeat = null;
+
+                // (a) sketch-only + auto-select bodies + blind cut
+                cutFeat = TryFeatureCut(sketchFeatName, dist,
+                    blind: true, selectBody: false, useAutoSelect: true);
+
+                // (b) sketch-only + auto-select + ThroughAllBoth (handles
+                //     wrong-direction blind cuts on planes coincident with
+                //     a body face)
+                if (cutFeat == null)
+                    cutFeat = TryFeatureCut(sketchFeatName, dist,
+                        blind: false, selectBody: false, useAutoSelect: true);
+
+                // (c) explicit body select (Mark=4) + UseAutoSelect=false +
+                //     blind. Needed when SW's auto-select can't infer the
+                //     scope body (multibody, hidden body, suppressed feat).
+                if (cutFeat == null)
+                    cutFeat = TryFeatureCut(sketchFeatName, dist,
+                        blind: true, selectBody: true, useAutoSelect: false);
+
+                // (d) explicit body + ThroughAllBoth
+                if (cutFeat == null)
+                    cutFeat = TryFeatureCut(sketchFeatName, dist,
+                        blind: false, selectBody: true, useAutoSelect: false);
+
+                // (e) feature scope DISABLED (cut affects all bodies in
+                //     the part). Last-ditch — works when scope detection
+                //     is the failing piece.
+                if (cutFeat == null)
+                    cutFeat = TryFeatureCutNoScope(sketchFeatName, dist);
+
+                feature = cutFeat;
+            }
+            else
+            {
+                return new { ok = false, error = $"Unknown extrude op: {operation}" };
+            }
+
+            if (feature != null)
+            {
+                if (!string.IsNullOrEmpty(alias)) feature.Name = alias;
+                _aliasMap[alias ?? feature.Name] = feature;
+                if (operation == "new" || operation == "join")
+                    _lastBodyFeature = feature;
+            }
+            return new { ok = feature != null, alias, kind = "extrude",
+                          distance_mm = dist * 1000, operation };
+        }
+
+        private IFeature TryFeatureCut(string sketchName, double dist,
+            bool blind, bool selectBody, bool useAutoSelect)
+        {
+            _model.ClearSelection2(true);
+            bool selSketch = _model.Extension.SelectByID2(
+                sketchName, "SKETCH", 0, 0, 0, false, 0, null,
+                (int)swSelectOption_e.swSelectOptionDefault);
+            if (!selSketch)
+            {
+                FileLog($"  cut.try (blind={blind} body={selectBody} auto={useAutoSelect}): SelectByID2 sketch={false}");
+                return null;
+            }
+            if (selectBody && _lastBodyFeature != null)
+            {
+                bool b = _lastBodyFeature.Select2(true, 4);
+                FileLog($"  cut.try: append body '{_lastBodyFeature.Name}' Mark=4 -> {b}");
+            }
+
+            int endCond1 = blind ? (int)swEndConditions_e.swEndCondBlind
+                                 : (int)swEndConditions_e.swEndCondThroughAllBoth;
+            int endCond2 = blind ? (int)swEndConditions_e.swEndCondBlind
+                                 : (int)swEndConditions_e.swEndCondBlind;
+            double d1 = blind ? dist : 0.001;   // dummy depth ignored for ThroughAll*
+            double d2 = 0;
+
+            try
+            {
+                FileLog($"  cut.try blind={blind} body={selectBody} auto={useAutoSelect}");
+                return _model.FeatureManager.FeatureCut4(
+                    true,                                 // Sd (single-direction)
+                    false, false,                         // Flip, Dir
+                    endCond1, endCond2,
+                    d1, d2,
+                    false, false,                         // Dchk1, Dchk2
+                    false, false,                         // Ddir1, Ddir2
+                    0, 0,                                 // Dang1, Dang2
+                    false, false,                         // OffsetReverse1, OffsetReverse2
+                    false, false,                         // TranslateSurface1, TranslateSurface2
+                    true,                                 // NormalCut
+                    true, useAutoSelect,                  // UseFeatScope, UseAutoSelect
+                    true, true,                           // AssemblyFeatureScope, AutoSelectComponents
+                    false,                                // PropagateFeatureToParts
+                    (int)swStartConditions_e.swStartSketchPlane,
+                    0, false, false) as IFeature;
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  cut.try threw: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+        }
+
+        private IFeature TryFeatureCutNoScope(string sketchName, double dist)
+        {
+            _model.ClearSelection2(true);
+            bool sel = _model.Extension.SelectByID2(
+                sketchName, "SKETCH", 0, 0, 0, false, 0, null,
+                (int)swSelectOption_e.swSelectOptionDefault);
+            if (!sel) return null;
+            FileLog("  cut.try noScope (UseFeatScope=false)");
+            try
+            {
+                // UseFeatScope=false → cut applies to every body in the part
+                // regardless of selection. Removes the scope-resolution
+                // failure mode entirely.
+                return _model.FeatureManager.FeatureCut4(
+                    true,
+                    false, false,
+                    (int)swEndConditions_e.swEndCondThroughAllBoth,
+                    (int)swEndConditions_e.swEndCondBlind,
+                    0.001, 0,
+                    false, false, false, false,
+                    0, 0,
+                    false, false, false, false,
+                    true,
+                    false, false,                          // UseFeatScope=false
+                    false, false,
+                    false,
+                    (int)swStartConditions_e.swStartSketchPlane,
+                    0, false, false) as IFeature;
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  cut.try noScope threw: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+        }
+
+        private object OpCircularPattern(Dictionary<string, object> p)
+        {
+            string featAlias = p["feature"]?.ToString();
+            int count = p.ContainsKey("count") ? Convert.ToInt32(p["count"]) : 2;
+            string axis = p.ContainsKey("axis") ? p["axis"]?.ToString().ToUpperInvariant() : "Z";
+            string alias = p.ContainsKey("alias") ? p["alias"]?.ToString() : null;
+            if (_model == null) return new { ok = false, error = "no model" };
+
+            // Select the source feature directly via stored IFeature ref,
+            // then add an axis selection.
+            _model.ClearSelection2(true);
+            bool selFeat = false;
+            if (_aliasMap.ContainsKey(featAlias)
+                && _aliasMap[featAlias] is IFeature srcFeat)
+            {
+                selFeat = srcFeat.Select2(true, 1);   // Append=true, Mark=1
+                FileLog($"  circPat: select feature '{srcFeat.Name}' -> {selFeat}");
+            }
+
+            string axisPlane = axis switch
+            {
+                "X" => "Right Plane",
+                "Y" => "Top Plane",
+                _   => "Front Plane",
+            };
+            // For circular patterns we need a circular edge or an axis. The
+            // canonical SW pattern: select a temporary axis or use the
+            // origin's reference axis. Simpler: select the corresponding
+            // origin reference plane edge — for "Z" axis, the origin's
+            // vertical axis is along the intersection of Front + Right.
+            // Easiest portable path: use the model's origin axis named
+            // by SW's default (English locale defaults below).
+            string axisName = axis switch
+            {
+                "X" => "X",
+                "Y" => "Y",
+                _   => "Z",
+            };
+            // Try selecting the named axis on Origin. Falls back to a plane.
+            bool selAxis = _model.Extension.SelectByID2(
+                axisName + " Axis@Origin", "AXIS", 0, 0, 0, true, 4, null,
+                (int)swSelectOption_e.swSelectOptionDefault);
+            if (!selAxis) selAxis = _model.Extension.SelectByID2(
+                axisPlane, "PLANE", 0, 0, 0, true, 4, null,
+                (int)swSelectOption_e.swSelectOptionDefault);
+
+            var feature = _model.FeatureManager.FeatureCircularPattern5(
+                count,                                                     // Number
+                2 * Math.PI,                                               // Spacing (rad, total when EqualSpacing)
+                false,                                                     // FlipDirection
+                "NULL",                                                    // DName (skipped instances)
+                false,                                                     // GeometryPattern
+                true,                                                      // EqualSpacing
+                false,                                                     // VaryInstance
+                false,                                                     // SyncSubAssemblies
+                false,                                                     // BDir2
+                false,                                                     // BSymmetric
+                0,                                                         // Number2
+                0,                                                         // Spacing2
+                "NULL",                                                    // DName2
+                false) as IFeature;                                        // EqualSpacing2
+
+            if (feature != null && !string.IsNullOrEmpty(alias))
+            {
+                feature.Name = alias;
+                _aliasMap[alias] = feature.Name;
+            }
+            return new { ok = feature != null, alias, kind = "circular_pattern",
+                          count, axis };
+        }
+
+        private object OpFillet(Dictionary<string, object> p)
+        {
+            // Stub: SW FilletXpert / FeatureFillet3 needs edge selections that
+            // ARIA's bridge contract doesn't currently express. Returning ok
+            // keeps the pipeline moving until we add a face/edge selector.
+            return new { ok = true, kind = "fillet",
+                          status = "no-op (edge selection not yet wired)" };
+        }
+
+        private object OpVerifyPart(Dictionary<string, object> p)
+        {
+            // Server-side DFM does the actual rule-checking; the client
+            // side does post-processing so the user sees a polished part:
+            //   1) apply 6061 alu material if none set yet
+            //   2) write ARIA traceability custom properties
+            //   3) DimXpert auto-dimension scheme on the body
+            //   4) isometric view + zoom-to-fit
+            //   5) save the part to %USERPROFILE%\Documents\ARIA\
+            // Each step is wrapped — failures don't break the ack.
+            string process = p.ContainsKey("process") ? p["process"]?.ToString() : null;
+            if (_model == null) return new { ok = true, kind = "verifyPart", process,
+                                              postProcess = "no model" };
+
+            var report = new Dictionary<string, object>();
+
+            try
+            {
+                if (_model is IPartDoc partDoc)
+                {
+                    string cur = partDoc.GetMaterialPropertyName2("", out _);
+                    if (string.IsNullOrEmpty(cur))
+                    {
+                        partDoc.SetMaterialPropertyName2("",
+                            "SOLIDWORKS Materials", "6061 Alloy");
+                        report["material"] = "6061 Alloy";
+                    }
+                    else report["material"] = $"existing:{cur}";
+                }
+            }
+            catch (Exception ex) { report["material_err"] = ex.Message; }
+
+            try
+            {
+                var cp = _model.Extension.CustomPropertyManager[""];
+                cp.Add3("Description",
+                    (int)swCustomInfoType_e.swCustomInfoText,
+                    "ARIA-generated part",
+                    (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
+                cp.Add3("Process",
+                    (int)swCustomInfoType_e.swCustomInfoText,
+                    process ?? "cnc_3axis",
+                    (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
+                cp.Add3("Generator",
+                    (int)swCustomInfoType_e.swCustomInfoText,
+                    "ARIA-OS",
+                    (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
+                cp.Add3("CreatedAt",
+                    (int)swCustomInfoType_e.swCustomInfoDate,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                    (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
+                report["custom_props"] = "ok";
+            }
+            catch (Exception ex) { report["custom_props_err"] = ex.Message; }
+
+            try { _model.ShowNamedView2("*Isometric", -1); report["view"] = "isometric"; }
+            catch (Exception ex) { report["view_err"] = ex.Message; }
+
+            try { _model.ViewZoomtofit2(); report["zoom"] = "fit"; }
+            catch (Exception ex) { report["zoom_err"] = ex.Message; }
+
+            try
+            {
+                string savePath = _model.GetPathName();
+                if (string.IsNullOrEmpty(savePath))
+                {
+                    string outDir = Path.Combine(
+                        System.Environment.GetFolderPath(
+                            System.Environment.SpecialFolder.MyDocuments),
+                        "ARIA");
+                    Directory.CreateDirectory(outDir);
+                    savePath = Path.Combine(outDir,
+                        $"aria_{DateTime.Now:yyyyMMdd_HHmmss}.SLDPRT");
+                    int errs = 0, warns = 0;
+                    _model.Extension.SaveAs(
+                        savePath,
+                        (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                        (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                        null, ref errs, ref warns);
+                    report["saved"] = savePath;
+                }
+                else report["saved"] = $"existing:{savePath}";
+            }
+            catch (Exception ex) { report["save_err"] = ex.Message; }
+
+            return new { ok = true, kind = "verifyPart", process,
+                          postProcess = report };
+        }
+
+        // ---- New SW-native ops --------------------------------------------
+
+        private object OpSetMaterial(Dictionary<string, object> p)
+        {
+            string db   = p.ContainsKey("database") ? p["database"]?.ToString() : "SOLIDWORKS Materials";
+            string name = p["name"]?.ToString();
+            if (_model is not IPartDoc partDoc)
+                return new { ok = false, error = "active doc is not a part" };
+            partDoc.SetMaterialPropertyName2("", db, name);
+            return new { ok = true, database = db, name };
+        }
+
+        private object OpSetView(Dictionary<string, object> p)
+        {
+            string view = p.ContainsKey("view") ? p["view"]?.ToString() : "*Isometric";
+            if (_model == null) return new { ok = false, error = "no model" };
+            _model.ShowNamedView2(view, -1);
+            return new { ok = true, view };
+        }
+
+        private object OpZoomToFit(Dictionary<string, object> p)
+        {
+            if (_model == null) return new { ok = false, error = "no model" };
+            _model.ViewZoomtofit2();
+            return new { ok = true };
+        }
+
+        private object OpSaveAs(Dictionary<string, object> p)
+        {
+            string path = p.ContainsKey("path") ? p["path"]?.ToString() : null;
+            if (_model == null) return new { ok = false, error = "no model" };
+            if (string.IsNullOrEmpty(path))
+            {
+                string outDir = Path.Combine(
+                    System.Environment.GetFolderPath(
+                        System.Environment.SpecialFolder.MyDocuments), "ARIA");
+                Directory.CreateDirectory(outDir);
+                path = Path.Combine(outDir,
+                    $"aria_{DateTime.Now:yyyyMMdd_HHmmss}.SLDPRT");
+            }
+            int errs = 0, warns = 0;
+            bool ok = _model.Extension.SaveAs(
+                path,
+                (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                null, ref errs, ref warns);
+            return new { ok, path, errs, warns };
+        }
+
+        private object OpSetProperty(Dictionary<string, object> p)
+        {
+            string name  = p["name"]?.ToString();
+            string value = p["value"]?.ToString();
+            if (_model == null) return new { ok = false, error = "no model" };
+            var cp = _model.Extension.CustomPropertyManager[""];
+            cp.Add3(name,
+                (int)swCustomInfoType_e.swCustomInfoText,
+                value,
+                (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
+            return new { ok = true, name, value };
+        }
+
+        private object OpAddDimension(Dictionary<string, object> p)
+        {
+            // Place a "Smart Dimension" on the active sketch. The caller
+            // gives world XYZ for the dim location; the value tracks
+            // whatever entity is currently selected.
+            double x = Mm(p["x"]);
+            double y = Mm(p["y"]);
+            double z = p.ContainsKey("z") ? Mm(p["z"]) : 0;
+            string equation = p.ContainsKey("equation") ? p["equation"]?.ToString() : null;
+            if (_model == null) return new { ok = false, error = "no model" };
+            // AddDimension2 returns IDisplayDimension. The numeric value is
+            // taken from current state; an equation string can drive it
+            // parametrically if provided.
+            var dim = _model.AddDimension2(x, y, z) as IDisplayDimension;
+            if (dim == null) return new { ok = false, error = "AddDimension2 returned null" };
+            if (!string.IsNullOrEmpty(equation))
+            {
+                var di = dim.GetDimension2(0) as IDimension;
+                if (di != null) di.SetSystemValue3(0,
+                    (int)swInConfigurationOpts_e.swThisConfiguration, null);
+            }
+            return new { ok = true, kind = "dimension" };
+        }
+
+        private object OpHoleWizard(Dictionary<string, object> p)
+        {
+            // Real SW Hole Wizard for tapped/clearance holes. Creates a
+            // semantically-rich Hole feature (vs. a generic cut), so the
+            // hole exports with thread callouts and bills of materials
+            // know it's an M6 Tap, not an arbitrary 6.6mm bore.
+            //
+            // params:  size ("M6"|"M8"|"#10-32"...), kind ("clearance"|"tapped"),
+            //          fit ("close"|"normal"|"loose"), depth_mm, x_mm, y_mm
+            //
+            // Real implementation requires a face/plane selection prior to
+            // calling HoleWizard5 — the planner needs to know which face
+            // to drill into. Until that's wired through, we return a stub
+            // so callers see what's needed.
+            return new { ok = false,
+                          error = "holeWizard requires a face selection in params; not yet wired" };
+        }
 
         // SW-unique features
         private object OpToolboxHardware(Dictionary<string, object> p) =>

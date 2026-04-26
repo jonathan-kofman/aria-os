@@ -38,6 +38,14 @@ namespace AriaPanel
             Timeout = TimeSpan.FromSeconds(60)
         };
 
+        // Op chain — serialize incoming WebView2 messages so plan ops execute
+        // in arrival order. Without this, per-message Task.Run dispatches
+        // concurrently and ops arrive at Rhino out of order (sketchCircle
+        // before its newSketch, extrude before its sketchCircle, etc.).
+        // Same fix applied to AriaSW; keeps the two bridges symmetric.
+        private static Task _opChain = Task.CompletedTask;
+        private static readonly object _chainLock = new object();
+
         public AriaBridge(AriaPanelHost panel)
         {
             _panel = panel;
@@ -51,71 +59,81 @@ namespace AriaPanel
         {
             string raw = e.TryGetWebMessageAsString() ?? e.WebMessageAsJson;
 
-            _ = Task.Run(async () =>
+            // Append to the global op chain; preserves arrival order while
+            // keeping work off the WebView2 UI thread. Unwrap flattens
+            // Task<Task> from the async lambda.
+            lock (_chainLock)
             {
-                string id = "";
-                try
+                _opChain = _opChain.ContinueWith(
+                    _ => ProcessMessageAsync(raw),
+                    TaskContinuationOptions.None).Unwrap();
+            }
+        }
+
+        private async Task ProcessMessageAsync(string raw)
+        {
+            string id = "";
+            try
+            {
+                var msg = JObject.Parse(raw);
+                id = msg["_id"]?.ToString() ?? "";
+                string action = msg["action"]?.ToString() ?? "";
+
+                switch (action)
                 {
-                    var msg = JObject.Parse(raw);
-                    id = msg["_id"]?.ToString() ?? "";
-                    string action = msg["action"]?.ToString() ?? "";
+                    case "getCurrentDocument":
+                        Reply(id, GetCurrentDocument());
+                        break;
 
-                    switch (action)
-                    {
-                        case "getCurrentDocument":
-                            Reply(id, GetCurrentDocument());
-                            break;
+                    case "getSelection":
+                        Reply(id, GetSelection());
+                        break;
 
-                        case "getSelection":
-                            Reply(id, GetSelection());
-                            break;
+                    case "insertGeometry":
+                        string url = msg["url"]?.ToString() ?? "";
+                        var insertResult = await InsertGeometryAsync(url);
+                        Reply(id, insertResult);
+                        break;
 
-                        case "insertGeometry":
-                            string url = msg["url"]?.ToString() ?? "";
-                            var insertResult = await InsertGeometryAsync(url);
-                            Reply(id, insertResult);
-                            break;
+                    case "updateParameter":
+                        ReplyError(id, "not implemented");
+                        break;
 
-                        case "updateParameter":
-                            ReplyError(id, "not implemented");
-                            break;
+                    case "getFeatureTree":
+                        ReplyError(id, "not implemented");
+                        break;
 
-                        case "getFeatureTree":
-                            ReplyError(id, "not implemented");
-                            break;
+                    case "exportCurrent":
+                        ReplyError(id, "not implemented");
+                        break;
 
-                        case "exportCurrent":
-                            ReplyError(id, "not implemented");
-                            break;
+                    case "showNotification":
+                        // Best-effort: write to Rhino status bar.
+                        string notifMsg = msg["msg"]?.ToString() ?? "";
+                        RhinoApp.WriteLine($"[ARIA] {notifMsg}");
+                        RhinoApp.SetCommandPrompt(notifMsg);
+                        Reply(id, new { ok = true });
+                        break;
 
-                        case "showNotification":
-                            // Best-effort: write to Rhino status bar.
-                            string notifMsg = msg["msg"]?.ToString() ?? "";
-                            RhinoApp.WriteLine($"[ARIA] {notifMsg}");
-                            RhinoApp.SetCommandPrompt(notifMsg);
-                            Reply(id, new { ok = true });
-                            break;
+                    case "openFile":
+                        ReplyError(id, "not implemented");
+                        break;
 
-                        case "openFile":
-                            ReplyError(id, "not implemented");
-                            break;
+                    case "executeFeature":
+                        string kind = msg["kind"]?.ToString() ?? "";
+                        JObject fparams = msg["params"] as JObject ?? new JObject();
+                        Reply(id, ExecuteFeature(kind, fparams));
+                        break;
 
-                        case "executeFeature":
-                            string kind = msg["kind"]?.ToString() ?? "";
-                            JObject fparams = msg["params"] as JObject ?? new JObject();
-                            Reply(id, ExecuteFeature(kind, fparams));
-                            break;
-
-                        default:
-                            ReplyError(id, $"unknown action: {action}");
-                            break;
-                    }
+                    default:
+                        ReplyError(id, $"unknown action: {action}");
+                        break;
                 }
-                catch (Exception ex)
-                {
-                    ReplyError(id, $"{ex.GetType().Name}: {ex.Message}");
-                }
-            });
+            }
+            catch (Exception ex)
+            {
+                ReplyError(id, $"{ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         // -----------------------------------------------------------------

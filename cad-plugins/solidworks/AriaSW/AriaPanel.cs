@@ -328,17 +328,32 @@ namespace AriaSW
 
         internal void PostReply(string json)
         {
-            if (!_webViewReady || WebView?.CoreWebView2 == null) return;
+            if (!_webViewReady) return;
+            // CoreWebView2 throws "can only be accessed from the UI thread"
+            // even on null-check. Marshal to UI thread BEFORE touching it.
+            if (InvokeRequired)
+            {
+                try { BeginInvoke((Action)(() => PostReply(json))); }
+                catch (Exception ex)
+                {
+                    AriaSwAddin.FileLog(
+                        $"PostReply BeginInvoke failed: {ex.GetType().Name}: {ex.Message}");
+                }
+                return;
+            }
             try
             {
-                if (InvokeRequired)
-                    Invoke((Action)(() => WebView.CoreWebView2.PostWebMessageAsJson(json)));
-                else
-                    WebView.CoreWebView2.PostWebMessageAsJson(json);
+                var core = WebView?.CoreWebView2;
+                if (core == null)
+                {
+                    AriaSwAddin.FileLog("PostReply DROPPED — CoreWebView2 null on UI thread");
+                    return;
+                }
+                core.PostWebMessageAsJson(json);
             }
             catch (Exception ex)
             {
-                AriaSwAddin.Log($"PostReply failed: {ex.Message}");
+                AriaSwAddin.FileLog($"PostReply failed: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -349,18 +364,14 @@ namespace AriaSW
         /// </summary>
         internal void ReloadWebView()
         {
-            if (!_webViewReady || WebView?.CoreWebView2 == null) return;
-            try
+            if (!_webViewReady) return;
+            if (InvokeRequired)
             {
-                if (InvokeRequired)
-                    Invoke((Action)(() => WebView.CoreWebView2.Reload()));
-                else
-                    WebView.CoreWebView2.Reload();
+                try { BeginInvoke((Action)ReloadWebView); } catch { }
+                return;
             }
-            catch (Exception ex)
-            {
-                AriaSwAddin.Log($"Reload failed: {ex.Message}");
-            }
+            try { WebView?.CoreWebView2?.Reload(); }
+            catch (Exception ex) { AriaSwAddin.Log($"Reload failed: {ex.Message}"); }
         }
     }
 }

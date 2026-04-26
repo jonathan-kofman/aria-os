@@ -599,9 +599,17 @@ export const ariaFlange = defineFeature(function(context is Context, id is Id, d
 
   // -------------------------------------------------------------------------
   // Message dispatch
+  //
+  // Plan ops must execute in arrival order — the React panel posts
+  // newSketch → sketchCircle → extrude as a single semantic chain, and
+  // running them concurrently lets the extrude beat its sketchCircle to
+  // the Onshape API and fail. We serialize every incoming message via a
+  // promise chain. Same fix applied to the Rhino + SolidWorks bridges.
   // -------------------------------------------------------------------------
 
-  window.addEventListener("message", async (event) => {
+  let _opChain = Promise.resolve();
+
+  window.addEventListener("message", (event) => {
     // Security: in production replace "*" check with origin allowlist.
     const data = typeof event.data === "string"
       ? JSON.parse(event.data)
@@ -611,7 +619,10 @@ export const ariaFlange = defineFeature(function(context is Context, id is Id, d
     if (!action || !id) return;
 
     const src = event.source;
+    _opChain = _opChain.then(() => _processMessage(src, id, action, payload));
+  });
 
+  async function _processMessage(src, id, action, payload) {
     try {
       let result;
       switch (action) {
@@ -649,7 +660,7 @@ export const ariaFlange = defineFeature(function(context is Context, id is Id, d
     } catch (err) {
       replyTo(src, id, undefined, err.message);
     }
-  });
+  }
 
   // -------------------------------------------------------------------------
   // OAuth callback handler

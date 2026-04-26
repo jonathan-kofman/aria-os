@@ -19,6 +19,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, API_BASE } from "../aria/apiConfig";
 import bridge from "../aria/bridge";
+import { DinoRunner } from "../components/DinoRunner";
 
 /* ------------------------------------------------------------------------- */
 /* Styles — Claude.ai's actual palette. AdamCAD clones this look; so do we.  */
@@ -1104,37 +1105,38 @@ function StepTree({ events, done, error }) {
             </div>
           </div>
         ))}
-        {/* Heartbeat row — shown when the pipeline is running but no event
-            has arrived in the last ~5 seconds. Keeps the user informed
-            through slow LLM stretches (30-90s silence is common). */}
+        {/* Endless-runner loading animation — shown the whole time the
+            pipeline is running. After 5s of silence we also append a
+            "Still working after <phase> · waited Xs" caption so users
+            know the slow LLM stretches (30-90s) aren't a freeze. */}
         {!done && !error && (events || []).length > 0 && (() => {
           const last = events[events.length - 1];
           const lastTs = (last && last._clientTs) || 0;
-          if (!lastTs) return null;
-          const waited = Math.floor((Date.now() - lastTs) / 1000);
-          if (waited < 5) return null;
-          const phase = (() => {
-            const c = _classifyEvent(last, false);
-            return c.phase || "Step";
-          })();
+          const waited = lastTs ? Math.floor((Date.now() - lastTs) / 1000) : 0;
+          let caption = null;
+          if (waited >= 5) {
+            const phase = (() => {
+              const c = _classifyEvent(last, false);
+              return c.phase || "Step";
+            })();
+            caption = `Still working after ${phase} · waited ${waited}s${
+              waited > 30 ? " — slow LLM call, hold tight" : "…"
+            }`;
+          }
           return (
             <div style={{
-              display: "flex", alignItems: "center", gap: 10,
-              padding: "8px 14px 10px",
-              fontSize: 13, color: THEME.mutedLo,
-              borderTop: `1px dashed ${THEME.border}`, marginTop: 2,
+              borderTop: `1px dashed ${THEME.border}`,
+              marginTop: 2,
             }}>
-              <span style={{
-                display: "inline-block", width: 10, height: 10,
-                borderRadius: "50%",
-                border: `2px solid ${THEME.accent}`, borderTopColor: "transparent",
-                animation: "ariaSpin 0.9s linear infinite",
-                flexShrink: 0,
-              }} />
-              <span style={{ fontFamily: FONT_SERIF, fontStyle: "italic" }}>
-                Still working after <b>{phase}</b> · waited {waited}s
-                {waited > 30 ? " — slow LLM call, hold tight" : "…"}
-              </span>
+              <DinoRunner
+                message={caption}
+                theme={{
+                  bg:     "transparent",
+                  fg:     THEME.text,
+                  accent: THEME.accent,
+                  muted:  THEME.mutedLo,
+                }}
+              />
             </div>
           );
         })()}
