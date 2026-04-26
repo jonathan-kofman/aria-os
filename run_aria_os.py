@@ -1369,7 +1369,40 @@ def main():
             _ecad_args = [a for i, a in enumerate(_ecad_args) if a != "--out" and (i == 0 or _ecad_args[i-1] != "--out")]
         _ecad_desc = " ".join(a for a in _ecad_args if not a.startswith("--"))
         from aria_os.ecad_generator import generate_ecad
-        generate_ecad(_ecad_desc, out_dir=Path(_ecad_out) if _ecad_out else ROOT / "outputs" / "ecad")
+        _ecad_out_path = Path(_ecad_out) if _ecad_out else ROOT / "outputs" / "ecad"
+        generate_ecad(_ecad_desc, out_dir=_ecad_out_path)
+
+        # --- Post-ECAD: emit fab + assembly + preview artifacts via -----
+        # kicad-cli. Walk the just-written dir for any .kicad_pcb the
+        # generator produced (writer side may have emitted one even when
+        # the script-only path was the primary output) and run the full
+        # export sweep against each. Best-effort — failures don't block
+        # the CLI exit.
+        try:
+            from aria_os.ecad.kicad_cli_artifacts import (
+                export_all_artifacts, summarize)
+            from aria_os.ecad.kicad_pcb_writer import write_kicad_pcb
+        except Exception as _e_imp:
+            print(f"[ECAD artifacts] import failed: {_e_imp}")
+        else:
+            for _bom in _ecad_out_path.rglob("*_bom.json"):
+                _pcb = _bom.with_name(_bom.name.replace("_bom.json", ".kicad_pcb"))
+                if not _pcb.is_file():
+                    # Generator only emitted the pcbnew Python script;
+                    # synthesize a real .kicad_pcb directly from the BOM
+                    # so kicad-cli has something to chew on.
+                    try:
+                        write_kicad_pcb(_bom, _pcb,
+                                         board_name=_pcb.stem)
+                    except Exception as _we:
+                        print(f"[ECAD artifacts] kicad_pcb_writer failed for "
+                              f"{_bom.name}: {_we}")
+                        continue
+                try:
+                    aset = export_all_artifacts(_pcb)
+                    print(summarize(aset))
+                except Exception as _xe:
+                    print(f"[ECAD artifacts] export_all_artifacts threw: {_xe}")
         return
 
     if len(sys.argv) >= 2 and sys.argv[1] == "--autocad":

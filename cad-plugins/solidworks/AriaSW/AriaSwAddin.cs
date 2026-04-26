@@ -402,38 +402,47 @@ namespace AriaSW
             else if (operation == "cut")
             {
                 FileLog($"  cut: dist={dist*1000}mm");
-                // Try each (selection-strategy × end-condition) combo until
-                // one of them returns a non-null feature. Order matches the
-                // SW macro recording style first (sketch-only, auto-select
-                // bodies), then progressively explicit fallbacks.
+                // One-time deep diagnostics so we can see what SW actually
+                // sees at the moment of the cut. Body bbox tells us
+                // geometrically where the body sits relative to the
+                // sketch plane (cut direction needs to point INTO it).
+                LogBodyDiagnostics();
+
                 IFeature cutFeat = null;
 
                 // (a) sketch-only + auto-select bodies + blind cut
                 cutFeat = TryFeatureCut(sketchFeatName, dist,
-                    blind: true, selectBody: false, useAutoSelect: true);
+                    blind: true, selectBody: false, useAutoSelect: true,
+                    flip: false);
 
-                // (b) sketch-only + auto-select + ThroughAllBoth (handles
-                //     wrong-direction blind cuts on planes coincident with
-                //     a body face)
+                // (b) sketch-only + ThroughAll + flip=false
                 if (cutFeat == null)
                     cutFeat = TryFeatureCut(sketchFeatName, dist,
-                        blind: false, selectBody: false, useAutoSelect: true);
+                        blind: false, selectBody: false, useAutoSelect: true,
+                        flip: false);
 
-                // (c) explicit body select (Mark=4) + UseAutoSelect=false +
-                //     blind. Needed when SW's auto-select can't infer the
-                //     scope body (multibody, hidden body, suppressed feat).
+                // (c) flip=true: cut direction reversed. If SW's "default
+                //     direction" puts the cut going AWAY from the body,
+                //     the cut removes nothing and returns null. flip=true
+                //     reverses to the other side.
                 if (cutFeat == null)
                     cutFeat = TryFeatureCut(sketchFeatName, dist,
-                        blind: true, selectBody: true, useAutoSelect: false);
+                        blind: true, selectBody: false, useAutoSelect: true,
+                        flip: true);
 
-                // (d) explicit body + ThroughAllBoth
+                // (d) flip=true + ThroughAll
                 if (cutFeat == null)
                     cutFeat = TryFeatureCut(sketchFeatName, dist,
-                        blind: false, selectBody: true, useAutoSelect: false);
+                        blind: false, selectBody: false, useAutoSelect: true,
+                        flip: true);
 
-                // (e) feature scope DISABLED (cut affects all bodies in
-                //     the part). Last-ditch — works when scope detection
-                //     is the failing piece.
+                // (e) explicit body select (Mark=4) + blind + flip=false
+                if (cutFeat == null)
+                    cutFeat = TryFeatureCut(sketchFeatName, dist,
+                        blind: true, selectBody: true, useAutoSelect: false,
+                        flip: false);
+
+                // (f) feature scope DISABLED — last-ditch
                 if (cutFeat == null)
                     cutFeat = TryFeatureCutNoScope(sketchFeatName, dist);
 
@@ -456,7 +465,7 @@ namespace AriaSW
         }
 
         private IFeature TryFeatureCut(string sketchName, double dist,
-            bool blind, bool selectBody, bool useAutoSelect)
+            bool blind, bool selectBody, bool useAutoSelect, bool flip)
         {
             _model.ClearSelection2(true);
             bool selSketch = _model.Extension.SelectByID2(
@@ -464,7 +473,7 @@ namespace AriaSW
                 (int)swSelectOption_e.swSelectOptionDefault);
             if (!selSketch)
             {
-                FileLog($"  cut.try (blind={blind} body={selectBody} auto={useAutoSelect}): SelectByID2 sketch={false}");
+                FileLog($"  cut.try (blind={blind} body={selectBody} auto={useAutoSelect} flip={flip}): SelectByID2 sketch={false}");
                 return null;
             }
             if (selectBody && _lastBodyFeature != null)
@@ -473,58 +482,45 @@ namespace AriaSW
                 FileLog($"  cut.try: append body '{_lastBodyFeature.Name}' Mark=4 -> {b}");
             }
 
-            // For "through all" cuts use swEndCondThroughAll (1), NOT
-            // swEndCondThroughAllBoth (9). ThroughAllBoth implies two
-            // directions and conflicts with Sd=true (single direction)
-            // — SW silently rejects the inconsistent combo.
+            int featCountBefore = _model.FeatureManager.GetFeatureCount(false);
+            int selCount = (_model.SelectionManager as ISelectionMgr)?.GetSelectedObjectCount2(-1) ?? 0;
             int endCond1 = blind ? (int)swEndConditions_e.swEndCondBlind
                                  : (int)swEndConditions_e.swEndCondThroughAll;
             int endCond2 = (int)swEndConditions_e.swEndCondBlind;
-            double d1 = blind ? dist : 0.01;   // some non-zero dummy for ThroughAll
-            double d2 = 0.01;                  // SW wants both depths > 0
+            double d1 = blind ? dist : 0.01;
+            double d2 = 0.01;
 
             try
             {
-                FileLog($"  cut.try blind={blind} body={selectBody} auto={useAutoSelect} T1={endCond1}");
-                // NormalCut=false: NormalCut is a sheet-metal-only flag.
-                //   When true on a regular part SW silently nulls the
-                //   feature on some 2024+ builds.
-                // AssemblyFeatureScope=true, AutoSelectComponents=true:
-                //   matches the canonical SW recorded macro for an
-                //   extruded cut on a part.
-                // Dang1/Dang2 = 1° in radians: SW expects non-zero even
-                //   when no draft is applied.
+                FileLog($"  cut.try blind={blind} body={selectBody} auto={useAutoSelect} flip={flip} T1={endCond1} sel={selCount} featCount={featCountBefore}");
                 const double DEG = 0.01745329251994;
-                IFeature feat = _model.FeatureManager.FeatureCut4(
+                // Capture as object first (no IFeature cast) so we can
+                // see the actual COM type — null vs cast failure.
+                object raw = _model.FeatureManager.FeatureCut4(
                     true,                                 // Sd (single-direction)
-                    false, false,                         // Flip, Dir
+                    flip, false,                          // Flip, Dir
                     endCond1, endCond2,
                     d1, d2,
-                    false, false,                         // Dchk1, Dchk2
-                    false, false,                         // Ddir1, Ddir2
-                    DEG, DEG,                             // Dang1, Dang2
-                    false, false,                         // OffsetReverse1, OffsetReverse2
-                    false, false,                         // TranslateSurface1, TranslateSurface2
-                    false,                                // NormalCut (false for non-sheet-metal)
+                    false, false,
+                    false, false,
+                    DEG, DEG,
+                    false, false,
+                    false, false,
+                    false,                                // NormalCut
                     true, useAutoSelect,                  // UseFeatScope, UseAutoSelect
                     true, true,                           // AssemblyFeatureScope, AutoSelectComponents
                     false,                                // PropagateFeatureToParts
                     (int)swStartConditions_e.swStartSketchPlane,
-                    0, false, false) as IFeature;
-                // FeatureCut4 sometimes returns null even when the
-                // feature was actually created. Probe the most-recent
-                // feature; if its name starts with "Cut-" or "Boss-",
-                // SW just made one — adopt it as the result.
-                if (feat == null)
+                    0, false, false);
+                int featCountAfter = _model.FeatureManager.GetFeatureCount(false);
+                FileLog($"  cut.try return: rawNull={raw==null} rawType={raw?.GetType().FullName ?? "null"} featCount {featCountBefore}->{featCountAfter}");
+                IFeature feat = raw as IFeature;
+                if (feat == null && featCountAfter > featCountBefore)
                 {
                     var recent = _model.FeatureByPositionReverse(0) as IFeature;
                     string nm = recent?.Name ?? "";
-                    if (!string.IsNullOrEmpty(nm) &&
-                        (nm.StartsWith("Cut-") || nm.StartsWith("Cut Extrude")))
-                    {
-                        FileLog($"  cut.try: FeatureCut4 returned null but found '{nm}' — adopting");
-                        feat = recent;
-                    }
+                    FileLog($"  cut.try: tree grew but cast was null — adopting '{nm}'");
+                    feat = recent;
                 }
                 return feat;
             }
@@ -532,6 +528,45 @@ namespace AriaSW
             {
                 FileLog($"  cut.try threw: {ex.GetType().Name}: {ex.Message}");
                 return null;
+            }
+        }
+
+        /// <summary>One-shot diagnostic dump before each cut. Logs the
+        /// active body's bbox so we can verify the cut direction makes
+        /// geometric sense relative to where the body actually sits.</summary>
+        private void LogBodyDiagnostics()
+        {
+            try
+            {
+                var part = _model as IPartDoc;
+                if (part == null) { FileLog("  diag: model is not IPartDoc"); return; }
+                var bodies = part.GetBodies2(
+                    (int)swBodyType_e.swSolidBody, false) as object[];
+                if (bodies == null || bodies.Length == 0)
+                {
+                    FileLog("  diag: no solid bodies found");
+                    return;
+                }
+                FileLog($"  diag: {bodies.Length} solid body/bodies in part");
+                foreach (var bo in bodies)
+                {
+                    if (bo is IBody2 b)
+                    {
+                        var bbox = b.GetBodyBox() as double[];
+                        if (bbox != null && bbox.Length >= 6)
+                        {
+                            FileLog($"  diag: body '{b.Name}' bbox(mm) " +
+                                    $"X[{bbox[0]*1000:F1}..{bbox[3]*1000:F1}] " +
+                                    $"Y[{bbox[1]*1000:F1}..{bbox[4]*1000:F1}] " +
+                                    $"Z[{bbox[2]*1000:F1}..{bbox[5]*1000:F1}]");
+                        }
+                    }
+                }
+                FileLog($"  diag: FeatureManager type = {_model.FeatureManager.GetType().FullName}");
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  diag threw: {ex.Message}");
             }
         }
 
