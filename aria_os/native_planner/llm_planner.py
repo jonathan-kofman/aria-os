@@ -405,7 +405,16 @@ def plan_from_llm(goal: str, spec: dict,
             plan = []
             for op in structured:
                 if isinstance(op, dict) and "kind" in op:
+                    # Apply alias normalization here too — structured
+                    # output bypasses _normalize_op, but the LLM still
+                    # hallucinates verbose op names + param names even
+                    # with a strict tool_use schema (model cards drift).
+                    kind = op.get("kind")
+                    if isinstance(kind, str) and kind in _KIND_ALIASES:
+                        op["kind"] = _KIND_ALIASES[kind]
                     op.setdefault("params", {})
+                    op["params"] = _normalize_params(op.get("kind", ""),
+                                                       op["params"])
                     op.setdefault("label", op.get("kind", "op"))
                     plan.append(op)
             if plan:
@@ -513,6 +522,193 @@ def _log_llm_context(repo_root: Path | None, goal: str,
 
 # --- Helpers -------------------------------------------------------------
 
+# Op-kind aliases — LLMs frequently emit verbose synonyms instead of the
+# exact schema names. Normalising at the planner level (not just at each
+# bridge) means the alias map stays in one place, and structured-output
+# tier failures still land on the right kind by the time ops hit the
+# listener. Keep this aligned with the per-bridge alias maps in
+# AriaSwAddin.cs / AriaBridge.cs / aria_panel.py.
+_KIND_ALIASES: dict[str, str] = {
+    "sketchRectangle":     "sketchRect",
+    "rectangle":           "sketchRect",
+    "drawRectangle":       "sketchRect",
+    "addRectangle":        "sketchRect",
+    "sketchCircleByCenter": "sketchCircle",
+    "drawCircle":          "sketchCircle",
+    "circle":              "sketchCircle",
+    "extrudeBoss":         "extrude",
+    "extrudeCut":          "extrude",
+    "boss":                "extrude",
+    "cutExtrude":          "extrude",
+    "linearExtrude":       "extrude",
+    "drawLine":            "sketchLine",
+    "addLine":             "sketchLine",
+    "polyline":            "sketchPolyline",
+    "closedPolyline":      "sketchClosePolygon",
+    "addFillet":           "fillet",
+    "addChamfer":          "chamfer",
+    "addRevolve":          "revolve",
+    "addSweep":            "sweep",
+    "addLoft":             "loft",
+    "addShell":            "shell",
+    "addMirror":           "mirror",
+    "reflect":             "mirror",
+    "symmetric":           "mirror",
+    "addPattern":          "linearPattern",
+    "circular":            "circularPattern",
+    "addThread":           "threadFeature",
+    "thread":              "threadFeature",
+    "addGear":             "gearFeature",
+    "gear":                "gearFeature",
+    "spurGear":            "gearFeature",
+    "involuteGear":        "gearFeature",
+    "addHelix":            "helix",
+    "spiral":              "helix",
+    "coil":                "helix",
+}
+
+
+# Per-kind param-name aliases. The bridges (SW/Rhino) use compact names
+# (`w`, `h`, `r`, `cx`, `cy`) while LLMs frequently emit verbose forms
+# (`width`, `height`, `radius`, `diameter`, `x`, `y`). Map them at the
+# planner layer so a bridge never sees a name it doesn't expect.
+#
+# Special handling:
+#   - "diameter"/"d" → "r" with value/2 (computed in _normalize_params)
+#   - "x"/"y" → cx/cy ONLY when no `cx`/`cy` already present
+_PARAM_ALIASES_BY_KIND: dict[str, dict[str, str]] = {
+    "sketchRect": {
+        "width":   "w", "h_mm":  "h",
+        "height":  "h", "w_mm":  "w",
+        # Some LLMs emit "length" + "width" for the two rect dimensions
+        # (one per orthogonal axis). Map "length" → "h" so they're orthogonal.
+        "length":  "h",
+        "size_x":  "w", "size_y": "h",
+        "x":       "cx", "y":     "cy",
+        "x_mm":    "cx", "y_mm":  "cy",
+        "center_x": "cx", "center_y": "cy",
+    },
+    "sketchCircle": {
+        "x":       "cx", "y":     "cy",
+        "x_mm":    "cx", "y_mm":  "cy",
+        "center_x": "cx", "center_y": "cy",
+        "radius":  "r", "r_mm":  "r",
+    },
+    "extrude": {
+        "depth_mm":  "distance",
+        "distance_mm": "distance",
+        "depth":     "distance",
+        "length":    "distance",
+        "thickness": "distance",
+        "sketch_alias": "sketch",
+    },
+    "newSketch": {
+        "plane_name": "plane",
+        "name":       "name",     # canonical
+        "offset_mm":  "offset",
+    },
+    "fillet": {
+        "radius":     "r",
+        "edge_radius": "r",
+    },
+    "revolve": {
+        "angle_deg":  "angle",
+    },
+    "sweep": {
+        "profile":    "profile_sketch",
+        "path":       "path_sketch",
+    },
+    "circularPattern": {
+        "n":         "count",
+        "n_copies":  "count",
+        "axis_dir":  "axis",
+        "feature_alias": "feature",
+    },
+}
+
+
+def _normalize_plane_spec(plane: str) -> tuple[str, float | None]:
+    """LLMs invent creative plane specs like "XY@Z=7", "XY+5",
+    "XY plane offset 5mm", or "Z=7". Convert any of these into the
+    canonical (plane, offset) pair the bridge accepts.
+
+    Returns (plane_letter, offset_or_None). Plane letter is one of
+    'XY', 'XZ', 'YZ' (uppercased). offset is in mm, or None if not
+    expressed.
+    """
+    if not isinstance(plane, str) or not plane:
+        return "XY", None
+    p = plane.strip().upper()
+    # Strip "PLANE" suffix
+    p = p.replace(" PLANE", "").strip()
+    # Inline offset notations: "XY@Z=7", "XY+5", "XY OFFSET 5"
+    offset = None
+    for sep in ("@Z=", "@", "+", " OFFSET "):
+        if sep in p:
+            head, tail = p.split(sep, 1)
+            head = head.strip()
+            tail = tail.strip().rstrip("MM").strip()
+            try:
+                offset = float(tail.split()[0]) if tail else None
+                p = head
+                break
+            except (ValueError, IndexError):
+                pass
+    # Canonical 2-letter form first
+    if p in ("XY", "XZ", "YZ"):
+        return p, offset
+    # Aliases
+    if p in ("YX",):
+        return "XY", offset
+    if p in ("ZX",):
+        return "XZ", offset
+    if p in ("ZY",):
+        return "YZ", offset
+    if p in ("TOP", "BOTTOM", "WORLD_TOP"):
+        return "XY", offset
+    if p in ("FRONT", "BACK"):
+        return "XZ", offset
+    if p in ("LEFT", "RIGHT", "SIDE"):
+        return "YZ", offset
+    # Fallback to XY
+    return "XY", offset
+
+
+def _normalize_params(kind: str, params: dict) -> dict:
+    """Apply per-kind param-name aliasing + value transforms.
+
+    Handles:
+      - direct rename (width → w)
+      - diameter → r with value /= 2 (inverse of "radius=diameter/2")
+      - x,y → cx,cy ONLY when canonical isn't already provided
+    """
+    if not isinstance(params, dict):
+        return params or {}
+    aliases = _PARAM_ALIASES_BY_KIND.get(kind, {})
+    out = dict(params)  # copy so we can pop
+    for src, dst in aliases.items():
+        if src in out and dst not in out:
+            out[dst] = out.pop(src)
+    # Diameter→radius for sketch primitives
+    if kind in ("sketchCircle",) and "r" not in out:
+        if "diameter" in out:
+            try: out["r"] = float(out.pop("diameter")) / 2
+            except (TypeError, ValueError): pass
+        elif "d" in out:
+            try: out["r"] = float(out.pop("d")) / 2
+            except (TypeError, ValueError): pass
+        elif "diameter_mm" in out:
+            try: out["r"] = float(out.pop("diameter_mm")) / 2
+            except (TypeError, ValueError): pass
+    # Plane normalization for newSketch — LLMs love "XY@Z=7" notation.
+    if kind == "newSketch" and "plane" in out:
+        plane_letter, plane_offset = _normalize_plane_spec(str(out["plane"]))
+        out["plane"] = plane_letter
+        if plane_offset is not None and "offset" not in out:
+            out["offset"] = plane_offset
+    return out
+
+
 def _normalize_op(item) -> dict | None:
     """Coerce an LLM-emitted array element into a valid op dict.
 
@@ -520,33 +716,53 @@ def _normalize_op(item) -> dict | None:
     `"beginPlan"` where they should emit `{"kind": "beginPlan", "params": {}}`.
     We tolerate that here rather than rejecting the whole plan — the
     validator catches anything truly malformed downstream.
+
+    Also folds verbose op-kind aliases (sketchRectangle → sketchRect,
+    extrudeBoss → extrude, etc.) AND per-kind param-name aliases (width
+    → w, diameter → r/2, etc.) so the bridge gets canonical input even
+    when the planner's structured-output schema couldn't enforce it.
     """
     if isinstance(item, dict):
         if "kind" in item:
+            kind = item.get("kind")
+            if isinstance(kind, str) and kind in _KIND_ALIASES:
+                item["kind"] = _KIND_ALIASES[kind]
             item.setdefault("params", {})
+            item["params"] = _normalize_params(item.get("kind", ""),
+                                                item["params"])
             return item
         return None
     if isinstance(item, str):
         # Bare string → treat as a parameterless op name
-        return {"kind": item, "params": {}, "label": item}
+        canonical = _KIND_ALIASES.get(item, item)
+        return {"kind": canonical, "params": {}, "label": item}
     return None
 
 
 def _strip_md_fence(s: str) -> str:
     """If `s` is wrapped in ```json … ``` (or ``` … ```), return the inner
-    body. Tolerant of unclosed fences (LLM truncation) — strips just the
-    opening fence in that case so balance-matching can still find the array.
+    body. Tolerant of:
+      * unclosed fences (LLM truncation) — strips just the opening fence
+        in that case so balance-matching can still find the array
+      * surrounding prose ("Sure, here's the plan:\n\n```json\n...```\nNote: …")
+      * Windows line endings, BOM, leading whitespace
     """
-    s = s.strip()
-    if not s.startswith("```"):
+    s = s.strip().lstrip("﻿")  # drop BOM
+    # Find ANY ``` opener — not just at start of string.
+    # The opener may be ``` or ```json or ```python; treat them all the same.
+    fence_open = s.find("```")
+    if fence_open < 0:
         return s
-    first_nl = s.find("\n")
-    if first_nl < 0:
-        return s
-    body = s[first_nl + 1:]
-    last_fence = body.rfind("```")
-    if last_fence > 0:
-        body = body[:last_fence]
+    # Skip past the opener line (``` plus optional language tag).
+    after_open_nl = s.find("\n", fence_open)
+    if after_open_nl < 0:
+        # Single-line fenced text; the body is whatever comes after ```
+        return s[fence_open + 3:].strip()
+    body = s[after_open_nl + 1:]
+    # Look for a closing fence; if absent, treat the rest as the body.
+    fence_close = body.find("```")
+    if fence_close >= 0:
+        body = body[:fence_close]
     return body.strip()
 
 

@@ -523,6 +523,556 @@ def text_to_board(req: TextToBoardRequest):
 
 
 # --------------------------------------------------------------------------- #
+# /api/system/board-and-enclosure — MCAD↔ECAD round-trip.
+#
+# The user's only allowed cross-CAD coupling: MCAD and ECAD work together
+# so a goal like "ESP32 dev board in a 90x70x25mm enclosure with USB-C
+# cutout and 4 M3 mounting bosses" produces both a real .kicad_pcb AND a
+# coordinated enclosure, with the cutout positioned where the actual
+# USB-C connector ended up on the PCB.
+#
+# Flow:
+#   1. ECAD pipeline (parse + place components) → list of Components.
+#   2. Extract pcb_constraints: board bbox, connector cutouts (USB-C / headers
+#      / barrel jacks), tallest component z, mount-hole positions.
+#   3. Save .kicad_pcb via the KiCad listener.
+#   4. Synthesize an MCAD goal that bakes those constraints in
+#      (cavity dims, side-wall cutouts, mount-boss positions).
+#   5. Dispatch to the chosen MCAD listener (default rhino — running);
+#      sw is supported when the SW addin is connected.
+#   6. Return both results + the constraints that bridged them.
+# --------------------------------------------------------------------------- #
+
+# Heuristic component-height lookup table. We never ask KiCad for actual
+# 3D model heights — that would require parsing every WRL/STEP from the
+# library. Instead, classify by footprint substring and use a known good
+# enclosure-design height. Always rounds UP because the cost of an
+# enclosure that's 1mm too tall is zero; 1mm too short is fatal.
+_COMPONENT_HEIGHT_MM_LOOKUP: list[tuple[tuple[str, ...], float]] = [
+    # Through-hole + tall first (substring "wins" by ordering)
+    (("BarrelJack", "DC_Jack"),                              11.0),
+    (("RJ45",),                                              16.0),
+    (("PinHeader_2x", "PinHeader_1x"),                        9.0),
+    (("Switch_TH", "Tactile_TH"),                            10.0),
+    (("Crystal_HC", "Quartz_HC"),                             5.0),
+    (("USB_C_Receptacle", "USB_C_Plug",
+      "USB_C_Receptacle_GCT", "USB-C"),                       3.5),
+    (("USB_B_", "USB_Mini",),                                 8.0),
+    (("ESP32", "ESP32-S3", "ESP32-C3",
+      "WROOM", "WROVER"),                                     3.5),
+    (("STM32", "QFN", "QFP", "SOP", "TSSOP"),                 1.5),
+    (("MicroSD",),                                            2.0),
+    (("Module_BNO055", "IMU"),                                2.0),
+    (("LED_THT",),                                            8.0),
+    # Surface-mount discretes
+    (("R_0402", "C_0402", "L_0402"),                          0.5),
+    (("R_0603", "C_0603", "L_0603"),                          0.55),
+    (("R_0805", "C_0805", "L_0805"),                          0.6),
+    (("R_1206", "C_1206", "L_1206"),                          0.7),
+    (("LED_0402", "LED_0603", "LED_0805"),                    0.6),
+    (("SOT-23", "SOT-223", "SOT-89"),                         1.5),
+    (("DPAK", "TO-252"),                                      2.4),
+    (("D2PAK", "TO-263"),                                     4.4),
+    # Generic fallback
+    (("Generic",),                                            2.0),
+]
+
+_DEFAULT_COMPONENT_HEIGHT_MM = 2.0
+
+
+def _component_height_mm(comp) -> float:
+    """Best-effort z-height for a placed component. See lookup table."""
+    fp = (comp.footprint or "").lower()
+    val = (comp.value or "").lower()
+    haystack = f"{fp} {val}"
+    for substrings, h in _COMPONENT_HEIGHT_MM_LOOKUP:
+        if any(s.lower() in haystack for s in substrings):
+            return h
+    return _DEFAULT_COMPONENT_HEIGHT_MM
+
+
+def _classify_connector(comp) -> str | None:
+    """Return a connector category if `comp` is a connector, else None."""
+    fp = (comp.footprint or "").lower()
+    val = (comp.value or "").lower()
+    ref = (comp.ref or "").upper()
+    if "usb_c" in fp or "usb-c" in fp or "type-c" in fp \
+            or "usb_c" in val or "usb-c" in val:
+        return "usb_c"
+    if "usb_micro" in fp or "usb_mini" in fp or "usb_b" in fp:
+        return "usb_other"
+    if "barreljack" in fp or "dc_jack" in fp:
+        return "barrel_jack"
+    if "rj45" in fp:
+        return "rj45"
+    if "pinheader" in fp or "screwterm" in fp:
+        return "header"
+    if ref.startswith("J") and ("usb" in val or "conn" in val
+                                  or "header" in val or "jack" in val):
+        return "header"
+    return None
+
+
+def _nearest_edge(x: float, y: float, w: float, h: float,
+                   board_w: float, board_h: float) -> str:
+    """Which board edge is the (x,y,w,h) bbox nearest to? top|bottom|left|right."""
+    cx = x + w / 2
+    cy = y + h / 2
+    dist_left = cx
+    dist_right = board_w - cx
+    dist_bottom = cy
+    dist_top = board_h - cy
+    by_dist = sorted([("left", dist_left), ("right", dist_right),
+                       ("bottom", dist_bottom), ("top", dist_top)],
+                      key=lambda kv: kv[1])
+    return by_dist[0][0]
+
+
+def _extract_pcb_constraints(components, board_w: float,
+                              board_h: float) -> dict:
+    """Walk placed components → MCAD-relevant geometry constraints.
+
+    Returns a dict the MCAD planner can ingest verbatim into an
+    enclosure goal string.
+    """
+    tallest = 0.0
+    connectors = []
+    headers = []
+    mount_holes = []
+    for c in components:
+        h = _component_height_mm(c)
+        if h > tallest:
+            tallest = h
+        cat = _classify_connector(c)
+        cx, cy = c.x_mm + c.width_mm / 2, c.y_mm + c.height_mm / 2
+        if cat in ("usb_c", "usb_other", "barrel_jack", "rj45"):
+            edge = _nearest_edge(c.x_mm, c.y_mm, c.width_mm, c.height_mm,
+                                  board_w, board_h)
+            connectors.append({
+                "ref":      c.ref,
+                "type":     cat,
+                "value":    c.value,
+                "x_mm":     round(c.x_mm, 2),
+                "y_mm":     round(c.y_mm, 2),
+                "w_mm":     round(c.width_mm, 2),
+                "h_mm":     round(c.height_mm, 2),
+                "z_mm":     h,
+                "edge":     edge,
+            })
+        elif cat == "header":
+            headers.append({
+                "ref":      c.ref,
+                "value":    c.value,
+                "x_mm":     round(cx, 2),
+                "y_mm":     round(cy, 2),
+                "z_mm":     h,
+            })
+        if (c.ref or "").upper().startswith("H") \
+                or "mountinghole" in (c.footprint or "").lower():
+            mount_holes.append({
+                "x_mm":          round(cx, 2),
+                "y_mm":          round(cy, 2),
+                "diameter_mm":   3.2,  # M3 clearance default
+            })
+    # If no explicit mount holes, place 4 at the corners with 3mm inset.
+    if not mount_holes:
+        inset = 3.5
+        mount_holes = [
+            {"x_mm": inset,                "y_mm": inset,
+             "diameter_mm": 3.2, "auto_corner": True},
+            {"x_mm": board_w - inset,      "y_mm": inset,
+             "diameter_mm": 3.2, "auto_corner": True},
+            {"x_mm": board_w - inset,      "y_mm": board_h - inset,
+             "diameter_mm": 3.2, "auto_corner": True},
+            {"x_mm": inset,                "y_mm": board_h - inset,
+             "diameter_mm": 3.2, "auto_corner": True},
+        ]
+    return {
+        "board_w_mm":               round(board_w, 2),
+        "board_h_mm":               round(board_h, 2),
+        "tallest_component_z_mm":   round(tallest, 2),
+        "connectors":               connectors,
+        "headers":                  headers,
+        "mount_holes":              mount_holes,
+    }
+
+
+def _enclosure_goal_from_constraints(c: dict, *,
+                                       wall_mm: float = 3.0,
+                                       cavity_clearance_mm: float = 1.0
+                                       ) -> str:
+    """Build a deterministic MCAD goal string from PCB constraints.
+
+    The MCAD planner reads natural language. We compose a precise
+    description so the planner emits the right ops (no LLM creativity
+    on dimensions — those are fixed by the PCB).
+    """
+    bw = c["board_w_mm"]
+    bh = c["board_h_mm"]
+    bz = max(c["tallest_component_z_mm"] + cavity_clearance_mm, 8.0)
+    outer_w = bw + 2 * wall_mm + 2 * cavity_clearance_mm
+    outer_h = bh + 2 * wall_mm + 2 * cavity_clearance_mm
+    outer_z = bz + 2 * wall_mm
+    parts = [
+        f"Rectangular enclosure {outer_w:.1f}x{outer_h:.1f}x{outer_z:.1f}mm "
+        f"with {wall_mm}mm walls. ",
+        f"Internal cavity {bw + 2 * cavity_clearance_mm:.1f}x"
+        f"{bh + 2 * cavity_clearance_mm:.1f}x{bz:.1f}mm to fit a PCB. ",
+    ]
+    for conn in c.get("connectors", []):
+        # Cutout dim defaults: USB-C ~9x4mm, barrel jack 11x11mm,
+        # USB-other ~12x7mm. RJ45 ~16x14mm.
+        cw, ch = {
+            "usb_c":       (9.0, 4.0),
+            "usb_other":   (12.0, 7.0),
+            "barrel_jack": (11.0, 11.0),
+            "rj45":        (16.0, 14.0),
+        }.get(conn["type"], (10.0, 5.0))
+        parts.append(
+            f"Cutout {cw:.1f}x{ch:.1f}mm on the {conn['edge']} wall "
+            f"for the {conn['type']} connector at ({conn['x_mm']},"
+            f"{conn['y_mm']}) on the PCB. ")
+    if c.get("mount_holes"):
+        n = len(c["mount_holes"])
+        parts.append(
+            f"Add {n} M3 mounting bosses on the cavity floor at the PCB "
+            f"corner positions, 5mm tall, with M3 clearance holes. ")
+    return "".join(parts).strip()
+
+
+def _build_enclosure_ops_deterministic(c: dict, *,
+                                         wall_mm: float = 3.0,
+                                         cavity_clearance_mm: float = 1.0
+                                         ) -> list[dict]:
+    """Build a guaranteed-working ops list straight from the constraints.
+
+    Used when the LLM planner fails to parse / returns nothing. We KNOW
+    the board dims, cutouts, and mount holes — so synthesising the ops
+    deterministically is both faster and more reliable than asking an
+    LLM to re-derive the geometry.
+
+    Output ops use the canonical Rhino/SW kinds: beginPlan, newSketch,
+    sketchRect, sketchCircle, extrude. shell op is OPTIONAL — if the
+    target bridge doesn't have it, the cavity is created via a second
+    smaller box subtracted from the outer box (boolean cut).
+    """
+    bw = c["board_w_mm"]
+    bh = c["board_h_mm"]
+    bz = max(c["tallest_component_z_mm"] + cavity_clearance_mm, 8.0)
+    outer_w = bw + 2 * wall_mm + 2 * cavity_clearance_mm
+    outer_h = bh + 2 * wall_mm + 2 * cavity_clearance_mm
+    outer_z = bz + 2 * wall_mm
+    cavity_w = bw + 2 * cavity_clearance_mm
+    cavity_h = bh + 2 * cavity_clearance_mm
+    cavity_z = bz
+
+    # All sketch primitives use the canonical schema in
+    # aria_os/native_planner/llm_planner.py: cx/cy/w/h for rects,
+    # cx/cy/r for circles. Origin is the sketch plane center.
+    ops: list[dict] = [
+        {"kind": "beginPlan", "params": {},
+         "label": "Begin enclosure plan"},
+        # Outer box
+        {"kind": "newSketch", "params": {
+            "plane": "XY", "alias": "sk_outer",
+            "name": "Outer box base",
+        }, "label": "Outer base sketch"},
+        {"kind": "sketchRect", "params": {
+            "sketch": "sk_outer", "cx": 0, "cy": 0,
+            "w": outer_w, "h": outer_h,
+        }, "label": f"{outer_w:.1f}x{outer_h:.1f} outer rect"},
+        {"kind": "extrude", "params": {
+            "sketch": "sk_outer", "distance": outer_z,
+            "operation": "new", "alias": "outer_box",
+        }, "label": f"Extrude outer box {outer_z:.1f}mm"},
+        # Inner cavity (subtract). Offset the sketch plane up by wall_mm
+        # so the cavity floor sits at +Z = wall_mm; extrude `cavity_z`
+        # upward leaves +Z = wall_mm + cavity_z = outer_z - wall_mm
+        # (i.e. the lid wall stays intact).
+        {"kind": "newSketch", "params": {
+            "plane": "XY", "alias": "sk_cavity",
+            "name": "Cavity base",
+            "offset": wall_mm,
+        }, "label": "Cavity base sketch"},
+        {"kind": "sketchRect", "params": {
+            "sketch": "sk_cavity", "cx": 0, "cy": 0,
+            "w": cavity_w, "h": cavity_h,
+        }, "label": f"{cavity_w:.1f}x{cavity_h:.1f} cavity rect"},
+        {"kind": "extrude", "params": {
+            "sketch": "sk_cavity", "distance": cavity_z,
+            "operation": "cut", "target": "outer_box",
+            "alias": "cavity_cut",
+        }, "label": f"Cut cavity {cavity_z:.1f}mm deep"},
+    ]
+
+    # Connector cutouts on side walls. Sketch planes (YZ for left/right,
+    # XZ for top/bottom) are centered on the world origin; sketch
+    # coords (cx,cy) are the in-plane offsets where the cutout center
+    # should land. We project the connector's PCB position onto the
+    # appropriate side wall.
+    pcb_origin_x = -bw / 2 - cavity_clearance_mm  # cavity is centered on outer
+    pcb_origin_y = -bh / 2 - cavity_clearance_mm
+    pcb_z_top = wall_mm + (cavity_clearance_mm)  # PCB top surface above floor
+    for i, conn in enumerate(c.get("connectors", [])):
+        ctype = conn["type"]
+        cw, ch = {
+            "usb_c":       (9.0, 4.0),
+            "usb_other":   (12.0, 7.0),
+            "barrel_jack": (11.0, 11.0),
+            "rj45":        (16.0, 14.0),
+        }.get(ctype, (10.0, 5.0))
+        edge = conn["edge"]
+        # Connector center in world coords (PCB origin offset)
+        pcb_cx = pcb_origin_x + conn["x_mm"] + conn["w_mm"] / 2
+        pcb_cy = pcb_origin_y + conn["y_mm"] + conn["h_mm"] / 2
+        # Cutout vertical center: at PCB top + connector z/2
+        z_center = pcb_z_top + (conn.get("z_mm", 3.5) / 2) - outer_z / 2
+        sk_alias = f"sk_cut_{i}"
+        if edge in ("left", "right"):
+            # Sketch is on YZ plane: in-plane cx = world Y, cy = world Z (centered)
+            sk_cx = pcb_cy
+            sk_cy = z_center
+            sketch_plane = "YZ"
+        else:  # top / bottom edge → XZ plane: in-plane cx = world X, cy = world Z
+            sk_cx = pcb_cx
+            sk_cy = z_center
+            sketch_plane = "XZ"
+        ops.append({"kind": "newSketch", "params": {
+            "plane": sketch_plane, "alias": sk_alias,
+            "name": f"Cutout for {conn['ref']}",
+        }, "label": f"Side cutout sketch {i}"})
+        ops.append({"kind": "sketchRect", "params": {
+            "sketch": sk_alias, "cx": sk_cx, "cy": sk_cy,
+            "w": cw, "h": ch,
+        }, "label": f"{ctype} {cw:.1f}x{ch:.1f}"})
+        ops.append({"kind": "extrude", "params": {
+            "sketch": sk_alias, "distance": outer_w + outer_h,
+            "operation": "cut", "target": "outer_box",
+            "alias": f"cut_{conn['ref']}",
+        }, "label": f"Cut {conn['ref']} through wall"})
+
+    # Mount-hole bosses on cavity floor. Outer cylinder (boss), inner
+    # circle (clearance hole). Both circles use canonical (cx,cy,r)
+    # schema; cylinder centered on PCB-origin-offset coords.
+    for i, mh in enumerate(c.get("mount_holes", [])):
+        sk_cx = pcb_origin_x + mh["x_mm"]
+        sk_cy = pcb_origin_y + mh["y_mm"]
+        boss_r = max(mh["diameter_mm"] / 2 + 2.0, 3.0)
+        hole_r = mh["diameter_mm"] / 2
+        boss_h = 5.0
+        sk_boss = f"sk_boss_{i}"
+        ops.append({"kind": "newSketch", "params": {
+            "plane": "XY", "alias": sk_boss,
+            "name": f"Mount boss {i}", "offset": wall_mm,
+        }, "label": f"Mount boss {i} sketch"})
+        ops.append({"kind": "sketchCircle", "params": {
+            "sketch": sk_boss, "cx": sk_cx, "cy": sk_cy, "r": boss_r,
+        }, "label": f"Boss Ø{boss_r * 2:.1f}"})
+        ops.append({"kind": "extrude", "params": {
+            "sketch": sk_boss, "distance": boss_h,
+            "operation": "join", "target": "outer_box",
+            "alias": f"boss_{i}",
+        }, "label": f"Extrude boss {i}"})
+        # Clearance hole through the boss
+        sk_hole = f"sk_hole_{i}"
+        ops.append({"kind": "newSketch", "params": {
+            "plane": "XY", "alias": sk_hole,
+            "offset": wall_mm,
+        }, "label": f"Clearance hole {i} sketch"})
+        ops.append({"kind": "sketchCircle", "params": {
+            "sketch": sk_hole, "cx": sk_cx, "cy": sk_cy, "r": hole_r,
+        }, "label": f"Hole Ø{hole_r * 2:.1f}"})
+        ops.append({"kind": "extrude", "params": {
+            "sketch": sk_hole, "distance": boss_h + 1,
+            "operation": "cut", "target": "outer_box",
+            "alias": f"hole_{i}",
+        }, "label": f"Cut clearance {i}"})
+
+    return ops
+
+
+class BoardAndEnclosureRequest(BaseModel):
+    goal: str
+    mcad_cad: str = "rhino"          # rhino | solidworks
+    quality_tier: str = "balanced"
+    wall_mm: float = 3.0
+    cavity_clearance_mm: float = 1.0
+    deterministic_fallback: bool = True   # use _build_enclosure_ops_deterministic if planner fails
+
+
+@app.post("/api/system/board-and-enclosure")
+def board_and_enclosure(req: BoardAndEnclosureRequest):
+    """End-to-end MCAD↔ECAD round-trip for an "X board in Y enclosure" goal."""
+    import httpx as _httpx
+
+    mcad = req.mcad_cad.lower().strip()
+    if mcad not in _CAD_BASE_URL:
+        raise HTTPException(400, f"unknown mcad cad: {mcad}")
+    mcad_base = _CAD_BASE_URL[mcad]
+    ecad_base = _ECAD_BASE_URL["kicad"]
+
+    # Confirm both listeners are up.
+    try:
+        with _httpx.Client(timeout=5.0) as c:
+            ms = c.get(f"{mcad_base}/status").json()
+            es = c.get(f"{ecad_base}/status").json()
+        if not ms.get("ok"):
+            raise HTTPException(502, f"mcad ({mcad}) listener: {ms}")
+        if not es.get("ok"):
+            raise HTTPException(502, f"ecad listener: {es}")
+    except Exception as exc:
+        raise HTTPException(502,
+            f"listener check failed: {type(exc).__name__}: {exc}")
+
+    # Phase 1: ECAD planner.
+    try:
+        from aria_os.ecad.ecad_generator import (
+            parse_components, _llm_enrich_components,
+            _compute_mcu_peripheral_nets, _assign_component_nets,
+            place_components, parse_board_dimensions, _slug,
+        )
+    except Exception as exc:
+        raise HTTPException(500,
+            f"ecad import failed: {type(exc).__name__}: {exc}")
+
+    board_name = _slug(req.goal)
+    board_w, board_h = parse_board_dimensions(req.goal)
+    components = parse_components(req.goal)
+    components = _llm_enrich_components(req.goal, components, REPO_ROOT)
+    _compute_mcu_peripheral_nets(components, req.goal)
+    _assign_component_nets(components, req.goal)
+    place_components(components, board_w, board_h)
+    if not components:
+        raise HTTPException(400,
+            "no PCB components inferred from goal — clarify the board content")
+
+    # Phase 2: extract constraints.
+    constraints = _extract_pcb_constraints(components, board_w, board_h)
+
+    # Phase 3: dispatch ECAD ops to the listener.
+    pcb_results = []
+    with _httpx.Client(timeout=120.0) as c:
+        c.post(f"{ecad_base}/new_board", json={
+            "name":        board_name,
+            "board_w_mm":  board_w,
+            "board_h_mm":  board_h,
+            "n_layers":    4 if "4-layer" in req.goal.lower()
+                                or "4 layer" in req.goal.lower() else 2,
+        })
+        for comp in components:
+            r = c.post(f"{ecad_base}/op", json={
+                "kind": "placeComponent",
+                "params": {
+                    "ref":          comp.ref,
+                    "value":        comp.value,
+                    "footprint":    comp.footprint,
+                    "x_mm":         comp.x_mm, "y_mm": comp.y_mm,
+                    "width_mm":     comp.width_mm,
+                    "height_mm":    comp.height_mm,
+                    "rotation_deg": 0.0,
+                    "nets":         list(comp.nets) if comp.nets
+                                    else (list(set(comp.net_map.values()))
+                                          if comp.net_map else []),
+                    "net_map":      dict(comp.net_map) if comp.net_map else {},
+                    "description":  comp.description,
+                }})
+            rj = r.json()
+            pcb_results.append({"ref": comp.ref, "value": comp.value,
+                                 "ok": (rj.get("result") or {}).get("ok",
+                                                                       rj.get("ok"))})
+        c.post(f"{ecad_base}/op", json={"kind": "addZone", "params": {
+            "net_name": "GND", "layer": "B.Cu",
+        }})
+        save_resp = c.post(f"{ecad_base}/save_pcb", json={}).json()
+        gerber_resp = c.post(f"{ecad_base}/export_gerbers", json={}).json()
+
+    # Phase 4: synthesize MCAD enclosure goal from constraints.
+    enclosure_goal = _enclosure_goal_from_constraints(
+        constraints, wall_mm=req.wall_mm,
+        cavity_clearance_mm=req.cavity_clearance_mm)
+
+    # Phase 5: dispatch MCAD goal to the chosen MCAD listener.
+    # Try the LLM planner first — it has access to the full schema and
+    # can handle features the deterministic builder doesn't (rounded
+    # corners, draft, lid, etc). Fall back to the deterministic builder
+    # if the LLM fails or returns nothing — guarantees the round-trip
+    # always produces a working enclosure regardless of LLM state.
+    mcad_ops: list[dict] = []
+    planner_error: str | None = None
+    try:
+        from aria_os.native_planner.llm_planner import plan_from_llm
+        mcad_ops = plan_from_llm(enclosure_goal, {},
+                                  quality=req.quality_tier,
+                                  repo_root=REPO_ROOT) or []
+    except Exception as exc:
+        planner_error = f"{type(exc).__name__}: {exc}"
+
+    used_fallback = False
+    if not mcad_ops:
+        if not req.deterministic_fallback:
+            return {"ok": False, "phase": "mcad_planner",
+                     "error": planner_error or "planner returned no ops",
+                     "pcb": save_resp, "constraints": constraints,
+                     "enclosure_goal": enclosure_goal}
+        mcad_ops = _build_enclosure_ops_deterministic(
+            constraints,
+            wall_mm=req.wall_mm,
+            cavity_clearance_mm=req.cavity_clearance_mm,
+        )
+        used_fallback = True
+
+    mcad_results = []
+    failed_at = None
+    with _httpx.Client(timeout=120.0) as c:
+        for i, op in enumerate(mcad_ops):
+            try:
+                r = c.post(f"{mcad_base}/op", json={
+                    "kind": op.get("kind"), "params": op.get("params", {})})
+                rj = r.json()
+                ok = (rj.get("result") or {}).get("ok", rj.get("ok"))
+                mcad_results.append({"i": i, "kind": op.get("kind"),
+                                      "label": op.get("label"), "ok": ok,
+                                      "result": rj.get("result")})
+                if not ok:
+                    failed_at = i
+                    break
+            except Exception as exc:
+                mcad_results.append({"i": i, "kind": op.get("kind"),
+                                      "ok": False,
+                                      "error": f"transport: "
+                                               f"{type(exc).__name__}: {exc}"})
+                failed_at = i
+                break
+
+    return {
+        "ok":               failed_at is None,
+        "goal":             req.goal,
+        "board_name":       board_name,
+        "constraints":      constraints,
+        "enclosure_goal":   enclosure_goal,
+        "pcb": {
+            "save":           save_resp,
+            "gerber_export":  gerber_resp,
+            "n_components":   len(components),
+            "n_ops_ok":       sum(1 for r in pcb_results if r["ok"]),
+        },
+        "enclosure": {
+            "cad":              mcad,
+            "n_ops_planned":    len(mcad_ops),
+            "n_ops_succeeded":  sum(1 for r in mcad_results if r["ok"]),
+            "failed_at":        failed_at,
+            "used_fallback":    used_fallback,
+            "planner_error":    planner_error,
+            # All ops verbatim (post-normalization) — useful when debugging
+            # "result: null" at the bridge: shows whether the LLM emitted
+            # canonical params after planner-side aliasing.
+            "ops_preview":      mcad_ops,
+            "results":          mcad_results,
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Pipeline runner (runs in background thread to keep FastAPI responsive)
 # --------------------------------------------------------------------------- #
 
