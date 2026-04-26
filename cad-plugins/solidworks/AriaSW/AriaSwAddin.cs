@@ -248,8 +248,30 @@ namespace AriaSW
             _activeSketchName = null;
             _activeSketchPlane = null;
             _lastBodyFeature = null;
+
+            // Force a fresh part document so each plan runs in isolation.
+            // Previously EnsurePart reused the active doc — that left stale
+            // bodies + features from the prior generation polluting bbox
+            // diagnostics and feature counts. Close any active doc (silent,
+            // no save) and open a new one from the user's default template.
+            try
+            {
+                var active = _sw.IActiveDoc2 as IModelDoc2;
+                if (active != null)
+                {
+                    _sw.CloseDoc(active.GetTitle());
+                    FileLog($"  beginPlan: closed prior doc '{active.GetTitle()}'");
+                }
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  beginPlan: close prior doc threw (continuing): {ex.Message}");
+            }
+            _model = null;
             _model = EnsurePart();
-            return new { ok = true, registry_cleared = true };
+            FileLog($"  beginPlan: opened fresh part '{_model?.GetTitle()}'");
+            return new { ok = true, registry_cleared = true,
+                          fresh_doc = _model?.GetTitle() };
         }
 
         private object OpAddParameter(Dictionary<string, object> p)
