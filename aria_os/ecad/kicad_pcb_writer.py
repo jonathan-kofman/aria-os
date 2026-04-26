@@ -292,7 +292,6 @@ def write_kicad_pcb(
     )
 {(_LAYERS_4L if n_layers >= 4 else _LAYERS_2L)}
     (setup
-{_net_classes_sexpr(nets)}
         (pad_to_mask_clearance 0.051)
         (solder_mask_min_width 0.05)
         (pcbplotparams
