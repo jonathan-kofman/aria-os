@@ -636,6 +636,77 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
              "mode": req.mode, "quality_tier": req.quality_tier}
 
 
+# --------------------------------------------------------------------------- #
+# Quickstart endpoint — YC-application "single textarea" entry point.
+# Thin wrapper around the same pipeline path /api/generate uses, but tagged
+# as `surface=quickstart` in the run manifest / event stream so we can
+# distinguish quickstart traffic from chat-panel / dashboard traffic later
+# without duplicating any orchestrator logic.
+# --------------------------------------------------------------------------- #
+
+class QuickstartRequest(BaseModel):
+    """Body schema for POST /api/v1/quickstart/generate.
+
+    Only `goal` is required. `mode` here is the *input mode* — how the
+    user typed the prompt (text / voice / image) — not the pipeline
+    routing mode. The pipeline routing mode is auto-detected from the
+    goal text via _auto_detect_mode (same logic /api/generate uses).
+    """
+    goal: str
+    mode: str = "text"               # input mode: text | voice | image
+    quality_tier: str = "balanced"   # fast | balanced | premium
+    max_attempts: int = 3
+
+
+@app.post("/api/v1/quickstart/generate")
+async def quickstart_generate(req: QuickstartRequest):
+    """Quickstart launchpad: single-textarea → full ARIA pipeline.
+
+    Wraps the same `_run_pipeline` helper that /api/generate calls.
+    Differences:
+      - tags the run as surface=quickstart in the event stream
+      - auto-routes to a pipeline mode via _auto_detect_mode (the user
+        on the quickstart page never picks mechanical/electrical/etc.)
+      - returns the same SSE-shaped response so the frontend can subscribe
+        to /api/log/stream just like the dashboard does
+
+    Frontend should subscribe to /api/log/stream for live progress.
+    """
+    goal = (req.goal or "").strip()
+    if not goal:
+        raise HTTPException(status_code=422,
+                             detail="goal must be a non-empty string")
+    pipeline_mode = _auto_detect_mode(goal)
+    # Surface tag — purely diagnostic. Lands in the SSE log so analytics
+    # can grep "surface=quickstart" without us touching the orchestrator
+    # or the run_manifest schema.
+    event_bus.emit(
+        "step",
+        f"Quickstart: surface=quickstart input_mode={req.mode} "
+        f"routed_mode={pipeline_mode}",
+        {"surface": "quickstart",
+         "input_mode": req.mode,
+         "routed_mode": pipeline_mode,
+         "goal": goal,
+         "quality_tier": req.quality_tier})
+    event_bus.emit(
+        "step", f"Received goal: {goal[:80]}",
+        {"goal": goal, "mode": pipeline_mode,
+         "quality_tier": req.quality_tier,
+         "surface": "quickstart"})
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _run_pipeline,
+                          goal, req.max_attempts,
+                          pipeline_mode, req.quality_tier,
+                          None)
+    return {"status": "started",
+             "goal": goal,
+             "mode": pipeline_mode,
+             "input_mode": req.mode,
+             "surface": "quickstart",
+             "quality_tier": req.quality_tier}
+
+
 @app.get("/api/log/stream")
 async def log_stream():
     """SSE endpoint — streams pipeline events to this specific subscriber.

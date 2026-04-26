@@ -8,6 +8,11 @@ import App from "./App.jsx";
 // the host C#/Python code before navigating.
 const ChatPanel = lazy(() => import("./panels/ChatPanel.jsx"));
 
+// /quickstart — YC-application "single textarea" landing page. Loaded
+// lazily so it doesn't bloat the dashboard bundle, and so its presence
+// does not affect the existing /chat or dashboard routes.
+const QuickstartTab = lazy(() => import("./tabs/QuickstartTab.jsx"));
+
 function _isHostedPanel() {
   try {
     const q = new URLSearchParams(window.location.search);
@@ -20,7 +25,25 @@ function _isHostedPanel() {
   } catch { return false; }
 }
 
+function _isQuickstartRoute() {
+  try {
+    if (typeof window === "undefined") return false;
+    const path = (window.location?.pathname || "").toLowerCase();
+    // Match /quickstart and /quickstart/...
+    return path === "/quickstart" || path.startsWith("/quickstart/");
+  } catch { return false; }
+}
+
 function Root() {
+  // /quickstart wins over the hosted-panel check so a hosted CAD that
+  // navigates to /quickstart still gets the simple landing page.
+  if (_isQuickstartRoute()) {
+    return (
+      <Suspense fallback={<div style={{padding:20,fontFamily:"Inter,sans-serif",color:"#9CA3B0"}}>Loading…</div>}>
+        <QuickstartTab />
+      </Suspense>
+    );
+  }
   if (_isHostedPanel()) {
     return (
       <Suspense fallback={<div style={{padding:20,fontFamily:"Inter,sans-serif"}}>Loading…</div>}>
