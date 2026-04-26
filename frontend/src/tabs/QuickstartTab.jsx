@@ -263,13 +263,172 @@ function ImageChip({ onSubmit, disabled }) {
 }
 
 // ---------------------------------------------------------------------------
+// ClarifyView — shown when /api/clarify identifies missing critical
+// fields. Renders one row per question with options (radio chips) or a
+// free-text fallback. User can answer none/some/all and hit Generate;
+// answers get appended to the goal as a "## Clarifications" block.
+// ---------------------------------------------------------------------------
+function ClarifyView({ data, answers, setAnswers, onGenerate, onSkip, onBack }) {
+  const update = (field, value) => {
+    setAnswers(prev => ({ ...prev, [field]: value }));
+  };
+  const allAnswered = data.clarifications.every(
+    c => (answers[c.field] || "").toString().trim() !== "");
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: C.bg0, color: C.text0,
+      fontFamily: FONT, padding: "48px 24px",
+      display: "flex", flexDirection: "column", alignItems: "center",
+    }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');*{box-sizing:border-box}textarea,input,select{outline:none;font-family:inherit}`}</style>
+      <div style={{ maxWidth: 760, width: "100%" }}>
+        <div style={{
+          fontSize: 11, letterSpacing: "0.18em", color: C.brand,
+          fontFamily: FONT_MONO, marginBottom: 12, textTransform: "uppercase",
+        }}>
+          ARIA-OS - clarify
+        </div>
+        <h1 style={{
+          fontSize: "clamp(22px, 3vw, 30px)", fontWeight: 700,
+          margin: "0 0 6px", letterSpacing: "-0.02em",
+        }}>
+          A few specifics first.
+        </h1>
+        <div style={{
+          color: C.text2, fontSize: 14, marginBottom: 8,
+        }}>
+          {data.summary || data.goal}
+        </div>
+        {data.part_family && (
+          <div style={{
+            display: "inline-block", padding: "3px 10px",
+            background: C.brandSoft, color: C.brand,
+            borderRadius: 100, fontSize: 11, fontFamily: FONT_MONO,
+            marginBottom: 24,
+          }}>
+            detected: {data.part_family}
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          {data.clarifications.map((c, i) => (
+            <div key={c.field || i} style={{
+              padding: "16px 18px",
+              background: C.bg1,
+              border: `1px solid ${C.border}`,
+              borderRadius: 12,
+            }}>
+              <div style={{
+                fontSize: 14, fontWeight: 600, marginBottom: 4,
+                color: C.text0,
+              }}>
+                {c.question}
+              </div>
+              {c.rationale && (
+                <div style={{
+                  fontSize: 12, color: C.text3, marginBottom: 12,
+                  fontStyle: "italic",
+                }}>
+                  {c.rationale}
+                </div>
+              )}
+              {(c.options && c.options.length > 0) ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {c.options.map(opt => {
+                    const ov = typeof opt === "object"
+                      ? (opt.value ?? opt.label ?? "")
+                      : opt;
+                    const ol = typeof opt === "object"
+                      ? (opt.label ?? opt.value ?? "")
+                      : opt;
+                    const selected = String(answers[c.field] || "") === String(ov);
+                    return (
+                      <button key={String(ov)}
+                        onClick={() => update(c.field, ov)}
+                        style={{
+                          padding: "7px 14px",
+                          borderRadius: 100,
+                          border: `1px solid ${selected ? C.brand : C.border}`,
+                          background: selected ? C.brandSoft : C.bg2,
+                          color: selected ? C.brand : C.text1,
+                          fontSize: 12, cursor: "pointer",
+                          fontFamily: FONT,
+                        }}>
+                        {ol}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <input type="text"
+                  value={answers[c.field] || ""}
+                  onChange={e => update(c.field, e.target.value)}
+                  placeholder={c.default ? `default: ${c.default}` : "your answer"}
+                  style={{
+                    width: "100%", padding: "8px 12px",
+                    background: C.bg2, color: C.text0,
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 8, fontSize: 13,
+                  }} />
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div style={{
+          marginTop: 28, display: "flex", gap: 10, alignItems: "center",
+          justifyContent: "flex-end",
+        }}>
+          <button onClick={onBack}
+            style={{
+              padding: "9px 16px", borderRadius: 8,
+              border: `1px solid ${C.border}`, background: "transparent",
+              color: C.text2, fontSize: 12, cursor: "pointer", fontFamily: FONT,
+            }}>
+            Back
+          </button>
+          <button onClick={onSkip}
+            title="Generate using engineering defaults instead of answering"
+            style={{
+              padding: "9px 16px", borderRadius: 8,
+              border: `1px solid ${C.border}`, background: C.bg2,
+              color: C.text1, fontSize: 12, cursor: "pointer", fontFamily: FONT,
+            }}>
+            Skip - use defaults
+          </button>
+          <button onClick={onGenerate}
+            style={{
+              padding: "10px 22px", borderRadius: 10, border: "none",
+              background: `linear-gradient(135deg, ${C.brand}, #FF9D4A)`,
+              color: "#0A0A0F", fontSize: 13, fontWeight: 700,
+              letterSpacing: "0.04em", cursor: "pointer", fontFamily: FONT,
+            }}>
+            {allAnswered ? "Generate ->" : "Generate with these ->"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 export default function QuickstartTab() {
-  // Phase: "intro" (just the textarea) → "running" (results view + stream)
+  // Phase: "intro" (textarea)
+  //     -> "clarify" (LLM identified missing critical fields, render Q form)
+  //     -> "running" (results view + SSE stream)
   const [phase, setPhase] = useState("intro");
   const [goal, setGoal] = useState("");
   const [running, setRunning] = useState(false);
+  // Clarification state -- populated by /api/clarify when prompt is
+  // ambiguous. `clarifyData` holds the questions; `clarifyAnswers`
+  // accumulates the user's answers as they fill the form.
+  const [clarifyLoading, setClarifyLoading] = useState(false);
+  const [clarifyData, setClarifyData] = useState(null);
+  const [clarifyAnswers, setClarifyAnswers] = useState({});
   const [events, setEvents] = useState([]);
   const [pipelineStatus, setPipelineStatus] = useState("idle");
   const streamRef = useRef(null);
@@ -301,11 +460,13 @@ export default function QuickstartTab() {
   }, []);
 
   // ------------------------------------------------------------------
-  // Submit — POSTs the goal to the new quickstart endpoint, then opens
-  // the shared /api/log/stream SSE channel.
+  // runPipelineWithGoal -- internal helper that does the actual work.
+  // POSTs the goal to /api/v1/quickstart/generate and opens the shared
+  // /api/log/stream SSE channel. Caller is responsible for goal text
+  // (already augmented with clarifications when applicable).
   // ------------------------------------------------------------------
-  const submit = useCallback(async () => {
-    const trimmed = goal.trim();
+  const runPipelineWithGoal = useCallback(async (goalText) => {
+    const trimmed = (goalText || "").trim();
     if (!trimmed || running) return;
     setRunning(true);
     setPhase("running");
@@ -488,7 +649,71 @@ export default function QuickstartTab() {
         dfm: "error", quote: "error",
       });
     }
-  }, [goal, running, setSection]);
+  }, [running, setSection]);
+
+  // ------------------------------------------------------------------
+  // submit -- the user-facing entry. Asks /api/clarify whether the
+  // prompt is specific enough, and if not, transitions to the clarify
+  // form. Otherwise (or on clarify error) calls runPipelineWithGoal.
+  //
+  // Pattern mirrors ChatPanel.jsx's submit + submitWithClarifications
+  // intentionally so the two surfaces stay in sync.
+  // ------------------------------------------------------------------
+  const submit = useCallback(async () => {
+    const trimmed = goal.trim();
+    if (!trimmed || running) return;
+    setClarifyLoading(true);
+    try {
+      const r = await fetch(api("/clarify"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goal: trimmed, quality_tier: "fast" }),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        if (!j.enough_info && (j.clarifications || []).length > 0) {
+          setClarifyData({
+            goal: trimmed,
+            part_family: j.part_family || "",
+            summary: j.summary || "",
+            clarifications: j.clarifications,
+          });
+          // Pre-fill answers with each question's `default` so the user
+          // can hit Generate immediately if defaults look right.
+          setClarifyAnswers(Object.fromEntries(
+            j.clarifications.map(c => [c.field, c.default || ""])
+          ));
+          setPhase("clarify");
+          setClarifyLoading(false);
+          return;
+        }
+      }
+    } catch { /* non-fatal -- proceed to pipeline without clarify */ }
+    setClarifyLoading(false);
+    await runPipelineWithGoal(trimmed);
+  }, [goal, running, runPipelineWithGoal]);
+
+  // ------------------------------------------------------------------
+  // submitClarifications -- called by the clarify form's Generate
+  // button. Augments the original goal with the user's answers and
+  // dispatches into the pipeline. If user hit Skip (empty answers),
+  // falls back to the original goal.
+  // ------------------------------------------------------------------
+  const submitClarifications = useCallback(async (answers) => {
+    if (!clarifyData) return;
+    const entries = Object.entries(answers || {})
+      .filter(([, v]) => v != null && String(v).trim() !== "");
+    const augmented = entries.length > 0
+      ? clarifyData.goal + "\n\n## Clarifications\n"
+        + entries.map(([k, v]) => `- ${k}: ${v}`).join("\n")
+      : clarifyData.goal;
+    await runPipelineWithGoal(augmented);
+  }, [clarifyData, runPipelineWithGoal]);
+
+  const skipClarifications = useCallback(async () => {
+    if (!clarifyData) return;
+    await runPipelineWithGoal(clarifyData.goal);
+  }, [clarifyData, runPipelineWithGoal]);
 
   const onKeyDown = (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -503,6 +728,9 @@ export default function QuickstartTab() {
     }
     setPhase("intro");
     setRunning(false);
+    setClarifyData(null);
+    setClarifyAnswers({});
+    setClarifyLoading(false);
     setEvents([]);
     setPipelineStatus("idle");
     setMcadArtifact(null);
@@ -518,6 +746,19 @@ export default function QuickstartTab() {
   // ------------------------------------------------------------------
   // Render
   // ------------------------------------------------------------------
+  if (phase === "clarify" && clarifyData) {
+    return (
+      <ClarifyView
+        data={clarifyData}
+        answers={clarifyAnswers}
+        setAnswers={setClarifyAnswers}
+        onGenerate={() => submitClarifications(clarifyAnswers)}
+        onSkip={skipClarifications}
+        onBack={() => { setPhase("intro"); setClarifyData(null); }}
+      />
+    );
+  }
+
   if (phase === "intro") {
     return (
       <div style={{
@@ -614,7 +855,7 @@ export default function QuickstartTab() {
               </div>
               <button
                 onClick={submit}
-                disabled={!goal.trim() || running}
+                disabled={!goal.trim() || running || clarifyLoading}
                 style={{
                   padding: "10px 22px",
                   borderRadius: 10,
@@ -625,11 +866,13 @@ export default function QuickstartTab() {
                   color: goal.trim() ? "#0A0A0F" : C.text3,
                   fontWeight: 700,
                   letterSpacing: "0.04em",
-                  cursor: goal.trim() ? "pointer" : "not-allowed",
+                  cursor: (goal.trim() && !clarifyLoading) ? "pointer" : "not-allowed",
                   fontSize: 13,
                   fontFamily: FONT,
                 }}>
-                {running ? "Submitting…" : "Generate ->"}
+                {clarifyLoading
+                  ? "Analyzing..."
+                  : (running ? "Submitting..." : "Generate ->")}
               </button>
             </div>
           </div>
