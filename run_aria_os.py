@@ -1403,6 +1403,27 @@ def main():
                     print(summarize(aset))
                 except Exception as _xe:
                     print(f"[ECAD artifacts] export_all_artifacts threw: {_xe}")
+
+        # --- Build instructions doc ---
+        # Walk every BOM JSON in the run dir and emit one BUILD.md per
+        # board (and a combined one if there's more than one). Cheap and
+        # always useful — gives the user a printable assembly guide
+        # alongside the Gerbers + STEP. Best-effort.
+        try:
+            from aria_os.build_doc import generate_build_doc
+            _all_boms = list(_ecad_out_path.rglob("*_bom.json"))
+            if _all_boms:
+                _build_dir = _ecad_out_path / "build"
+                _doc_paths = generate_build_doc(
+                    out_dir=_build_dir,
+                    ecad_boms=_all_boms,
+                    project_name=_ecad_desc[:80] or "ARIA assembly",
+                )
+                print(f"[BUILD DOC] {_doc_paths['md'].name} + "
+                      f"{_doc_paths['json'].name} + "
+                      f"{_doc_paths['csv'].name} -> {_build_dir}")
+        except Exception as _be:
+            print(f"[BUILD DOC] failed: {_be}")
         return
 
     if len(sys.argv) >= 2 and sys.argv[1] == "--autocad":
