@@ -297,6 +297,23 @@ namespace AriaPanel
             var doc = RhinoDoc.ActiveDoc
                       ?? throw new InvalidOperationException("No active Rhino document");
 
+            // Same alias map as the SW addin — LLM planners drift from
+            // canonical op names; map the common variants so the plan
+            // doesn't crash on a small naming inconsistency.
+            kind = kind switch
+            {
+                "sketchRectangle"  => "sketchRect",
+                "rectangle"        => "sketchRect",
+                "rect"             => "sketchRect",
+                "circle"           => "sketchCircle",
+                "newPart"          => "beginPlan",
+                "extrudeBoss"      => "extrude",
+                "extrudeCut"       => "extrude",
+                "boss"             => "extrude",
+                "patternCircular"  => "circularPattern",
+                _ => kind,
+            };
+
             return kind switch
             {
                 "beginPlan"       => OpBeginPlan(doc, p),

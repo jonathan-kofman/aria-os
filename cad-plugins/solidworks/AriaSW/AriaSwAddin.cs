@@ -156,6 +156,24 @@ namespace AriaSW
             FileLog($"  exec: {kind}");
             try
             {
+                // LLM planners occasionally hallucinate aliases for op
+                // names (sketchRectangle for sketchRect, extrudeCut for
+                // extrude operation=cut). Map aliases so a small naming
+                // drift doesn't kill the whole plan.
+                kind = kind switch
+                {
+                    "sketchRectangle"  => "sketchRect",
+                    "rectangle"        => "sketchRect",
+                    "rect"             => "sketchRect",
+                    "circle"           => "sketchCircle",
+                    "newPart"          => "beginPlan",
+                    "extrudeBoss"      => "extrude",
+                    "extrudeCut"       => "extrude",
+                    "boss"             => "extrude",
+                    "cut"              => "extrude",
+                    "patternCircular"  => "circularPattern",
+                    _ => kind,
+                };
                 return kind switch
                 {
                     "beginPlan"       => OpBeginPlan(),

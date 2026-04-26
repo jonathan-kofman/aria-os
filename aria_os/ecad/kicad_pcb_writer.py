@@ -33,64 +33,70 @@ from typing import Any
 from uuid import uuid4
 
 
-# KiCad standard layer stack for a 2-layer board
+# KiCad 9/10 layer stack — the layer ordinals were remapped in KiCad 9
+# from the legacy KiCad 7 numbering. Notably F.Cu=0 still, but B.Cu=2
+# (was 31). DRC/Gerber export in KiCad 10 rejects boards using the
+# old numbering with a generic "Failed to load board" error. Renderers
+# (SVG export) are lenient and accept either, which is why we didn't
+# notice until trying gerbers.
+#
+# Reference: a fresh empty board saved by KiCad 10.0.1.
 _LAYERS_2L = """\
     (layers
         (0 "F.Cu" signal)
-        (31 "B.Cu" signal)
-        (32 "B.Adhes" user "B.Adhesive")
-        (33 "F.Adhes" user "F.Adhesive")
-        (34 "B.Paste" user)
-        (35 "F.Paste" user)
-        (36 "B.SilkS" user "B.Silkscreen")
-        (37 "F.SilkS" user "F.Silkscreen")
-        (38 "B.Mask" user)
-        (39 "F.Mask" user)
-        (40 "Dwgs.User" user "User.Drawings")
-        (41 "Cmts.User" user "User.Comments")
-        (42 "Eco1.User" user "User.Eco1")
-        (43 "Eco2.User" user "User.Eco2")
-        (44 "Edge.Cuts" user)
-        (45 "Margin" user)
-        (46 "B.CrtYd" user "B.Courtyard")
-        (47 "F.CrtYd" user "F.Courtyard")
-        (48 "B.Fab" user)
-        (49 "F.Fab" user)
-        (50 "User.1" user)
-        (51 "User.2" user)
-        (52 "User.3" user)
-        (53 "User.4" user)
-        (54 "User.5" user)
+        (2 "B.Cu" signal)
+        (9 "F.Adhes" user "F.Adhesive")
+        (11 "B.Adhes" user "B.Adhesive")
+        (13 "F.Paste" user)
+        (15 "B.Paste" user)
+        (5 "F.SilkS" user "F.Silkscreen")
+        (7 "B.SilkS" user "B.Silkscreen")
+        (1 "F.Mask" user)
+        (3 "B.Mask" user)
+        (17 "Dwgs.User" user "User.Drawings")
+        (19 "Cmts.User" user "User.Comments")
+        (21 "Eco1.User" user "User.Eco1")
+        (23 "Eco2.User" user "User.Eco2")
+        (25 "Edge.Cuts" user)
+        (27 "Margin" user)
+        (31 "F.CrtYd" user "F.Courtyard")
+        (29 "B.CrtYd" user "B.Courtyard")
+        (35 "F.Fab" user)
+        (33 "B.Fab" user)
+        (39 "User.1" user)
+        (41 "User.2" user)
+        (43 "User.3" user)
+        (45 "User.4" user)
+        (47 "User.5" user)
     )"""
 
 
-# 4-layer stack (SIG1 / GND / PWR / SIG2) — industry-standard controlled-
-# impedance stackup for signal-integrity-sensitive designs (USB, DDR,
-# high-speed digital). Matches JLCPCB/OSHPark 4-layer templates.
+# 4-layer stack — KiCad 9/10 numbering. F.Cu=0, In1.Cu=4, In2.Cu=6,
+# B.Cu=2.
 _LAYERS_4L = """\
     (layers
         (0 "F.Cu" signal)
-        (1 "In1.Cu" power "GND")
-        (2 "In2.Cu" power "PWR")
-        (31 "B.Cu" signal)
-        (32 "B.Adhes" user "B.Adhesive")
-        (33 "F.Adhes" user "F.Adhesive")
-        (34 "B.Paste" user)
-        (35 "F.Paste" user)
-        (36 "B.SilkS" user "B.Silkscreen")
-        (37 "F.SilkS" user "F.Silkscreen")
-        (38 "B.Mask" user)
-        (39 "F.Mask" user)
-        (40 "Dwgs.User" user "User.Drawings")
-        (41 "Cmts.User" user "User.Comments")
-        (42 "Eco1.User" user "User.Eco1")
-        (43 "Eco2.User" user "User.Eco2")
-        (44 "Edge.Cuts" user)
-        (45 "Margin" user)
-        (46 "B.CrtYd" user "B.Courtyard")
-        (47 "F.CrtYd" user "F.Courtyard")
-        (48 "B.Fab" user)
-        (49 "F.Fab" user)
+        (4 "In1.Cu" power "GND")
+        (6 "In2.Cu" power "PWR")
+        (2 "B.Cu" signal)
+        (9 "F.Adhes" user "F.Adhesive")
+        (11 "B.Adhes" user "B.Adhesive")
+        (13 "F.Paste" user)
+        (15 "B.Paste" user)
+        (5 "F.SilkS" user "F.Silkscreen")
+        (7 "B.SilkS" user "B.Silkscreen")
+        (1 "F.Mask" user)
+        (3 "B.Mask" user)
+        (17 "Dwgs.User" user "User.Drawings")
+        (19 "Cmts.User" user "User.Comments")
+        (21 "Eco1.User" user "User.Eco1")
+        (23 "Eco2.User" user "User.Eco2")
+        (25 "Edge.Cuts" user)
+        (27 "Margin" user)
+        (31 "F.CrtYd" user "F.Courtyard")
+        (29 "B.CrtYd" user "B.Courtyard")
+        (35 "F.Fab" user)
+        (33 "B.Fab" user)
     )"""
 
 
@@ -284,7 +290,7 @@ def write_kicad_pcb(
     # Final s-expression
     timestamp = int(time.time())
     pcb = f'''(kicad_pcb
-    (version 20221018)
+    (version 20240108)
     (generator "aria_os.kicad_pcb_writer")
     (general
         (thickness {pcb_thk_mm:.2f})

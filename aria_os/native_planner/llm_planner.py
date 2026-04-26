@@ -532,29 +532,54 @@ def _normalize_op(item) -> dict | None:
     return None
 
 
+def _strip_md_fence(s: str) -> str:
+    """If `s` is wrapped in ```json … ``` (or ``` … ```), return the inner
+    body. Tolerant of unclosed fences (LLM truncation) — strips just the
+    opening fence in that case so balance-matching can still find the array.
+    """
+    s = s.strip()
+    if not s.startswith("```"):
+        return s
+    first_nl = s.find("\n")
+    if first_nl < 0:
+        return s
+    body = s[first_nl + 1:]
+    last_fence = body.rfind("```")
+    if last_fence > 0:
+        body = body[:last_fence]
+    return body.strip()
+
+
 def _parse_candidates(text: str) -> list[str]:
     """Yield progressively-more-lenient candidate JSON array strings."""
     cands = []
     s = text.strip()
     cands.append(s)
-    # Markdown fence
+    # Strip ```json …``` (or ``` …```) fences before any other matching —
+    # the previous regex required *both* opening AND closing fences which
+    # missed truncated streams. Now we tolerate either form.
+    fenced = _strip_md_fence(s)
+    if fenced != s:
+        cands.append(fenced)
+    # Markdown fence (legacy regex form, kept as belt-and-braces)
     m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
     if m: cands.append(m.group(1))
     # First top-level bracketed region
     m = re.search(r"(\[\s*[\{\"].*?\s*\])", text, re.DOTALL)
     if m: cands.append(m.group(1))
     # Aggressive: balance-match the first [ … ]
-    start = text.find("[")
-    if start >= 0:
-        depth = 0
-        for i in range(start, len(text)):
-            c = text[i]
-            if c == "[": depth += 1
-            elif c == "]":
-                depth -= 1
-                if depth == 0:
-                    cands.append(text[start:i+1])
-                    break
+    for source in (fenced, text):
+        start = source.find("[")
+        if start >= 0:
+            depth = 0
+            for i in range(start, len(source)):
+                c = source[i]
+                if c == "[": depth += 1
+                elif c == "]":
+                    depth -= 1
+                    if depth == 0:
+                        cands.append(source[start:i+1])
+                        break
     return cands
 
 

@@ -328,6 +328,201 @@ def text_to_part(req: TextToPartRequest):
 
 
 # --------------------------------------------------------------------------- #
+# /api/ecad/text-to-board — end-to-end autonomous flow for ECAD.
+#
+# Mirrors /api/cad/text-to-part. Takes (goal). Uses the existing
+# aria_os.ecad.ecad_generator pipeline as the "planner" (it already
+# produces a high-quality BOM with real footprints + netlists from a
+# natural-language goal). Translates each BOM component into a
+# placeComponent op, dispatches to the KiCad listener on port 7505,
+# adds GND zones, saves, and exports gerbers.
+#
+# Per the user's MCAD↔ECAD allowance: this endpoint can also accept
+# an optional `mcad_constraints` dict (board outline / mounting holes
+# from the matching enclosure) so a future MCAD pass can drive PCB
+# perimeter from the SW/Rhino enclosure. No SW↔ECAD coupling beyond
+# this — both remain otherwise self-contained.
+# --------------------------------------------------------------------------- #
+
+class TextToBoardRequest(BaseModel):
+    goal: str
+    quality_tier: str = "balanced"
+    add_ground_zone: bool = True
+    export_gerbers: bool = True
+    mcad_constraints: dict | None = None
+
+
+_ECAD_BASE_URL = {
+    "kicad": "http://localhost:7505",
+}
+
+
+@app.post("/api/ecad/text-to-board")
+def text_to_board(req: TextToBoardRequest):
+    """End-to-end: goal text → BOM → KiCad listener → .kicad_pcb + Gerbers."""
+    import httpx as _httpx
+
+    base = _ECAD_BASE_URL["kicad"]
+
+    # Confirm the listener is up — fail fast with a useful error.
+    try:
+        with _httpx.Client(timeout=5.0) as c:
+            status = c.get(f"{base}/status").json()
+            if not status.get("ok"):
+                raise HTTPException(502,
+                    f"kicad listener not ready: {status}")
+    except Exception as exc:
+        raise HTTPException(502,
+            f"kicad listener at {base} unreachable: "
+            f"{type(exc).__name__}: {exc}")
+
+    # Use the existing ECAD pipeline as the planner. parse_components
+    # + LLM enrichment + net assignment + place_components is a much
+    # higher-quality "planner" than asking the LLM to emit raw ops.
+    try:
+        from aria_os.ecad.ecad_generator import (
+            parse_components,
+            _llm_enrich_components,
+            _compute_mcu_peripheral_nets,
+            _assign_component_nets,
+            place_components,
+            parse_board_dimensions,
+            _slug,
+        )
+    except Exception as exc:
+        raise HTTPException(500,
+            f"ecad_generator import failed: {type(exc).__name__}: {exc}")
+
+    board_name = _slug(req.goal)
+    try:
+        # MCAD constraints can override the parsed board dims (the
+        # enclosure sets the hard outline — the PCB shrinks to fit).
+        if req.mcad_constraints:
+            board_w = float(req.mcad_constraints.get("board_w_mm",
+                            req.mcad_constraints.get("width_mm", 0)))
+            board_h = float(req.mcad_constraints.get("board_h_mm",
+                            req.mcad_constraints.get("height_mm", 0)))
+            if not (board_w and board_h):
+                board_w, board_h = parse_board_dimensions(req.goal)
+        else:
+            board_w, board_h = parse_board_dimensions(req.goal)
+
+        components = parse_components(req.goal)
+        components = _llm_enrich_components(req.goal, components, REPO_ROOT)
+        _compute_mcu_peripheral_nets(components, req.goal)
+        _assign_component_nets(components, req.goal)
+        place_components(components, board_w, board_h)
+    except Exception as exc:
+        raise HTTPException(500,
+            f"ecad planner failed: {type(exc).__name__}: {exc}")
+    if not components:
+        return {"ok": False, "error": "no components parsed from goal",
+                 "goal": req.goal}
+
+    # Dispatch via the KiCad listener.
+    results = []
+    failed_at = None
+    layers = 4 if any("4-layer" in (c.description or "").lower()
+                       or "4 layer" in (c.description or "").lower()
+                       for c in components) else 2
+    n_layers = 4 if "4-layer" in req.goal.lower() or "4 layer" in req.goal.lower() else 2
+
+    with _httpx.Client(timeout=120.0) as c:
+        # 1. newBoard
+        r = c.post(f"{base}/new_board", json={
+            "name":        board_name,
+            "board_w_mm":  board_w,
+            "board_h_mm":  board_h,
+            "n_layers":    n_layers,
+        })
+        results.append({"i": 0, "kind": "newBoard", "ok": r.json().get("ok"),
+                         "result": r.json()})
+
+        # 2. placeComponent for each parsed component
+        for i, comp in enumerate(components, start=1):
+            payload = {"kind": "placeComponent", "params": {
+                "ref":          comp.ref,
+                "value":        comp.value,
+                "footprint":    comp.footprint,
+                "x_mm":         comp.x_mm,
+                "y_mm":         comp.y_mm,
+                "width_mm":     comp.width_mm,
+                "height_mm":    comp.height_mm,
+                "rotation_deg": 0.0,
+                "nets":         list(comp.nets) if comp.nets
+                                else (list(set(comp.net_map.values()))
+                                      if comp.net_map else []),
+                "net_map":      dict(comp.net_map) if comp.net_map else {},
+                "description":  comp.description,
+            }}
+            try:
+                r = c.post(f"{base}/op", json=payload)
+                rj = r.json()
+                results.append({
+                    "i": i, "kind": "placeComponent",
+                    "ref": comp.ref, "value": comp.value,
+                    "ok": (rj.get("result") or {}).get("ok", rj.get("ok")),
+                    "result": rj.get("result"),
+                })
+                if not results[-1]["ok"]:
+                    failed_at = i
+                    break
+            except Exception as exc:
+                results.append({"i": i, "kind": "placeComponent",
+                                 "ref": comp.ref, "ok": False,
+                                 "error": f"transport: "
+                                          f"{type(exc).__name__}: {exc}"})
+                failed_at = i
+                break
+
+        # 3. addZone (GND copper pour) — usually wanted on B.Cu
+        if req.add_ground_zone and failed_at is None:
+            r = c.post(f"{base}/op", json={"kind": "addZone", "params": {
+                "net_name": "GND", "layer": "B.Cu",
+            }})
+            rj = r.json()
+            results.append({"i": len(results), "kind": "addZone",
+                             "ok": (rj.get("result") or {}).get("ok",
+                                                                  rj.get("ok")),
+                             "result": rj.get("result")})
+
+        # 4. save_pcb
+        if failed_at is None:
+            r = c.post(f"{base}/save_pcb", json={})
+            save_result = r.json()
+            results.append({"i": len(results), "kind": "save_pcb",
+                             "ok": save_result.get("ok"),
+                             "result": save_result})
+
+        # 5. export_gerbers (optional)
+        gerber_result = None
+        if req.export_gerbers and failed_at is None:
+            r = c.post(f"{base}/export_gerbers", json={})
+            gerber_result = r.json()
+            results.append({"i": len(results), "kind": "export_gerbers",
+                             "ok": bool(gerber_result.get("available") and
+                                         not gerber_result.get("error")),
+                             "result": gerber_result})
+
+    n_ok = sum(1 for r in results if r["ok"])
+    return {
+        "ok":               failed_at is None,
+        "cad":              "kicad",
+        "goal":             req.goal,
+        "board_name":       board_name,
+        "board_w_mm":       board_w,
+        "board_h_mm":       board_h,
+        "n_layers":         n_layers,
+        "n_components":     len(components),
+        "n_ops_dispatched": len(results),
+        "n_ops_succeeded":  n_ok,
+        "failed_at":        failed_at,
+        "gerber_export":    gerber_result,
+        "results":          results,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Pipeline runner (runs in background thread to keep FastAPI responsive)
 # --------------------------------------------------------------------------- #
 
