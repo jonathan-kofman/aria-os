@@ -398,13 +398,53 @@ namespace AriaPanel
         {
             _featureRegistry.Clear();
             _sketchCurves.Clear();
+            _sketchPlanes.Clear();
+            _sketchNames.Clear();
+            // Wipe any objects on ARIA::* layers so subsequent runs in the
+            // same Rhino doc don't stack on top of stale geometry. The user
+            // explicitly requested "fresh for each component". We delete
+            // only ARIA-namespaced objects — anything the user added to
+            // their own layers is preserved.
+            int deleted = 0;
+            try
+            {
+                var ariaLayerIds = new HashSet<int>();
+                foreach (var layer in doc.Layers)
+                {
+                    if (layer.IsDeleted) continue;
+                    if (layer.FullPath != null && layer.FullPath.StartsWith("ARIA"))
+                    {
+                        ariaLayerIds.Add(layer.Index);
+                    }
+                }
+                if (ariaLayerIds.Count > 0)
+                {
+                    var toDelete = new List<Guid>();
+                    foreach (var ro in doc.Objects)
+                    {
+                        if (ro?.Attributes != null && ariaLayerIds.Contains(ro.Attributes.LayerIndex))
+                        {
+                            toDelete.Add(ro.Id);
+                        }
+                    }
+                    foreach (var id in toDelete)
+                    {
+                        if (doc.Objects.Delete(id, true)) deleted++;
+                    }
+                }
+                doc.Views.Redraw();
+            }
+            catch (Exception ex)
+            {
+                RhinoApp.WriteLine($"AriaBridge.OpBeginPlan cleanup warning: {ex.Message}");
+            }
             // Make sure the ARIA layer hierarchy exists so ops go to the
             // right place immediately.
             EnsureLayer(doc, "ARIA::Sketches");
             EnsureLayer(doc, "ARIA::Bodies");
             EnsureLayer(doc, "ARIA::Cuts");
             EnsureLayer(doc, "ARIA::Patterns");
-            return new { ok = true, registry_cleared = true };
+            return new { ok = true, registry_cleared = true, objects_deleted = deleted };
         }
 
         private static Plane ResolvePlane(string spec) => spec?.ToUpperInvariant() switch

@@ -265,6 +265,13 @@ def text_to_part(req: TextToPartRequest):
             status = c.get(f"{base}/status").json()
             if not status.get("ok"):
                 raise HTTPException(502, f"{cad} listener not ready: {status}")
+            # Fresh document before each generation — beginPlan only clears
+            # the in-memory registry, not the actual Rhino/SW doc objects.
+            # Without /new_doc the scene piles up across runs.
+            try: c.post(f"{base}/new_doc", json={}, timeout=15.0)
+            except Exception: pass
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(502,
             f"{cad} listener at {base} unreachable: {type(exc).__name__}: {exc}")
@@ -911,15 +918,24 @@ def board_and_enclosure(req: BoardAndEnclosureRequest):
     mcad_base = _CAD_BASE_URL[mcad]
     ecad_base = _ECAD_BASE_URL["kicad"]
 
-    # Confirm both listeners are up.
+    # Confirm both listeners are up + reset both doc states.
     try:
         with _httpx.Client(timeout=5.0) as c:
             ms = c.get(f"{mcad_base}/status").json()
             es = c.get(f"{ecad_base}/status").json()
-        if not ms.get("ok"):
-            raise HTTPException(502, f"mcad ({mcad}) listener: {ms}")
-        if not es.get("ok"):
-            raise HTTPException(502, f"ecad listener: {es}")
+            if not ms.get("ok"):
+                raise HTTPException(502, f"mcad ({mcad}) listener: {ms}")
+            if not es.get("ok"):
+                raise HTTPException(502, f"ecad listener: {es}")
+            # Fresh state for both halves — old objects must NOT leak across
+            # runs. ECAD uses /quit (drops state to defaults). MCAD uses
+            # /new_doc (opens a fresh Rhino/SW document).
+            try: c.post(f"{ecad_base}/quit", json={}, timeout=10.0)
+            except Exception: pass
+            try: c.post(f"{mcad_base}/new_doc", json={}, timeout=15.0)
+            except Exception: pass
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(502,
             f"listener check failed: {type(exc).__name__}: {exc}")
