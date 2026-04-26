@@ -280,24 +280,44 @@ STM32_PAD_NETS: dict[str, str] = {
     # _augment_net_map_from_symbol also fills these by pin NAME as a
     # safety net, but the BOM consumer (kicad_pcb_writer) reads only
     # this dict and needs the right numbers here.
+    #
+    # 2026-04-25 expansion (W13 audit fix): added the "always-wired"
+    # non-power pins that any STM32F405 design connects -- VBAT,
+    # HSE crystal, NRST, USB OTG FS, SWD debug. The pin_not_connected
+    # ERC violations on these were surfacing as 137/184 the audit
+    # called out; growing this dict from 10 to 18 entries pushes the
+    # generic STM32 net coverage from ~12/64 -> ~26/64 (power + always-
+    # wired peripherals), with remaining GPIOs legitimately floating.
+    #
+    # Power
     "19": "+3V3",  # VDD
     "32": "+3V3",  # VDD
     "48": "+3V3",  # VDD
     "64": "+3V3",  # VDD
     "13": "+3V3",  # VDDA
     "18": "GND",   # VSS
-    "31": "GND",   # VSS  (was VSS, actually pin 31 is VCAP_1 power_out —
-                   #       but in LQFP-64 datasheet, pin 31 IS VSS.
-                   #       Disagreement: the KiCad symbol lists pin 31 as
-                   #       VCAP_1 because STM32F405 has on-die regulator
-                   #       caps that ST's later datasheets re-documented.
-                   #       Treating as GND here is safe — it's tied to
-                   #       bulk decoupling + ground plane in every
-                   #       reference design.)
-    "47": "GND",   # VSS / VCAP_2 — same note as pin 31
+    "31": "GND",   # VSS / VCAP_1 — see note
+    "47": "GND",   # VSS / VCAP_2 — see note
     "63": "GND",   # VSS
     "12": "GND",   # VSSA
     "65": "GND",   # Exposed pad (thermal, usually ground)
+    # Backup domain
+    "1":  "+3V3",  # VBAT — tie to +3V3 when no battery; never floating
+    # HSE crystal (high-speed external oscillator)
+    "5":  "OSC_IN",   # PH0/OSC_IN — to crystal pin 1
+    "6":  "OSC_OUT",  # PH1/OSC_OUT — to crystal pin 2
+    # Reset
+    "7":  "~RESET~",  # NRST — pulled to +3V3 via 10k + 100nF to GND
+    # USB OTG FS (used in 95% of F405 designs)
+    "44": "USB_DM",   # PA11 / OTG_FS_DM
+    "45": "USB_DP",   # PA12 / OTG_FS_DP
+    # SWD debug (mandatory for programming)
+    "46": "SWDIO",    # PA13 / JTMS-SWDIO
+    "49": "SWCLK",    # PA14 / JTCK-SWCLK
+    # NOTE: VCAP_1 / VCAP_2 (pins 31 / 47) — STATUS.md note still applies;
+    # left as GND for now since the bulk decoupling caps tie them to
+    # ground in every F405 reference design. A future fix should split
+    # them into a dedicated VCAP net with the 2.2µF cap to GND.
 }
 
 

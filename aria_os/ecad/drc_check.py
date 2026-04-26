@@ -51,6 +51,18 @@ def _find_kicad_cli() -> str | None:
     return None
 
 
+def _find_kicad_python() -> str | None:
+    """Locate the python.exe bundled with KiCad. Used by autoroute.py to
+    invoke pcbnew.ImportSpecctraSES (which kicad-cli does NOT expose).
+    Sibling of kicad-cli.exe in <kicad>/bin/python.exe.
+    """
+    cli = _find_kicad_cli()
+    if cli is None:
+        return None
+    py = os.path.join(os.path.dirname(cli), "python.exe")
+    return py if os.path.isfile(py) else None
+
+
 def kicad_share_dir() -> str | None:
     """Return KiCad's share/kicad/ root (parent of symbols/, footprints/).
     Used by the symbol library lookup for real component symbols."""

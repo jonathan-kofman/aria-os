@@ -29,7 +29,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .drc_check import _find_kicad_cli
+from .drc_check import _find_kicad_cli, _find_kicad_python
 
 
 def _find_freerouting_jar() -> str | None:
@@ -76,21 +76,28 @@ def run_autoroute(pcb_path: str | Path,
     """Export DSN, run Freerouting, import SES back to a routed .kicad_pcb.
     Returns {available, routed_pcb_path, dsn_path, ses_path, error?}.
     """
-    cli = _find_kicad_cli()
+    # KiCad 10 dropped DSN/SES from kicad-cli, so we go through pcbnew
+    # Python instead. We still need java + freerouting.jar for the
+    # actual routing step in the middle.
+    kicad_py = _find_kicad_python()
     jar = _find_freerouting_jar()
     java = _find_java()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if cli is None or jar is None or java is None:
+    if kicad_py is None or jar is None or java is None:
         missing = []
-        if cli is None: missing.append("kicad-cli")
+        if kicad_py is None: missing.append("KiCad bundled python.exe")
         if jar is None: missing.append("freerouting.jar")
         if java is None: missing.append("java")
         return {
             "available": False, "routed_pcb_path": None,
             "error": f"autoroute unavailable: missing {', '.join(missing)}",
-            "_hint": "see scripts/PRO_HEADLESS_SETUP.md",
+            "_hint": ("install KiCad 8+ via `winget install KiCad.KiCad`, "
+                      "Java via `winget install EclipseAdoptium.Temurin.21.JDK`, "
+                      "and download freerouting.jar from "
+                      "https://github.com/freerouting/freerouting/releases "
+                      "to %USERPROFILE%/.tools/freerouting.jar"),
         }
 
     pcb_path = Path(pcb_path)
@@ -99,18 +106,27 @@ def run_autoroute(pcb_path: str | Path,
     ses_path = out_dir / f"{stem}.ses"
     routed_path = out_dir / f"{stem}_routed.kicad_pcb"
 
-    # 1. PCB → DSN
+    # 1. PCB → DSN via pcbnew.ExportSpecctraDSN
+    # (kicad_py already resolved + asserted non-None above)
+    dsn_export_script = (
+        "import sys, pcbnew\n"
+        "in_pcb, out_dsn = sys.argv[1], sys.argv[2]\n"
+        "board = pcbnew.LoadBoard(in_pcb)\n"
+        "ok = pcbnew.ExportSpecctraDSN(board, out_dsn)\n"
+        "sys.exit(0 if ok else 4)\n"
+    )
     try:
         r = subprocess.run(
-            [cli, "pcb", "export", "dsn",
-             "--output", str(dsn_path), str(pcb_path)],
+            [kicad_py, "-c", dsn_export_script,
+             str(pcb_path), str(dsn_path)],
             check=False, capture_output=True, text=True, timeout=60)
     except Exception as exc:
         return {"available": True, "routed_pcb_path": None,
                 "error": f"DSN export failed: {exc}"}
-    if not dsn_path.is_file():
+    if r.returncode != 0 or not dsn_path.is_file():
         return {"available": True, "routed_pcb_path": None,
-                "error": f"DSN export produced no file. stderr: {r.stderr[:300]}"}
+                "error": f"DSN export produced no file (rc={r.returncode}). "
+                         f"stderr: {r.stderr[:300]}"}
 
     # 2. Freerouting: DSN → SES
     try:
@@ -133,17 +149,40 @@ def run_autoroute(pcb_path: str | Path,
                 "dsn_path": str(dsn_path),
                 "error": f"freerouting produced no SES. stderr: {r.stderr[:300]}"}
 
-    # 3. Re-import SES into a new .kicad_pcb
-    # kicad-cli doesn't yet have a direct SES-import command in all versions;
-    # we copy the original PCB and let the caller handle SES import in KiCad
-    # if needed.  The routed traces live in the SES file as pure data.
+    # 3. Re-import SES into a new .kicad_pcb via pcbnew Python -- same
+    # subprocess pattern as DSN export above (kicad_py already resolved).
+    import_script = (
+        "import sys, pcbnew\n"
+        "in_pcb, ses, out_pcb = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "board = pcbnew.LoadBoard(in_pcb)\n"
+        "ok = pcbnew.ImportSpecctraSES(board, ses)\n"
+        "if not ok:\n"
+        "    print('IMPORT_SES_RETURNED_FALSE', file=sys.stderr)\n"
+        "    sys.exit(2)\n"
+        "if not pcbnew.SaveBoard(out_pcb, board):\n"
+        "    print('SAVE_BOARD_RETURNED_FALSE', file=sys.stderr)\n"
+        "    sys.exit(3)\n"
+        "print('OK')\n"
+    )
     try:
-        import shutil as _sh
-        _sh.copyfile(pcb_path, routed_path)
+        r = subprocess.run(
+            [kicad_py, "-c", import_script,
+             str(pcb_path), str(ses_path), str(routed_path)],
+            check=False, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return {"available": True, "routed_pcb_path": None,
+                "dsn_path": str(dsn_path), "ses_path": str(ses_path),
+                "error": "pcbnew SES import timed out after 120s"}
     except Exception as exc:
         return {"available": True, "routed_pcb_path": None,
                 "dsn_path": str(dsn_path), "ses_path": str(ses_path),
-                "error": f"copy for routed output failed: {exc}"}
+                "error": f"pcbnew SES import subprocess failed: {exc}"}
+
+    if r.returncode != 0 or not routed_path.is_file():
+        return {"available": True, "routed_pcb_path": None,
+                "dsn_path": str(dsn_path), "ses_path": str(ses_path),
+                "error": f"pcbnew SES import failed (rc={r.returncode}). "
+                         f"stdout: {r.stdout[:200]} stderr: {r.stderr[:300]}"}
 
     return {
         "available": True,
