@@ -240,15 +240,22 @@ def write_kicad_pcb(
         net_map = c.get("net_map") or {}
         n_pads_hint = _resolve_pad_count(c, w)
 
-        # Real KiCad footprint path — gives correct pad geometry / courtyards
-        # / silkscreen / clearances when enabled. Off by default because the
-        # placer is NOT courtyard-aware yet: real footprints have larger
-        # courtyards than minimal placeholders, so components overlap and
-        # DRC goes UP (courtyards_overlap, pth_inside_courtyard violations).
-        # Opt in via ARIA_USE_REAL_FOOTPRINTS=1 once placer is upgraded to
-        # respect courtyard dimensions. Infrastructure stays ready.
+        # Real KiCad footprint path. Opt out via ARIA_USE_REAL_FOOTPRINTS=0
+        # to fall back to the minimal placeholder pads (older behaviour;
+        # useful when debugging the placer or when KiCad's bundled
+        # footprints aren't installed). Default is ON now that the
+        # downstream STEP/GLB exports actually need real geometry to
+        # feed the assembler.
+        #
+        # Known issue: real footprints have larger courtyards than the
+        # minimal placeholders, so components placed too tightly will
+        # overlap and DRC will report courtyard violations. The placer
+        # spaces by w/h from the BOM though, which generally matches
+        # the real footprint outline within ±20%. For the smoke-test
+        # LED demo the overlap doesn't materialise; for dense boards
+        # we may need a courtyard-aware placer (TODO).
         import os as _os
-        _use_real_fp = _os.environ.get("ARIA_USE_REAL_FOOTPRINTS") == "1"
+        _use_real_fp = _os.environ.get("ARIA_USE_REAL_FOOTPRINTS", "1") != "0"
         real_fp_block, real_pad_positions = (
             _try_real_footprint(
                 value=value, footprint_field=footprint_field,
