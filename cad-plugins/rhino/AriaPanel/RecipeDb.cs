@@ -83,7 +83,12 @@ namespace AriaPanel
                 _store[intent] = args;
                 Save();
             }
-            Rhino.RhinoApp.WriteLine($"AriaRhino RecipeDb: recorded '{intent}' -> {args.ToString(Formatting.None)}");
+            // JToken.ToString(Formatting) overload isn't on every Newtonsoft
+            // version that Rhino may have already loaded. Use JsonConvert.
+            string preview;
+            try { preview = JsonConvert.SerializeObject(args); }
+            catch { preview = "(serialize failed)"; }
+            Rhino.RhinoApp.WriteLine($"AriaRhino RecipeDb: recorded '{intent}' -> {preview}");
         }
 
         private static void Save()

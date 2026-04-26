@@ -184,7 +184,15 @@ namespace AriaPanel
                 var msg = JObject.Parse(string.IsNullOrEmpty(body) ? "{}" : body);
                 string outPath = msg["path"]?.ToString()
                                   ?? throw new ArgumentException("save_step requires 'path'");
-                bool ok = RunOnUi(() => doc.Export(outPath));
+                // doc.Export shows a STEP options dialog by default. Use
+                // _-Export with leading - to suppress dialog + run silent.
+                bool ok = RunOnUi(() =>
+                {
+                    // Select all visible objects so _-Export catches them
+                    RhinoApp.RunScript("_-SelAll", false);
+                    string cmd = $"_-Export \"{outPath}\" _Schema=AP214AutomotiveDesign _Enter _Enter";
+                    return RhinoApp.RunScript(cmd, false);
+                });
                 return new { ok, path = outPath };
             }
 
@@ -195,13 +203,42 @@ namespace AriaPanel
 
                 Bitmap? bmp = RunOnUi<Bitmap?>(() =>
                 {
-                    var view = doc.Views.ActiveView;
+                    // Make sure ARIA layers are visible — Rhino can hide
+                    // layers programmatically and SaveBMP only renders
+                    // visible objects. Bodies are added on ARIA::Bodies,
+                    // sketches on ARIA::Sketches.
+                    foreach (var layer in doc.Layers)
+                    {
+                        if (layer.FullPath.StartsWith("ARIA"))
+                        {
+                            layer.IsVisible = true;
+                            layer.IsLocked = false;
+                        }
+                    }
+
+                    // Pick the Perspective viewport explicitly. Active view
+                    // may be a top/front/right ortho with no shading.
+                    Rhino.Display.RhinoView? view = null;
+                    foreach (var v in doc.Views)
+                    {
+                        if (v.ActiveViewport.Name == "Perspective"
+                            || v.ActiveViewport.IsPerspectiveProjection)
+                        {
+                            view = v;
+                            break;
+                        }
+                    }
+                    view ??= doc.Views.ActiveView;
                     if (view == null) return null;
-                    // Force a perspective view + zoom-extents so the
-                    // screenshot is meaningful even before user pans.
-                    view.ActiveViewport.SetProjection(DefinedViewportProjection.Perspective, null, true);
+
+                    // Force shaded display mode so the body shows as a
+                    // solid, not just edges. Then zoom to fit + redraw.
+                    var shaded = Rhino.Display.DisplayModeDescription.FindByName("Shaded");
+                    if (shaded != null)
+                        view.ActiveViewport.DisplayMode = shaded;
                     view.ActiveViewport.ZoomExtents();
                     view.Redraw();
+
                     var captureView = new ViewCaptureSettings(view, new Size(1024, 768), 96.0)
                     {
                         OutputColor = ViewCaptureSettings.ColorMode.DisplayColor,
