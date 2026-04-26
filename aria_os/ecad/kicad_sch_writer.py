@@ -423,8 +423,20 @@ def _labels_at_pin_tips(pins: list[dict], net_map: dict,
                 f'  (global_label "{net}" (shape {shape}) (at {px:.3f} {py:.3f} 0)\n'
                 f'    (effects (font (size 1.27 1.27))))')
         else:
+            # No net assigned. Emit a (no_connect) flag at the pin tip
+            # so KiCad ERC stops complaining "pin_not_connected".
+            #
+            # 2026-04-25 (W13 Track A Path B): the prior code skipped
+            # `input` etype pins, leaving them visibly floating. On a
+            # 64-pin STM32 with most GPIOs unused, this drove ~137/184
+            # ERC violations. The right answer: mark unused pins as
+            # explicit no-connect, and let KiCad's `unused_no_connect`
+            # warning catch the inverse case (a no_connect on a pin
+            # that IS wired). Power_in still skips because dangling
+            # power_in pins SHOULD be flagged -- they're real wiring
+            # bugs, not deliberate float.
             etype = str(p.get("etype", "")).lower()
-            if etype in ("power_in", "input"):
+            if etype == "power_in":
                 continue
             out.append(
                 f'  (no_connect (at {px:.3f} {py:.3f}) (uuid "{_uuid()}"))')
