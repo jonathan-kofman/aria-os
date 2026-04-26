@@ -117,6 +117,112 @@ class GenerateRequest(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# /api/cad/synthesize-args — LLM-in-the-loop fallback for native CAD ops
+# whose static fallback chain has exhausted. Each plugin (SW addin, Rhino,
+# Fusion, Onshape, KiCad) calls this AFTER its own recipe-cache + 11-combo
+# fallback grid has all returned null. The LLM proposes the next arg combo
+# to try based on the failure context. Wins get persisted by the plugin
+# back into its local recipe cache.
+#
+# Strict per-CAD scope — the LLM is told "this is a SolidWorks COM call,
+# do not suggest switching CADs." Same for Rhino/Fusion/Onshape/KiCad.
+# Each CAD remains its own self-contained autonomous generator.
+# --------------------------------------------------------------------------- #
+
+class SynthesizeArgsRequest(BaseModel):
+    cad: str                          # "solidworks" | "rhino" | "fusion" | "onshape" | "kicad"
+    op: str                           # e.g. "cut_extrude_blind"
+    method: str                       # native API method name, e.g. "FeatureCut4"
+    signature: str | None = None      # human-readable arg list of the method
+    prior_attempts: list[dict] = []   # arg combos already tried
+    failure_msgs: list[str] = []      # what each prior attempt produced/threw
+    context: dict | None = None       # body bbox, sketch info, plane normal, etc.
+
+
+@app.post("/api/cad/synthesize-args")
+def synthesize_args(req: SynthesizeArgsRequest):
+    """Ask an LLM for the next-best native-API arg combo to try.
+
+    Plugins call this when their static fallback chain has exhausted.
+    Response: { "args": {...} } with one new arg combo, OR
+              { "args": null, "reason": "..." } if no good idea.
+
+    The plugin then runs its native-API call with these args, persists
+    a win to its local recipe cache, and never asks again for the same
+    intent until the cached recipe stops working.
+    """
+    from aria_os.llm_client import call_llm
+
+    cad = (req.cad or "").lower().strip()
+    if cad not in {"solidworks", "rhino", "fusion", "onshape", "kicad"}:
+        raise HTTPException(400, f"unknown cad: {cad!r}")
+
+    cad_label = {
+        "solidworks": "SolidWorks COM API",
+        "rhino":      "RhinoCommon (RhinoCommon.dll)",
+        "fusion":     "Autodesk Fusion 360 (adsk.fusion / adsk.core)",
+        "onshape":    "Onshape REST API (BTMFeature/FeatureScript)",
+        "kicad":      "KiCad pcbnew Python bindings",
+    }[cad]
+
+    system = (
+        f"You suggest one next-best argument combination for a {cad_label} "
+        f"native call that has been failing. You MUST stay within {cad_label} — "
+        f"never suggest switching to a different CAD. Respond ONLY with a "
+        f"single JSON object containing the next arg combo to try (matching "
+        f"the same shape as the prior_attempts entries), with no surrounding "
+        f"prose, code fences, or commentary. If you cannot suggest anything "
+        f"useful, return {{\"args\": null, \"reason\": \"<why>\"}}."
+    )
+
+    prompt_lines = [
+        f"Native method: {req.method}",
+        f"Intent / op key: {req.op}",
+    ]
+    if req.signature:
+        prompt_lines.append(f"Method signature: {req.signature}")
+    if req.context:
+        prompt_lines.append(
+            f"Context: {json.dumps(req.context, default=str)[:1500]}")
+    if req.prior_attempts:
+        prompt_lines.append("Already tried (each failed):")
+        for i, (args, msg) in enumerate(zip(
+                req.prior_attempts,
+                (req.failure_msgs + [""] * len(req.prior_attempts))[
+                    :len(req.prior_attempts)]), start=1):
+            prompt_lines.append(
+                f"  {i}. args={json.dumps(args)} -> {msg or '(returned null)'}")
+    prompt_lines.append(
+        "Suggest the next single arg combo to try. JSON object only.")
+    prompt = "\n".join(prompt_lines)
+
+    raw = call_llm(prompt, system, repo_root=REPO_ROOT, quality="fast")
+    if raw is None:
+        return {"args": None, "reason": "no LLM backend available"}
+
+    raw = raw.strip()
+    # Strip ```json fences if a model added them despite instructions
+    if raw.startswith("```"):
+        first_nl = raw.find("\n")
+        last_fence = raw.rfind("```")
+        if first_nl != -1 and last_fence > first_nl:
+            raw = raw[first_nl + 1:last_fence].strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {
+            "args": None,
+            "reason": f"LLM reply was not JSON: {exc.msg}",
+            "raw_preview": raw[:300],
+        }
+    if isinstance(parsed, dict) and "args" in parsed:
+        return parsed
+    # Plain arg-combo response — wrap it
+    return {"args": parsed if isinstance(parsed, dict) else None,
+            "reason": "" if isinstance(parsed, dict) else "non-object reply"}
+
+
+# --------------------------------------------------------------------------- #
 # Pipeline runner (runs in background thread to keep FastAPI responsive)
 # --------------------------------------------------------------------------- #
 

@@ -69,3 +69,4 @@ cad-plugins/solidworks/AriaSW/obj/
 cad-plugins/solidworks/AriaSW/aria_sw_test_*.png
 cad-plugins/solidworks/AriaSW/aria_sw_test_*.step
 cad-plugins/solidworks/AriaSW/aria_sw_test_*.bmp
+cad-plugins/rhino/AriaPanel/aria_rhino_test_*.png

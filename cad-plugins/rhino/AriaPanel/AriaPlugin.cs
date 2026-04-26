@@ -48,6 +48,10 @@ namespace AriaPanel
                 // Auto-learning recipe cache for native RhinoCommon ops.
                 RecipeDb.Init();
 
+                // Headless HTTP entry on localhost:7502 — orchestrator
+                // can drive Rhino via curl without the panel being open.
+                AriaHttpListener.Start();
+
                 return LoadReturnCode.Success;
             }
             catch (Exception ex)

@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
@@ -537,9 +538,42 @@ namespace AriaSW
                 TryAttempt(true,  false, false, true,  false);
                 TryAttempt(true,  false, true,  true,  false);
 
-                // Last-ditch: feature scope DISABLED, cut affects every body
+                // Last-ditch (static): feature scope DISABLED, cut affects every body
                 if (cutFeat == null)
                     cutFeat = TryFeatureCutNoScope(sketchFeatName, dist);
+
+                // FINAL fallback: LLM-in-the-loop. The static grid + noScope
+                // exhausted. Hand the failure context to the backend's
+                // /api/cad/synthesize-args endpoint, get next-best args,
+                // try them, loop up to N times. Wins go straight into the
+                // recipe cache so this user never hits the LLM path again
+                // for the same intent.
+                if (cutFeat == null)
+                {
+                    var priorAttempts = new List<JObject>
+                    {
+                        JObject.FromObject(new { blind = true,  flip = false, dir = false, selectBody = false, useAutoSelect = true }),
+                        JObject.FromObject(new { blind = true,  flip = false, dir = true,  selectBody = false, useAutoSelect = true }),
+                        JObject.FromObject(new { blind = false, flip = false, dir = false, selectBody = false, useAutoSelect = true }),
+                        JObject.FromObject(new { blind = false, flip = false, dir = true,  selectBody = false, useAutoSelect = true }),
+                        JObject.FromObject(new { blind = true,  flip = true,  dir = false, selectBody = false, useAutoSelect = true }),
+                        JObject.FromObject(new { blind = true,  flip = true,  dir = true,  selectBody = false, useAutoSelect = true }),
+                        JObject.FromObject(new { blind = false, flip = true,  dir = false, selectBody = false, useAutoSelect = true }),
+                        JObject.FromObject(new { blind = false, flip = true,  dir = true,  selectBody = false, useAutoSelect = true }),
+                        JObject.FromObject(new { blind = true,  flip = false, dir = false, selectBody = true,  useAutoSelect = false }),
+                        JObject.FromObject(new { blind = true,  flip = false, dir = true,  selectBody = true,  useAutoSelect = false }),
+                    };
+                    JObject context = JObject.FromObject(new
+                    {
+                        body_bbox_mm = SummariseBodyBboxMm(),
+                        sketch_plane = _activeSketchPlane,
+                        cut_distance_mm = dist * 1000,
+                        sketch_name = sketchFeatName,
+                    });
+                    cutFeat = TrySynthesizeAndCut(sketchFeatName, dist,
+                                                   cutIntent, priorAttempts,
+                                                   context, RecordCut);
+                }
 
                 feature = cutFeat;
             }
@@ -668,6 +702,118 @@ namespace AriaSW
             {
                 FileLog($"  diag threw: {ex.Message}");
             }
+        }
+
+        // Returns "X[a..b] Y[c..d] Z[e..f]" for the active body, or "" if
+        // the part has no solid body. Used as context in the LLM-args call.
+        private string SummariseBodyBboxMm()
+        {
+            try
+            {
+                var part = _model as IPartDoc;
+                var bodies = part?.GetBodies2(
+                    (int)swBodyType_e.swSolidBody, false) as object[];
+                if (bodies == null || bodies.Length == 0) return "";
+                if (!(bodies[0] is IBody2 b)) return "";
+                var bbox = b.GetBodyBox() as double[];
+                if (bbox == null || bbox.Length < 6) return "";
+                return $"X[{bbox[0]*1000:F1}..{bbox[3]*1000:F1}] " +
+                       $"Y[{bbox[1]*1000:F1}..{bbox[4]*1000:F1}] " +
+                       $"Z[{bbox[2]*1000:F1}..{bbox[5]*1000:F1}]";
+            }
+            catch { return ""; }
+        }
+
+        // Backend HTTP target — defaults to localhost:8000 (the dashboard).
+        // Override via env var for prod. (System.Environment, not the
+        // SolidWorks.Interop.sldworks.Environment shadowing class.)
+        private static readonly string _ariaBackend =
+            System.Environment.GetEnvironmentVariable("ARIA_BACKEND_URL")
+            ?? "http://localhost:8000";
+
+        private static readonly System.Net.Http.HttpClient _llmHttp =
+            new System.Net.Http.HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(20),
+            };
+
+        /// <summary>LLM-in-the-loop final fallback. After the static
+        /// 11-combo grid + noScope all return null, ask the backend for
+        /// next-best args, try them, loop up to 5 times. Each successful
+        /// combo is recorded into the recipe cache so the next request
+        /// for this intent hits one-shot.</summary>
+        private IFeature TrySynthesizeAndCut(
+            string sketchName, double dist, string intent,
+            List<JObject> priorAttempts, JObject context,
+            Action<bool, bool, bool, bool, bool> recordCb)
+        {
+            const int MAX_LLM_ITERATIONS = 5;
+            for (int iter = 1; iter <= MAX_LLM_ITERATIONS; iter++)
+            {
+                FileLog($"  cut.llm[{iter}/{MAX_LLM_ITERATIONS}]: asking backend for next args");
+                JObject suggested = null;
+                try
+                {
+                    var reqBody = new JObject
+                    {
+                        ["cad"]            = "solidworks",
+                        ["op"]             = intent,
+                        ["method"]         = "FeatureCut4",
+                        ["signature"]      =
+                            "FeatureCut4(Sd, Flip, Dir, T1, T2, D1, D2, "
+                            + "Dchk1, Dchk2, Ddir1, Ddir2, Dang1, Dang2, "
+                            + "OffsetReverse1/2, TranslateSurface1/2, NormalCut, "
+                            + "UseFeatScope, UseAutoSelect, AssemblyFeatureScope, "
+                            + "AutoSelectComponents, PropagateFeatureToParts, "
+                            + "T0, StartOffset, FlipStartOffset, OptimizeGeometry)",
+                        ["prior_attempts"] = new JArray(priorAttempts),
+                        ["failure_msgs"]   = new JArray(
+                            Enumerable.Repeat("returned null", priorAttempts.Count)
+                                      .Cast<object>().ToArray()),
+                        ["context"]        = context,
+                    };
+                    var content = new System.Net.Http.StringContent(
+                        reqBody.ToString(),
+                        System.Text.Encoding.UTF8, "application/json");
+                    var resp = _llmHttp.PostAsync(
+                        $"{_ariaBackend}/api/cad/synthesize-args",
+                        content).GetAwaiter().GetResult();
+                    string respText = resp.Content.ReadAsStringAsync()
+                                                  .GetAwaiter().GetResult();
+                    FileLog($"  cut.llm[{iter}]: backend reply = {respText.Substring(0, Math.Min(200, respText.Length))}");
+                    var parsed = JObject.Parse(respText);
+                    suggested = parsed["args"] as JObject;
+                    if (suggested == null)
+                    {
+                        FileLog($"  cut.llm[{iter}]: no usable args ({parsed["reason"]?.ToString() ?? "unknown"})");
+                        break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    FileLog($"  cut.llm[{iter}]: backend call failed: {ex.GetType().Name}: {ex.Message}");
+                    break;
+                }
+
+                bool b  = suggested.Value<bool?>("blind")         ?? true;
+                bool f  = suggested.Value<bool?>("flip")          ?? false;
+                bool d  = suggested.Value<bool?>("dir")           ?? false;
+                bool sb = suggested.Value<bool?>("selectBody")    ?? false;
+                bool au = suggested.Value<bool?>("useAutoSelect") ?? true;
+
+                FileLog($"  cut.llm[{iter}] try: blind={b} flip={f} dir={d} selBody={sb} auto={au}");
+                IFeature got = TryFeatureCut(sketchName, dist,
+                    blind: b, selectBody: sb, useAutoSelect: au, flip: f, dir: d);
+                if (got != null)
+                {
+                    FileLog($"  cut.llm[{iter}]: WIN — recording combo to recipe cache");
+                    try { recordCb(b, f, d, sb, au); } catch { }
+                    return got;
+                }
+                priorAttempts.Add(suggested);
+            }
+            FileLog($"  cut.llm: exhausted {MAX_LLM_ITERATIONS} iterations, giving up");
+            return null;
         }
 
         private IFeature TryFeatureCutNoScope(string sketchName, double dist)
