@@ -136,6 +136,59 @@ namespace AriaPanel
                 };
             }
 
+            if (method == "GET" && path == "/info")
+            {
+                var doc = RhinoDoc.ActiveDoc
+                          ?? throw new InvalidOperationException("no active doc");
+                return RunOnUi<object>(() =>
+                {
+                    var layers = new List<object>();
+                    foreach (var layer in doc.Layers)
+                    {
+                        if (layer.IsDeleted) continue;
+                        layers.Add(new
+                        {
+                            name = layer.FullPath,
+                            visible = layer.IsVisible,
+                            object_count = doc.Objects.FindByLayer(layer)?.Length ?? 0,
+                        });
+                    }
+                    var views = new List<object>();
+                    foreach (var v in doc.Views)
+                    {
+                        var vp = v.ActiveViewport;
+                        views.Add(new
+                        {
+                            name = vp.Name,
+                            is_perspective = vp.IsPerspectiveProjection,
+                            display_mode = vp.DisplayMode?.LocalName,
+                            camera_location = $"({vp.CameraLocation.X:F1}, {vp.CameraLocation.Y:F1}, {vp.CameraLocation.Z:F1})",
+                            target = $"({vp.CameraTarget.X:F1}, {vp.CameraTarget.Y:F1}, {vp.CameraTarget.Z:F1})",
+                        });
+                    }
+                    // Compute scene bbox manually — ObjectTable has no
+                    // GetBoundingBox helper in Rhino 8.
+                    var bb = Rhino.Geometry.BoundingBox.Empty;
+                    foreach (var ro in doc.Objects)
+                    {
+                        var ob = ro.Geometry?.GetBoundingBox(true);
+                        if (ob.HasValue && ob.Value.IsValid)
+                            bb.Union(ob.Value);
+                    }
+                    return new
+                    {
+                        ok = true,
+                        object_count_total = doc.Objects.Count,
+                        active_view = doc.Views.ActiveView?.ActiveViewport.Name,
+                        scene_bbox = bb.IsValid
+                            ? $"min({bb.Min.X:F1},{bb.Min.Y:F1},{bb.Min.Z:F1}) max({bb.Max.X:F1},{bb.Max.Y:F1},{bb.Max.Z:F1})"
+                            : "(empty/invalid)",
+                        layers,
+                        views,
+                    };
+                });
+            }
+
             // Synchronous UI-thread invoke. RhinoApp.InvokeOnUiThread is
             // fire-and-forget — without a wait we'd return JSON before
             // the work completes (and read uninitialised result vars).
@@ -201,12 +254,16 @@ namespace AriaPanel
                 var doc = RhinoDoc.ActiveDoc
                           ?? throw new InvalidOperationException("no active doc");
 
-                Bitmap? bmp = RunOnUi<Bitmap?>(() =>
+                // Use Rhino's built-in _-ViewCaptureToFile command. The
+                // ViewCaptureSettings/ViewCapture API kept producing blank
+                // PNGs even when the doc had geometry (display mode wasn't
+                // actually flipping to shaded). The command-line form is
+                // what Rhino's own "View → View Capture → To File" calls
+                // and it Just Works.
+                string tmpPath = Path.Combine(Path.GetTempPath(),
+                    $"aria_rhino_screen_{Guid.NewGuid():N}.png");
+                bool captured = RunOnUi(() =>
                 {
-                    // Make sure ARIA layers are visible — Rhino can hide
-                    // layers programmatically and SaveBMP only renders
-                    // visible objects. Bodies are added on ARIA::Bodies,
-                    // sketches on ARIA::Sketches.
                     foreach (var layer in doc.Layers)
                     {
                         if (layer.FullPath.StartsWith("ARIA"))
@@ -215,43 +272,30 @@ namespace AriaPanel
                             layer.IsLocked = false;
                         }
                     }
-
-                    // Pick the Perspective viewport explicitly. Active view
-                    // may be a top/front/right ortho with no shading.
-                    Rhino.Display.RhinoView? view = null;
-                    foreach (var v in doc.Views)
-                    {
-                        if (v.ActiveViewport.Name == "Perspective"
-                            || v.ActiveViewport.IsPerspectiveProjection)
-                        {
-                            view = v;
-                            break;
-                        }
-                    }
-                    view ??= doc.Views.ActiveView;
-                    if (view == null) return null;
-
-                    // Force shaded display mode so the body shows as a
-                    // solid, not just edges. Then zoom to fit + redraw.
-                    var shaded = Rhino.Display.DisplayModeDescription.FindByName("Shaded");
-                    if (shaded != null)
-                        view.ActiveViewport.DisplayMode = shaded;
-                    view.ActiveViewport.ZoomExtents();
-                    view.Redraw();
-
-                    var captureView = new ViewCaptureSettings(view, new Size(1024, 768), 96.0)
-                    {
-                        OutputColor = ViewCaptureSettings.ColorMode.DisplayColor,
-                    };
-                    return ViewCapture.CaptureToBitmap(captureView);
+                    // Activate Perspective + shaded + zoom-to-fit.
+                    RhinoApp.RunScript("_-SetActiveViewport _Perspective", false);
+                    // Set Shaded explicitly via SetDisplayMode (more reliable
+                    // than the toggle-style _-Shaded command which sometimes
+                    // returns to wireframe). _Mode= takes the display mode
+                    // name; "Shaded" exists in stock Rhino 8.
+                    RhinoApp.RunScript("_-SetDisplayMode _Mode=Shaded _Enter", false);
+                    RhinoApp.RunScript("_Zoom _All _Extents", false);
+                    doc.Views.ActiveView?.Redraw();
+                    string cmd = $"_-ViewCaptureToFile \"{tmpPath}\" "
+                                  + "_Width=1024 _Height=768 _Enter";
+                    return RhinoApp.RunScript(cmd, false);
                 });
-                if (bmp == null)
-                    throw new InvalidOperationException("CaptureToBitmap returned null");
-
-                using var ms = new MemoryStream();
-                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-                bmp.Dispose();
-                byte[] pngBytes = ms.ToArray();
+                // RunScript may return False even when the capture
+                // succeeded (the script form's return value is unreliable
+                // for ViewCaptureToFile). Trust the file existence + size.
+                if (!File.Exists(tmpPath))
+                    throw new InvalidOperationException(
+                        $"ViewCaptureToFile failed (script ok={captured}, no file)");
+                byte[] pngBytes = File.ReadAllBytes(tmpPath);
+                try { File.Delete(tmpPath); } catch { }
+                if (pngBytes.Length < 100)
+                    throw new InvalidOperationException(
+                        $"ViewCaptureToFile produced empty file ({pngBytes.Length} bytes)");
 
                 ctx.Response.StatusCode = 200;
                 ctx.Response.ContentType = "image/png";
