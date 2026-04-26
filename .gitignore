@@ -63,3 +63,5 @@ candidate.step
 # bin/Release/ tree is regenerable; never commit.
 cad-plugins/rhino/AriaPanel/bin/
 cad-plugins/rhino/AriaPanel/obj/
+cad-plugins/solidworks/AriaSW/bin/
+cad-plugins/solidworks/AriaSW/obj/

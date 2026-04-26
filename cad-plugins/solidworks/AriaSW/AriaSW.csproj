@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- SolidWorks add-ins target classic .NET Framework. SW 2020+
+         supports .NET Framework 4.8; older releases need 4.6.1. -->
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>disable</Nullable>
+    <LangVersion>9.0</LangVersion>
+    <AssemblyName>AriaSW</AssemblyName>
+    <RootNamespace>AriaSW</RootNamespace>
+    <UseAppHost>false</UseAppHost>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+
+    <!-- COM visibility for the add-in entry point + the Task Pane host
+         control. Both have explicit [ComVisible(true)] attributes; this
+         flag enables the assembly-wide tlb generation regasm reads. -->
+    <ComVisible>true</ComVisible>
+
+    <!-- Default install path for the SolidWorks SDK. Override at the
+         command line: `dotnet build -p:SolidWorksInstallDir=...` -->
+    <SolidWorksInstallDir Condition="'$(SolidWorksInstallDir)' == ''">C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS</SolidWorksInstallDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WebView2: shipped (we copy the DLLs next to AriaSW.dll). -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.*" />
+    <!-- Newtonsoft for the bridge JSON round-trip. -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.*" />
+    <!-- HttpClient for insertGeometry STEP/STL download. Not auto-
+         referenced under net48 SDK-style. -->
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
+  <!-- SolidWorks COM interop assemblies. They live in the SW install
+       under api\redist\CLR2 (and api\redist\CLR4 for newer builds).
+       Mark Private=true so regasm can find them next to the addin. -->
+  <ItemGroup>
+    <Reference Include="SolidWorks.Interop.sldworks">
+      <HintPath>$(SolidWorksInstallDir)\api\redist\SolidWorks.Interop.sldworks.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swconst">
+      <HintPath>$(SolidWorksInstallDir)\api\redist\SolidWorks.Interop.swconst.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swpublished">
+      <HintPath>$(SolidWorksInstallDir)\api\redist\SolidWorks.Interop.swpublished.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Post-build COM registration in Release. This step is what makes
+       SolidWorks instantiate AriaPanelHost via its ProgID. Skipped on
+       Debug to avoid touching the registry on every IDE rebuild —
+       run `regasm /codebase AriaSW.dll` manually for Debug installs. -->
+  <Target Name="RegisterAddinForCom"
+          AfterTargets="Build"
+          Condition="'$(Configuration)' == 'Release' AND '$(OS)' == 'Windows_NT'">
+    <Exec Command='"$(MSBuildToolsPath)\..\..\..\..\Microsoft.NET\Framework\v4.0.30319\regasm.exe" /codebase "$(TargetPath)"'
+          ContinueOnError="true" />
+    <Message Importance="high"
+             Text="If regasm failed, run from an elevated shell:&#x0a;  regasm /codebase $(TargetPath)" />
+  </Target>
+
+</Project>
