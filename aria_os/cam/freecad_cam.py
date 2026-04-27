@@ -64,8 +64,14 @@ def _find_freecadcmd() -> str | None:
         p = shutil.which(name)
         if p:
             return p
-    # Windows fallback — covers LOCALAPPDATA\Programs\FreeCAD 1.1 too
+    # Windows fallback — covers LOCALAPPDATA\Programs\FreeCAD 1.1 and the
+    # installer default `C:\Program Files\FreeCAD 1.0` (the trailing version
+    # number means the static path "C:\Program Files\FreeCAD" doesn't exist).
+    # We add `C:\Program Files` and `C:\Program Files (x86)` as scan roots so
+    # any "FreeCAD <ver>" subdir is found.
     candidates = [
+        r"C:\Program Files",
+        r"C:\Program Files (x86)",
         r"C:\Program Files\FreeCAD",
         os.path.expandvars(r"%LOCALAPPDATA%\Programs"),
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\FreeCAD"),

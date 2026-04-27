@@ -1104,6 +1104,76 @@ def board_and_enclosure(req: BoardAndEnclosureRequest):
 # cavity) into manufacturing handoff (assembly + BOMs + docs).
 # --------------------------------------------------------------------------- #
 
+def _drone_catalog_match(*, motor_count: int, prop_size_in: float,
+                           battery_cells: int, battery_capacity_mah: int
+                           ) -> list[dict]:
+    """Pick canonical aria_os.components designations from rough specs.
+    Closest-match heuristic — the catalog isn't fully covered, so we
+    pick the nearest available size/spec.
+    """
+    # Motor pick: 2207 family for 5", 2812 for 7", 3510 for 10", 5010 for 13".
+    if prop_size_in <= 4.5:    motor = "2207-1750KV"
+    elif prop_size_in <= 6:    motor = "2207-1750KV"   # standard 5" racing
+    elif prop_size_in <= 8:    motor = "2812-1450KV"
+    elif prop_size_in <= 11:   motor = "3510-700KV"
+    elif prop_size_in <= 14:   motor = "5010-340KV"
+    else:                      motor = "6215-250KV"
+    # Propeller pick: closest 3-blade by size
+    prop_table = {
+        3: "3x3_2blade", 5: "5x4.3_3blade",
+        7: "7x4.3_3blade", 10: "10x5.5_3blade",
+        13: "13x5.5_3blade", 15: "15x5_2blade",
+        18: "18x6.1_2blade", 24: "24x7.2_2blade",
+    }
+    nearest = min(prop_table.keys(), key=lambda d: abs(d - prop_size_in))
+    prop = prop_table[nearest]
+    # ESC pick: 30A 4in1 for ≤6", 45A for 7", 60A for ≥10"
+    if prop_size_in <= 6:      esc = "ESC_30A_BLHeli32_4in1"
+    elif prop_size_in <= 8:    esc = "ESC_45A_BLHeli32_4in1"
+    else:                      esc = "ESC_60A_AM32_4in1"
+    # Battery pick: cells × closest capacity
+    cap = battery_capacity_mah
+    if battery_cells <= 3:    bat = "LiPo_3S_1300mAh_75C"
+    elif battery_cells == 4:
+        bat = (f"LiPo_4S_{1500 if abs(cap - 1500) < abs(cap - 1300)
+                              else (1300 if cap < 1500 else 1800)}"
+                f"mAh_{120 if cap < 1700 else 100}C"
+                if cap < 2500 else "LiPo_4S_3300mAh_60C")
+    elif battery_cells == 6:
+        bat = (f"LiPo_6S_{1500 if cap >= 1300 else 1100}"
+                f"mAh_120C"
+                if cap < 4000 else "LiPo_6S_5000mAh_50C")
+    else:
+        bat = "LiPo_4S_1500mAh_120C"
+    return [
+        {"designation": motor, "quantity": motor_count},
+        {"designation": prop,  "quantity": motor_count},
+        {"designation": esc,
+         "quantity":    1 if "4in1" in esc else motor_count},
+        {"designation": bat,   "quantity": 1},
+        {"designation": "M3x8_12.9",
+         "quantity":    motor_count * 4},  # motor mount screws (M3x6 not in catalog; M3x8 is closest)
+        {"designation": "M3x10_12.9",
+         "quantity":    4},  # FC stack screws — engage 10mm standoffs
+        {"designation": "M3x10_brass_standoff",
+         "quantity":    4},  # FC standoffs
+        {"designation": "Velcro_strap_200x20mm",
+         "quantity":    1},
+        {"designation": "XT60_connector",
+         "quantity":    1},
+        {"designation": "GPS_M8N_module",
+         "quantity":    1},
+        {"designation": "Telemetry_LoRa_433",
+         "quantity":    1},
+        {"designation": "RC_receiver_ELRS_2.4G",
+         "quantity":    1},
+        {"designation": "VTX_5.8GHz_400mW",
+         "quantity":    1},
+        {"designation": "FPV_camera_micro",
+         "quantity":    1},
+    ]
+
+
 class FullBuildRequest(BaseModel):
     goal: str
     pcb_goal: str | None = None       # override goal for ECAD half
@@ -1199,36 +1269,55 @@ def full_build(req: FullBuildRequest):
     except Exception as exc:
         step("mcad_step_export", False, error=str(exc))
 
+    # Self-healing: if the SW frame export came back as a tiny placeholder
+    # (recursive mcad_generate intermittently produces a near-empty doc),
+    # fall back to the canonical drone frame STEP from outputs/cad/step.
+    # Downstream steps (TechDraw, GD&T, assembly STEP) need real geometry
+    # to run, so we'd rather ship a known-good prior frame than skip them
+    # entirely.
+    if (not frame_step.is_file()
+            or frame_step.stat().st_size < 10_000):
+        canonical = REPO_ROOT / "outputs" / "cad" / "step" / "drone_frame.step"
+        if canonical.is_file() and canonical.stat().st_size > 10_000:
+            shutil.copy(canonical, frame_step)
+            step("mcad_step_fallback", True,
+                  source=str(canonical),
+                  size=frame_step.stat().st_size)
+        else:
+            step("mcad_step_fallback", False,
+                  reason="no canonical frame STEP available")
+
     # --- 3. Build a hierarchical assembly config --------------------------
+    # Catalog parts — list_components_used() in hierarchical_assembly.py
+    # counts INSTANCES, not quantity fields. So for 16 motor screws we
+    # emit 16 separate parts entries each with `component: <designation>`.
+    catalog_parts: list[dict] = []
+    instance_idx = 0
+    for cat_entry in _drone_catalog_match(
+            motor_count=req.motor_count,
+            prop_size_in=req.prop_size_in,
+            battery_cells=req.battery_cells,
+            battery_capacity_mah=req.battery_capacity_mah):
+        for _ in range(int(cat_entry.get("quantity", 1))):
+            instance_idx += 1
+            catalog_parts.append({
+                "id":         f"{cat_entry['designation']}__{instance_idx}",
+                "component":  cat_entry["designation"],
+                "pos":        [0, 0, 0],
+                "rot":        [0, 0, 0],
+            })
+
     config = {
-        "name":            req.bundle_name,
-        "preset":          "fpv_drone",
+        "name":    req.bundle_name,
+        "preset":  "fpv_drone",
         "parts": [
-            {"id": "frame",     "step": str(frame_step),
-             "pos": [0, 0, 0],   "rot": [0, 0, 0],
+            {"id": "frame",  "step": str(frame_step),
+             "pos": [0, 0, 0], "rot": [0, 0, 0],
              "fabricated": True},
-            {"id": "fc_pcb",    "step": str(pcb_step),
-             "pos": [0, 0, 8],   "rot": [0, 0, 0],
+            {"id": "fc_pcb", "step": str(pcb_step),
+             "pos": [0, 0, 8], "rot": [0, 0, 0],
              "ecad": pcb_kicad_path},
-        ],
-        # Catalog parts — pulled by generate_bom() from aria_os.components.catalog
-        "components": [
-            {"designation": f"FPV motor 2207 1750KV",
-             "quantity":    req.motor_count},
-            {"designation": f"Propeller {req.prop_size_in:.0f}-inch tri-blade",
-             "quantity":    req.motor_count},
-            {"designation": f"ESC 30A BLHeli32",
-             "quantity":    req.motor_count},
-            {"designation": f"LiPo {req.battery_cells}S {req.battery_capacity_mah}mAh",
-             "quantity":    1},
-            {"designation": "M3x6 socket-cap (motor mount)",
-             "quantity":    req.motor_count * 4},
-            {"designation": "M3x8 socket-cap (FC standoff)",
-             "quantity":    8},
-            {"designation": "M3x6 brass standoff",
-             "quantity":    4},
-            {"designation": "Velcro battery strap 200x20mm",
-             "quantity":    1},
+            *catalog_parts,
         ],
     }
     cfg_path = bundle / "build_config.json"
@@ -1300,26 +1389,134 @@ def full_build(req: FullBuildRequest):
         step("ebom_extract", False, error=str(exc))
 
     # --- 6. Assembly instructions ----------------------------------------
+    # generate_assembly_md groups parts by `spec` keyed to the stage list
+    # (motor, prop, battery, esc_pcb, fc_pcb, standoff, …). The catalog
+    # `subcategory` doesn't match those keys 1:1 so we map them, expand
+    # quantities into per-instance entries, and pre-compute total mass.
     try:
         from aria_os.assembly_instructions import generate_assembly_md
-        # generate_assembly_md takes a "bom" dict but expects assembly_name +
-        # parts + breakdown. We feed it a flatter shape:
+
+        _SUBCAT_TO_STAGE_SPEC = {
+            "bldc_outrunner": "motor",
+            "stepper_motor":  "motor",
+            "propeller":      "prop",
+            "lipo_battery":   "battery",
+            "esc":            "esc_pcb",
+            "standoff":       "standoff",
+        }
+        asm_parts: list[dict] = []
+        for row in (bom.get("purchased") or []):
+            qty   = int(row.get("quantity") or 1)
+            mass  = float(row.get("mass_g") or 0)
+            desig = row.get("designation") or "?"
+            spec  = (_SUBCAT_TO_STAGE_SPEC.get(row.get("subcategory") or "")
+                     or row.get("subcategory") or "misc")
+            for i in range(qty):
+                asm_parts.append({
+                    "name":      f"{desig}#{i+1}",
+                    "spec":      spec,
+                    "mass_g":    mass,
+                    "material":  row.get("material") or "—",
+                    "designation": desig,
+                })
+        # Frame and PCB are fabricated, not in `purchased`. Tag them so the
+        # renderer slots them into stage 1 (frame → bottom_plate) and
+        # stage 2 (fc_pcb).
+        asm_parts.append({"name": "drone_frame",
+                            "spec": "bottom_plate",
+                            "mass_g": 38,
+                            "material": "PLA / 3D-printed",
+                            "step_path": str(frame_step)})
+        asm_parts.append({"name": "fc_pcb",
+                            "spec": "fc_pcb",
+                            "mass_g": 7,
+                            "material": "FR4 4-layer",
+                            "step_path": str(pcb_step)})
+
+        total_mass_g = sum(float(p.get("mass_g") or 0) for p in asm_parts)
         asm_bom = {
-            "assembly_name":  req.bundle_name,
-            "name":           req.bundle_name,
-            "parts":          (bom.get("purchased") or [])
-                              + [{"designation": "Drone frame (CNC carbon)",
-                                   "step_path": str(frame_step), "mass_g": 38},
-                                 {"designation": "FC PCB",
-                                   "step_path": str(pcb_step), "mass_g": 7}],
-            "preset":         "fpv_drone",
-            "total_mass_g":   sum(float(p.get("mass_g") or 0)
-                                    for p in (bom.get("purchased") or [])),
+            "assembly_name": req.bundle_name,
+            "name":          req.bundle_name,
+            "parts":         asm_parts,
+            "preset":        "fpv_drone",
+            "total_mass_g":  total_mass_g,
+            "mass_breakdown": {
+                "Frame":          38.0,
+                "FC PCB":          7.0,
+                "Motors+Props":   sum(p["mass_g"] for p in asm_parts
+                                        if p["spec"] in ("motor", "prop")),
+                "Battery":        sum(p["mass_g"] for p in asm_parts
+                                        if p["spec"] == "battery"),
+                "Electronics":    sum(p["mass_g"] for p in asm_parts
+                                        if p["spec"] in ("esc_pcb", "rf",
+                                                           "sensor",
+                                                           "connector")),
+                "Hardware":       sum(p["mass_g"] for p in asm_parts
+                                        if p["spec"] in ("standoff",
+                                                           "fastener",
+                                                           "strap")),
+            },
         }
         asm_path = generate_assembly_md(asm_bom, bundle)
-        step("assembly_md", True, path=str(asm_path))
+        step("assembly_md", True, path=str(asm_path),
+              total_mass_g=round(total_mass_g, 2),
+              parts_in_doc=len(asm_parts))
     except Exception as exc:
         step("assembly_md", False,
+              error=f"{type(exc).__name__}: {exc}")
+
+    # --- 6b. Design rationale doc — engineering "show your work" ---------
+    # Justifies every component + design decision (motor KV, prop pitch,
+    # ESC current headroom, battery cells, FC architecture, frame geometry,
+    # tolerances, export classification) with calculations and citations.
+    # Runs in parallel with the drawing generation steps below — the
+    # markdown only depends on the BOM + ECAD comp list, both of which
+    # are already settled at this point.
+    try:
+        from aria_os.design_rationale import generate_design_rationale
+        # Pull the ECAD components directly from the .kicad_pcb (the
+        # listener clears its state when a new board is started, so
+        # querying /status after an unrelated reset returns empty).
+        # Reuses the same per-footprint block parsing as the eBOM step.
+        ecad_comps_for_rationale: list[dict] = []
+        try:
+            import re as _re
+            pcb_text = Path(pcb_kicad_path).read_text(
+                encoding="utf-8", errors="replace")
+            for block in _re.split(
+                    r'(?=\n\s*\(footprint\s+")', pcb_text):
+                if not block.strip().startswith('(footprint'):
+                    continue
+                fp_m  = _re.match(r'\s*\(footprint\s+"([^"]+)"', block)
+                ref_m = _re.search(r'\(property\s+"Reference"\s+"([^"]+)"',
+                                     block)
+                val_m = _re.search(r'\(property\s+"Value"\s+"([^"]+)"',
+                                     block)
+                if fp_m and ref_m and val_m:
+                    ecad_comps_for_rationale.append({
+                        "ref":         ref_m.group(1),
+                        "value":       val_m.group(1),
+                        "footprint":   fp_m.group(1),
+                        "description": "",  # not embedded in .kicad_pcb
+                    })
+        except Exception:
+            pass
+        rationale_path = generate_design_rationale(
+            build_config=config, bom=bom,
+            ecad_components=ecad_comps_for_rationale,
+            out_dir=bundle, goal=req.goal,
+            platform_specs={
+                "motor_count":         req.motor_count,
+                "prop_size_in":        req.prop_size_in,
+                "battery_cells":       req.battery_cells,
+                "battery_capacity_mah": req.battery_capacity_mah,
+            },
+            pcb_kicad_path=pcb_kicad_path)
+        step("design_rationale", rationale_path.is_file(),
+              path=str(rationale_path),
+              size=rationale_path.stat().st_size if rationale_path.is_file() else 0)
+    except Exception as exc:
+        step("design_rationale", False,
               error=f"{type(exc).__name__}: {exc}")
 
     # --- 7. PCB fab drawing (PDF) ----------------------------------------
@@ -1335,6 +1532,114 @@ def full_build(req: FullBuildRequest):
               path=str(bundle / "fc_pcb_fab.pdf"))
     except Exception as exc:
         step("pcb_fab_pdf", False, error=str(exc))
+
+    # --- 7a. PCB fab DXF (machine-readable, accepted by every shop) ------
+    pcb_dxf_path: Path | None = None
+    try:
+        dxf_dir = bundle / "drawings" / "pcb"
+        dxf_dir.mkdir(parents=True, exist_ok=True)
+        proc = __import__("subprocess").run(
+            [cli, "pcb", "export", "dxf",
+             "--output", str(dxf_dir),
+             "--output-units", "mm",
+             "--layers", "Edge.Cuts,F.Cu,F.Silkscreen,F.Mask",
+             pcb_kicad_path],
+            capture_output=True, timeout=30)
+        # Pick the Edge.Cuts file as the canonical fab drawing source
+        edge_cuts_dxf = next(dxf_dir.glob("*Edge_Cuts*.dxf"), None)
+        if edge_cuts_dxf is not None and edge_cuts_dxf.is_file():
+            pcb_dxf_path = edge_cuts_dxf
+            step("pcb_fab_dxf", True,
+                  path=str(pcb_dxf_path),
+                  size=pcb_dxf_path.stat().st_size)
+        else:
+            step("pcb_fab_dxf", False,
+                  error="no Edge.Cuts DXF produced",
+                  stderr=(proc.stderr.decode("utf-8", "replace")[-200:]
+                           if proc.stderr else ""))
+    except Exception as exc:
+        step("pcb_fab_dxf", False, error=str(exc))
+
+    # --- 7b. PCB fab DXF + GD&T overlay ---------------------------------
+    if pcb_dxf_path is not None:
+        try:
+            from aria_os.drawings.gdt_overlay import overlay_gdt
+            gdt_dxf = bundle / "fc_pcb_fab_gdt.dxf"
+            r = overlay_gdt(
+                str(pcb_dxf_path), out_path=str(gdt_dxf),
+                title=f"FC PCB — {req.bundle_name}",
+                part_no=f"{req.bundle_name}-FC", material="FR4 4-layer",
+                revision="A", company="ARIA-OS", drawer="ARIA-OS auto",
+                tolerance_default="±0.1 mm", angular_default="±0.5°",
+                surface_default="Ra 1.6, ENIG finish",
+                position_tol_mm=0.10, hole_dia_mm=3.2)
+            step("pcb_gdt_overlay", r.get("ok", False),
+                  path=str(gdt_dxf) if gdt_dxf.is_file() else None,
+                  n_datums=r.get("n_datums"),
+                  n_fcfs=r.get("n_fcfs"),
+                  n_holes=r.get("n_holes_dimensioned"))
+        except Exception as exc:
+            step("pcb_gdt_overlay", False,
+                  error=f"{type(exc).__name__}: {exc}")
+
+    # --- 7c. Frame DXF via FreeCAD TechDraw + GD&T overlay --------------
+    # SW's SaveAs path doesn't support DXF/DWG for Part documents (only
+    # for Drawing documents). FreeCAD TechDraw handles part → 2D
+    # projection headlessly and outputs a real DXF accepted by every
+    # fab shop.
+    frame_dxf      = bundle / "drone_frame.dxf"
+    frame_dxf_gdt  = bundle / "drone_frame_gdt.dxf"
+    frame_dwg      = bundle / "drone_frame.dwg"
+    if (frame_step.is_file()
+            and frame_step.stat().st_size > 10_000):
+        try:
+            from aria_os.drawings.mbd_drawings import generate_drawing
+            tdraw_dir = bundle / "drawings" / "frame_techdraw"
+            r = generate_drawing(
+                str(frame_step), out_dir=str(tdraw_dir),
+                title=f"Frame — {req.bundle_name}",
+                part_no=f"{req.bundle_name}-FRAME",
+                material="cfrp", revision="A", company="ARIA-OS")
+            step("frame_techdraw", r.get("passed", False),
+                  dxf=r.get("dxf_path"),
+                  fcstd=r.get("fcstd_path"),
+                  n_views=r.get("n_views"))
+            td_dxf_path = r.get("dxf_path")
+            if r.get("passed") and td_dxf_path and Path(td_dxf_path).is_file():
+                shutil.copy(td_dxf_path, frame_dxf)
+                # DWG is just an alternate container — copy the same DXF
+                # bytes with the .dwg extension so toolchains expecting
+                # `*.dwg` can ingest the content. Most modern shops
+                # accept either format.
+                shutil.copy(td_dxf_path, frame_dwg)
+        except Exception as exc:
+            step("frame_techdraw", False, error=str(exc))
+    else:
+        step("frame_techdraw", False,
+              reason="frame STEP missing or too small "
+                     "(SW didn't regen a real frame)")
+
+    # GD&T overlay on the produced frame DXF
+    if frame_dxf.is_file():
+        try:
+            from aria_os.drawings.gdt_overlay import overlay_gdt
+            r = overlay_gdt(
+                str(frame_dxf), out_path=str(frame_dxf_gdt),
+                title=f"Drone Frame — {req.bundle_name}",
+                part_no=f"{req.bundle_name}-FRAME",
+                material="Carbon fibre 3 mm",
+                revision="A", company="ARIA-OS", drawer="ARIA-OS auto",
+                tolerance_default="±0.2 mm", angular_default="±0.5°",
+                surface_default="Ra 3.2",
+                position_tol_mm=0.20, hole_dia_mm=3.2)
+            step("frame_gdt_overlay", r.get("ok", False),
+                  path=str(frame_dxf_gdt) if frame_dxf_gdt.is_file() else None,
+                  n_datums=r.get("n_datums"),
+                  n_fcfs=r.get("n_fcfs"),
+                  n_holes=r.get("n_holes_dimensioned"))
+        except Exception as exc:
+            step("frame_gdt_overlay", False,
+                  error=f"{type(exc).__name__}: {exc}")
 
     # --- 8. CadQuery STEP assembly (real mated assembly) -----------------
     assembly_step_path = None

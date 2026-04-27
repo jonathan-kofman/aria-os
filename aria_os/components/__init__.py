@@ -49,3 +49,4 @@ from . import hardware        # noqa: F401 — registers dowels/rings
 from . import linear_motion   # noqa: F401 — registers rails/ballscrews/pulleys
 from . import bldc_motors     # noqa: F401 — registers BLDC outrunner motors
 from . import propellers      # noqa: F401 — registers propellers
+from . import drone_electronics  # noqa: F401 — registers ESCs/LiPos/standoffs/strap

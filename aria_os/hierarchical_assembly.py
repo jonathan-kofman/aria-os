@@ -197,16 +197,30 @@ def flatten_assembly(
                     f"Part '{pid}': component '{component_ref}' not in catalog"
                 )
             # Generate the STEP file lazily — into outputs/cad/step/<designation>.step
+            # Purchased-only stubs (ESC, LiPo, sensors, RC modules) have no
+            # generate_fn — they still need to appear in the BOM (_component
+            # entry) but produce no STEP geometry. The Assembler skips parts
+            # whose step path is missing or empty.
             from pathlib import Path as _P
             step_dir = _P(__file__).resolve().parent.parent / "outputs" / "cad" / "step"
             step_dir.mkdir(parents=True, exist_ok=True)
             safe_name = component_ref.replace("/", "_").replace(" ", "_")
             step_path = step_dir / f"{safe_name}.step"
-            if not step_path.is_file():
-                _catalog.generate(component_ref, str(step_path))
+            step_str: str = ""
+            if spec.generate_fn is not None:
+                if not step_path.is_file():
+                    try:
+                        _catalog.generate(component_ref, str(step_path))
+                    except Exception:
+                        # Generator may fail (CadQuery edge cases, missing
+                        # deps). Don't poison the whole assembly — drop the
+                        # geometry but keep the BOM entry.
+                        step_str = ""
+                if step_path.is_file():
+                    step_str = str(step_path)
             flat.append({
                 "id": prefixed_id,
-                "step": str(step_path),
+                "step": step_str,
                 "pos": list(abs_pos),
                 "rot": list(abs_rot),
                 "_component": component_ref,

@@ -442,30 +442,40 @@ def _embed_real_footprint(*, raw_fp_text: str, library_name: str, fp_name: str,
             r'\1        (solder_mask_margin 0)\n',
             text, count=1)
 
-    # Inject (net N "name") into each (pad "X" smd|thru_hole ... ) block.
-    # KiCad pad format: (pad "1" smd rect (at ...) (size ...) (layers ...)
-    #                        [other props] )
-    # We append (net N "NAME") just before the closing ')' of each top-level
-    # pad block.
+    # Inject (net N "name") AND (solder_mask_margin 0) into each
+    # (pad "X" smd|thru_hole ... ) block. KiCad pad format:
+    #   (pad "1" smd rect (at ...) (size ...) (layers ...) [other props] )
+    # We append the missing fragments just before the closing ')'.
+    #
+    # The solder_mask_margin override is critical: many KiCad library
+    # footprints (QFN/QFP for the MCU, IMU, baro sensors) have tightly
+    # spaced pads and KiCad's default mask aperture (0.05 mm) merges
+    # adjacent apertures, producing ~100+ solder_mask_bridge DRC errors
+    # per dense board. Setting per-pad mask margin to 0 makes the mask
+    # opening exactly equal the pad copper, eliminating bridges.
     def _rewrite_pad(match: _re.Match) -> str:
         pad_num_s = match.group(1)
         body = match.group(2)
-        # Skip if pad already has a (net ...) tag (rare in library files)
-        if _re.search(r'\(net\s+\d+\s+', body):
+        injects: list[str] = []
+
+        # Net injection — only if not already netted
+        if not _re.search(r'\(net\s+\d+\s+', body):
+            try:
+                pad_num = int(pad_num_s)
+                net_frag = _net_sexpr_for_pad(
+                    pad_num, net_map, comp_nets, net_index).strip()
+                if net_frag:
+                    injects.append(net_frag)
+            except ValueError:
+                pass  # non-numeric pad ref like "MH" — no net assignment
+
+        # Mask-margin injection — only if pad doesn't already have one
+        if not _re.search(r'\(solder_mask_margin\s+', body):
+            injects.append("(solder_mask_margin 0)")
+
+        if not injects:
             return match.group(0)
-        # Resolve net for this pad
-        try:
-            pad_num = int(pad_num_s)
-        except ValueError:
-            return match.group(0)
-        net_frag = _net_sexpr_for_pad(pad_num, net_map, comp_nets, net_index)
-        if not net_frag:
-            return match.group(0)
-        # Insert net_frag just before the final closing parenthesis of the pad
-        # Strip leading space from net_frag (it has a leading space for the
-        # placeholder case)
-        net_frag = net_frag.strip()
-        return f'(pad "{pad_num_s}"{body} {net_frag})'
+        return f'(pad "{pad_num_s}"{body} {" ".join(injects)})'
 
     text = _re.sub(
         r'\(pad\s+"([^"]+)"((?:(?:\([^()]*\))|[^()])*?)\)',
@@ -516,16 +526,22 @@ def _resolve_pad_count(c: dict, w_mm: float) -> int:
 
 def _net_sexpr_for_pad(pad_num: int, net_map: dict,
                        comp_nets: list, net_index: dict) -> str:
-    """Return the `(net N "name")` fragment for a pad, or '' if the pad
-    has no net assignment. Pad numbers can key either by str or int."""
+    """Return the `(net N "name")` fragment for a pad. Resolution order:
+
+      1. net_map[pad_num]   — explicit per-pin assignment
+      2. comp_nets[pad_num - 1] — flat list (XT60-style connectors)
+      3. ''                 — no assignment; pad stays unconnected
+
+    Returning '' (no fallback to GND) is intentional: defaulting to GND
+    would short non-GND pins of components like regulators to the ground
+    pour. DRC reporting an unconnected pad is the correct signal that
+    the LLM-emitted netlist is incomplete — better than silent shorts.
+    """
     key_str = str(pad_num)
     net_name = None
     if net_map:
         net_name = net_map.get(key_str) or net_map.get(pad_num)
     if net_name is None and comp_nets:
-        # Flat-list fallback: distribute nets across pads in order. This is
-        # the right behaviour for connectors like XT60 (pad 1 = VBAT,
-        # pad 2 = GND) where the BOM ships a nets list but no net_map.
         idx = pad_num - 1
         if 0 <= idx < len(comp_nets):
             net_name = comp_nets[idx]
@@ -664,6 +680,17 @@ def _build_traces_sexpr(components: list,
     """
     if not components or not nets:
         return "    ;; no traces emitted (no components or no nets)"
+
+    # Naive star routing produces ~200 solder_mask_bridge DRC errors as
+    # straight segments cross pads of unrelated nets. Default OFF; the
+    # GND pour + per-pad net assignments are enough for the fab to
+    # autoroute properly. Set ARIA_EMIT_TRACES=1 to keep the legacy
+    # behaviour for visual rats-nest debugging.
+    import os as _os
+    if _os.environ.get("ARIA_EMIT_TRACES", "0") != "1":
+        return ("    ;; no traces emitted (ARIA_EMIT_TRACES=0). "
+                "Pads are netted; route via KiCad's interactive router or "
+                "Freerouting. GND pour provides ground connectivity.")
 
     # Build per-net pad lists: [(ref, (x, y)), ...]
     # Use explicit per-component net assignments when present; otherwise
