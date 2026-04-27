@@ -2105,53 +2105,45 @@ namespace AriaSW
                         {
                             double cx = (outline[0] + outline[2]) / 2.0;
                             double cy = (outline[1] + outline[3]) / 2.0;
-                            // Walk multiple signatures of CreateSectionViewAt
-                            // since SW 2024's exact arg shape isn't
-                            // statically resolvable through .NET interop.
-                            var drwType = drw.GetType();
-                            var candidates = new[] {
-                                "CreateSectionViewAt5",
-                                "CreateSectionViewAt4",
-                                "CreateSectionViewAt3",
-                                "CreateSectionViewAt2",
-                                "CreateSectionViewAt",
-                            };
+                            // Direct typed call — signature confirmed by
+                            // scripts/sw_probe_signatures.py:
+                            //   View CreateSectionViewAt5(
+                            //       double X, double Y, double Z,
+                            //       string SectionLabel, int Options,
+                            //       object ExcludedComponents,
+                            //       double SectionDepth)
+                            // Options=0 -> default (aligned, full depth).
                             object secView = null;
-                            string winner = null;
+                            string winner = "CreateSectionViewAt5";
                             string lastErr = null;
-                            foreach (var nm in candidates)
+                            try
                             {
-                                var mi = drwType.GetMethod(nm);
-                                if (mi == null) continue;
-                                int paramCount = mi.GetParameters().Length;
-                                // Build a generic positional arg vector:
-                                // first 4 are the section centre + label,
-                                // remaining default to 0 / false / null.
-                                var args = new object[paramCount];
-                                if (paramCount > 0) args[0] = cx;
-                                if (paramCount > 1) args[1] = cy;
-                                if (paramCount > 2) args[2] = 0.0;
-                                if (paramCount > 3) args[3] = "A";
-                                for (int i = 4; i < paramCount; i++)
-                                {
-                                    var pT = mi.GetParameters()[i].ParameterType;
-                                    if (pT == typeof(bool))   args[i] = false;
-                                    else if (pT == typeof(int)) args[i] = 0;
-                                    else if (pT == typeof(double)) args[i] = 0.0;
-                                    else args[i] = null;
-                                }
+                                secView = drw.CreateSectionViewAt5(
+                                    cx, cy, 0.0,
+                                    "A",     // SectionLabel
+                                    0,       // Options bitfield (aligned)
+                                    null,    // ExcludedComponents
+                                    0.0);    // SectionDepth = full
+                            }
+                            catch (Exception exSec)
+                            {
+                                lastErr = exSec.Message;
+                                FileLog($"  enrichDrawing.section CreateSectionViewAt5 threw: {exSec.Message}");
+                            }
+                            // Older-SW fallback path retained for graceful
+                            // degradation on installations where the SW
+                            // 2024 typed binding isn't available at runtime.
+                            if (secView == null)
+                            {
                                 try
                                 {
-                                    var ret = mi.Invoke(drw, args);
-                                    if (ret != null)
-                                    {
-                                        secView = ret; winner = nm + $"[{paramCount}]";
-                                        break;
-                                    }
+                                    var ret = drw.CreateSectionViewAt(
+                                        cx, cy, 0.0, false, false);
+                                    if (ret) { secView = "ok-bool"; winner = "CreateSectionViewAt"; }
                                 }
                                 catch (Exception exMi)
                                 {
-                                    lastErr = $"{nm}[{paramCount}]: {exMi.InnerException?.Message ?? exMi.Message}";
+                                    lastErr = (lastErr ?? "") + " | fallback: " + exMi.Message;
                                 }
                             }
                             // If we still couldn't auto-create the section,
@@ -2246,73 +2238,40 @@ namespace AriaSW
                         }
                         else
                         {
-                            var cfgMgr = asmDoc.ConfigurationManager;
-                            // Walk multiple signatures of AddExplodedView /
-                            // AddExplodedView2 — version churn means we
-                            // can't pin one statically.
-                            var cfgType = cfgMgr.GetType();
-                            object explView = null;
+                            // Direct typed call — sig confirmed via probe:
+                            //   IAssemblyDoc.CreateExplodedView() -> bool
+                            // The method auto-explodes top-level components
+                            // along their natural separation axes; SW
+                            // builds a default ExplView1 entry on the
+                            // active configuration.
+                            bool explCreated = false;
                             string explWinner = null;
                             string explErr = null;
-                            foreach (var nm in new[] {
-                                "AddExplodedView2", "AddExplodedView" })
+                            try
                             {
-                                var addMi = cfgType.GetMethod(nm);
-                                if (addMi == null) continue;
-                                int pc = addMi.GetParameters().Length;
-                                var args = new object[pc];
-                                if (pc > 0) args[0] = "ARIA_Exploded";
-                                if (pc > 1) args[1] = true; // copy from active
-                                for (int i = 2; i < pc; i++)
+                                if (asmDoc is IAssemblyDoc asmIface)
                                 {
-                                    var pT = addMi.GetParameters()[i].ParameterType;
-                                    if (pT == typeof(bool))   args[i] = false;
-                                    else if (pT == typeof(int)) args[i] = 0;
-                                    else if (pT == typeof(double)) args[i] = 0.0;
-                                    else args[i] = null;
+                                    explCreated = asmIface.CreateExplodedView();
+                                    explWinner = "IAssemblyDoc.CreateExplodedView";
+                                    FileLog($"  enrichDrawing.exploded CreateExplodedView -> {explCreated}");
                                 }
-                                try
+                                else
                                 {
-                                    var ret = addMi.Invoke(cfgMgr, args);
-                                    if (ret != null)
-                                    {
-                                        explView = ret; explWinner = nm + $"[{pc}]";
-                                        break;
-                                    }
-                                }
-                                catch (Exception exAdd)
-                                {
-                                    explErr = $"{nm}[{pc}]: {exAdd.InnerException?.Message ?? exAdd.Message}";
+                                    explErr = "asm doc didn't cast to IAssemblyDoc";
                                 }
                             }
-                            // If we couldn't programmatically add an
-                            // exploded config, distribute components along
-                            // a vertical axis using TransformComponent on
-                            // each top-level child of the assembly. This
-                            // produces a visible "manual exploded view"
-                            // that can be referenced from the drawing.
+                            catch (Exception exExp)
+                            {
+                                explErr = exExp.Message;
+                                FileLog($"  enrichDrawing.exploded CreateExplodedView threw: {exExp.Message}");
+                            }
+                            object explView = explCreated ? (object)"ok" : null;
+                            // If CreateExplodedView refused (empty asm,
+                            // already-exploded config, etc.), the placeholder
+                            // note below still documents the explosion intent.
                             if (explView == null)
                             {
-                                try
-                                {
-                                    var feat = (asmDoc as IModelDoc2)
-                                                  .FirstFeature() as IFeature;
-                                    int compIdx = 0;
-                                    while (feat != null)
-                                    {
-                                        if (feat.GetTypeName2() == "Reference")
-                                        {
-                                            // skip — these are mate refs
-                                        }
-                                        feat = feat.GetNextFeature() as IFeature;
-                                    }
-                                    // Note: TransformComponent shifts only
-                                    // mate-free components. Mated PCB+frame
-                                    // can't be exploded without mate
-                                    // suppression — log and continue.
-                                    FileLog($"  enrichDrawing.exploded fallback: components are mated; skipping translate");
-                                }
-                                catch { }
+                                FileLog($"  enrichDrawing.exploded fallback: CreateExplodedView returned false; placeholder note will carry intent");
                             }
                             // Activate the drawing again and drop a new
                             // view referencing the exploded config.

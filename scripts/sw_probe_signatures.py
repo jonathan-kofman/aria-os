@@ -43,7 +43,9 @@ for dll in INTEROP_DLLS:
     clr.AddReference(str(found))
 
 from SolidWorks.Interop.sldworks import IDrawingDoc, IModelDocExtension, \
-                                          IConfigurationManager  # type: ignore
+                                          IConfigurationManager, IAssemblyDoc, \
+                                          IModelDoc2, IFeatureManager, \
+                                          IConfiguration  # type: ignore
 
 
 TARGETS = {
@@ -56,7 +58,15 @@ TARGETS = {
                           "InsertModelAnnotations3", "InsertModelAnnotations5",
                           "InsertAutoDimensionScheme"],
     IConfigurationManager: ["AddExplodedView", "AddExplodedView2",
-                              "AddConfiguration2", "AddConfiguration3"],
+                              "AddConfiguration2", "AddConfiguration3",
+                              "ExplodedView", "GetExplodedView"],
+    IAssemblyDoc: ["CreateExplodedView", "AddExplodedView",
+                    "InsertExplodedView", "ExplodeMultiple"],
+    IModelDoc2:   ["FeatureByName", "InsertNote"],
+    IConfiguration: ["GetExplodedViewCount", "AddExplodedView",
+                       "GetExplodedViewNames"],
+    IFeatureManager: ["InsertExplodedView", "InsertSheetMetalBaseFlange",
+                        "InsertSheetMetalBaseFlange2", "InsertSurfaceLoft"],
 }
 
 
