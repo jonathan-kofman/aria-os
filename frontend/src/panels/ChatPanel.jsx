@@ -2226,6 +2226,42 @@ export default function ChatPanel() {
           </svg>
           New chat
         </button>
+        <button
+          onClick={() => {
+            const host = bridge.kind || "";
+            const q = host ? `?host=${encodeURIComponent(host)}` : "";
+            window.location.href = `/native-ops${q}`;
+          }}
+          title="Native CAD ops — enrichDrawing, runFea, sheet metal, surface, materials"
+          style={{
+            marginLeft: 8,
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "5px 10px 5px 8px",
+            background: "transparent",
+            border: `1px solid ${THEME.border}`,
+            borderRadius: 100,
+            color: THEME.muted,
+            fontFamily: FONT_SERIF, fontSize: 12,
+            cursor: "pointer",
+            fontStyle: "italic",
+          }}
+          onMouseEnter={e => {
+            e.currentTarget.style.background = THEME.bgCode;
+            e.currentTarget.style.color = THEME.text;
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = THEME.muted;
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" strokeWidth="2.2"
+               strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33h0a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82v0a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+          </svg>
+          Native ops
+        </button>
       </div>
 
       {/* Transcript — scrolls. Claude centers the empty state with

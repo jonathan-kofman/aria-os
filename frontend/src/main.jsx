@@ -13,6 +13,11 @@ const ChatPanel = lazy(() => import("./panels/ChatPanel.jsx"));
 // does not affect the existing /chat or dashboard routes.
 const QuickstartTab = lazy(() => import("./tabs/QuickstartTab.jsx"));
 
+// /native-ops — host-bridge ops surface (enrichDrawing, runFea, sheet
+// metal, surface loft, materials). Mounts a single column of buttons
+// that call bridge.executeFeature(); works in any hosted CAD panel.
+const NativeOpsPanel = lazy(() => import("./panels/NativeOpsPanel.jsx"));
+
 function _isHostedPanel() {
   try {
     const q = new URLSearchParams(window.location.search);
@@ -34,6 +39,14 @@ function _isQuickstartRoute() {
   } catch { return false; }
 }
 
+function _isNativeOpsRoute() {
+  try {
+    if (typeof window === "undefined") return false;
+    const path = (window.location?.pathname || "").toLowerCase();
+    return path === "/native-ops" || path.startsWith("/native-ops/");
+  } catch { return false; }
+}
+
 function Root() {
   // /quickstart wins over the hosted-panel check so a hosted CAD that
   // navigates to /quickstart still gets the simple landing page.
@@ -41,6 +54,16 @@ function Root() {
     return (
       <Suspense fallback={<div style={{padding:20,fontFamily:"Inter,sans-serif",color:"#9CA3B0"}}>Loading…</div>}>
         <QuickstartTab />
+      </Suspense>
+    );
+  }
+  // /native-ops — host-bridge ops surface. Works whether the page is
+  // hosted in a CAD panel (bridge dispatches to that CAD) or standalone
+  // (the panel renders an explainer).
+  if (_isNativeOpsRoute()) {
+    return (
+      <Suspense fallback={<div style={{padding:20,fontFamily:"Inter,sans-serif"}}>Loading…</div>}>
+        <NativeOpsPanel />
       </Suspense>
     );
   }
