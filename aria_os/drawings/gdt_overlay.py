@@ -247,20 +247,53 @@ def _draw_title_block(msp: Any, *, page_w: float, page_h: float,
 # Hole detection from existing geometry
 # ---------------------------------------------------------------------------
 
-def _find_circles(msp: Any, *, min_r: float = 0.5, max_r: float = 10.0
+def _find_circles(msp: Any, *, min_r: float = 0.5, max_r: float = 10.0,
+                    arc_min_sweep_deg: float = 200.0,
+                    dedup_tol_factor: float = 1.5,
+                    dedup_tol_floor: float = 0.5,
                     ) -> list[tuple[float, float, float]]:
-    """Return (cx, cy, r) for every CIRCLE entity in the drawing whose
-    radius is in [min_r, max_r] — a heuristic filter that keeps mounting
-    holes / drilled vias and rejects rotation marks or large outline
-    arcs.
+    """Return (cx, cy, r) for every CIRCLE entity AND any near-closed ARC
+    (sweep ≥ `arc_min_sweep_deg`) whose radius is in [min_r, max_r].
+
+    OCP cross-sections often emit through-holes as paired arcs (e.g. two
+    245° arcs at the same center), so we also accept arcs and dedup
+    centers. Dedup tolerance scales with radius (tol = max(r * factor,
+    floor)), so:
+      - 0.4 mm vias    -> tol = max(0.6, 0.5) = 0.6 mm  (don't over-merge)
+      - 1.65 mm slots  -> tol = max(2.5, 0.5) = 2.5 mm  (merges paired arc ends)
+      - 5 mm bores     -> tol = max(7.5, 0.5) = 7.5 mm  (merges scan artefacts)
+
+    Heuristic filter rejects rotation marks (r < min_r) and large outline
+    arcs (r > max_r).
     """
     out: list[tuple[float, float, float]] = []
-    for e in msp.query("CIRCLE"):
-        r = float(e.dxf.radius)
+    seen: list[tuple[float, float, float]] = []
+
+    def _add(cx: float, cy: float, r: float) -> None:
         if r < min_r or r > max_r:
-            continue
-        out.append((float(e.dxf.center[0]),
-                     float(e.dxf.center[1]), r))
+            return
+        tol = max(r * dedup_tol_factor, dedup_tol_floor)
+        # Dedup: skip if a hole within tol already recorded
+        for sx, sy, sr in seen:
+            if (abs(sx - cx) <= tol
+                    and abs(sy - cy) <= tol
+                    and abs(sr - r) <= max(0.3, sr * 0.3)):
+                return
+        seen.append((cx, cy, r))
+        out.append((cx, cy, r))
+
+    for e in msp.query("CIRCLE"):
+        _add(float(e.dxf.center[0]), float(e.dxf.center[1]),
+              float(e.dxf.radius))
+
+    for e in msp.query("ARC"):
+        sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360
+        if sweep == 0 and float(e.dxf.end_angle) != float(e.dxf.start_angle):
+            sweep = 360.0
+        if sweep >= arc_min_sweep_deg:
+            _add(float(e.dxf.center[0]), float(e.dxf.center[1]),
+                  float(e.dxf.radius))
+
     return out
 
 

@@ -52,20 +52,45 @@ _TECHDRAW_SCRIPT = textwrap.dedent(r"""
     OUT_FCSTD   = r"__OUT_FCSTD__"
     OUT_SUMMARY = r"__OUT_SUMMARY__"
 
-    def _find_template():
+    def _find_template(bbox_max_mm=200.0):
+        # Pick the smallest sheet that fits the part with sensible margins.
+        # Sheet sizes (mm landscape): A4 297x210, A3 420x297, A2 594x420,
+        # A1 841x594, A0 1189x841, ANSIA 279x216, ANSIB 432x279.
+        # Drone parts (60-150mm) need A4 or A3 - picking A0 (the previous
+        # fallback) makes the part look tiny on a huge sheet.
         base = os.path.join(FreeCAD.getResourceDir(), "Mod", "TechDraw",
                               "Templates")
-        candidates = [
-            os.path.join(base, "ASME", "ANSIB_Landscape.svg"),
-            os.path.join(base, "ASME", "ANSIA_Landscape.svg"),
-            os.path.join(base, "A3_Landscape_ISO7200TD.svg"),
-            os.path.join(base, "A3_LandscapeTD.svg"),
-            os.path.join(base, "A4_LandscapeTD.svg"),
-        ]
+        # ASME third-angle layout (Top above Front, Right beside Front)
+        # roughly needs sheet_w >= 2*bbox + 200mm (title block + dims).
+        # Pick the smallest sheet that fits.
+        needed = bbox_max_mm * 2.0 + 200.0
+        if needed <= 297:
+            sheet_order = ["A4", "ANSIA", "A3", "ANSIB", "A2", "A1", "A0"]
+        elif needed <= 420:
+            sheet_order = ["A3", "ANSIB", "A2", "ANSIC", "A1", "A0", "A4"]
+        elif needed <= 594:
+            sheet_order = ["A2", "ANSIC", "A1", "A0", "A3"]
+        elif needed <= 841:
+            sheet_order = ["A1", "A0", "A2", "ANSIC"]
+        else:
+            sheet_order = ["A0", "A1", "A2"]
+
+        # Build candidate paths in priority order. Try ASME (ISO 7200 TB)
+        # first per sheet, then any landscape variant.
+        candidates = []
+        for sheet in sheet_order:
+            for name_pat in (
+                f"ASME/{sheet}_Landscape.svg",
+                f"{sheet}_Landscape_ISO7200TD.svg",
+                f"{sheet}_LandscapeTD.svg",
+                f"{sheet}_Landscape_blank.svg",
+                f"{sheet}_Landscape.svg",
+            ):
+                candidates.append(os.path.join(base, name_pat))
         for c in candidates:
             if os.path.isfile(c):
                 return c
-        # Fallback: any .svg in the Templates tree
+        # Last resort: any .svg in the Templates tree
         for root, _, files in os.walk(base):
             for f in files:
                 if f.lower().endswith(".svg"):
@@ -83,9 +108,11 @@ _TECHDRAW_SCRIPT = textwrap.dedent(r"""
         part = solids[0]
         bb = part.Shape.BoundBox
 
-        # Template + page
+        # Template + page — sheet size auto-picked from bbox so a 60mm
+        # PCB doesn't end up on an A0 (1189x841) sheet
+        bb_max = max(bb.XLength, bb.YLength, bb.ZLength, 1.0)
         tmpl = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
-        tpath = _find_template()
+        tpath = _find_template(bb_max)
         if tpath:
             tmpl.Template = tpath
         page = doc.addObject("TechDraw::DrawPage", "Page")

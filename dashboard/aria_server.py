@@ -248,15 +248,21 @@ _CAD_BASE_URL = {
 }
 
 
-@app.post("/api/cad/text-to-part")
-def text_to_part(req: TextToPartRequest):
-    """End-to-end: goal text → planner ops → target CAD via HTTP."""
+def _run_text_to_part_inproc(goal: str, cad: str = "solidworks",
+                                quality_tier: str = "fast") -> dict:
+    """Body of /api/cad/text-to-part — extracted so callers can run it
+    in-process instead of via HTTP self-call.
+
+    The HTTP recursion path deadlocks under the default single-worker
+    uvicorn (the inner request waits for the outer worker that's blocked
+    waiting for the inner). /api/system/full-build calls this directly.
+    """
     import httpx as _httpx
 
-    cad = (req.cad or "solidworks").lower().strip()
+    cad = (cad or "solidworks").lower().strip()
     base = _CAD_BASE_URL.get(cad)
     if not base:
-        raise HTTPException(400, f"unknown cad: {cad!r}")
+        return {"ok": False, "error": f"unknown cad: {cad!r}"}
 
     # Confirm the listener is up — fail fast with a useful error rather
     # than dispatching ops into a void.
@@ -264,74 +270,78 @@ def text_to_part(req: TextToPartRequest):
         with _httpx.Client(timeout=5.0) as c:
             status = c.get(f"{base}/status").json()
             if not status.get("ok"):
-                raise HTTPException(502, f"{cad} listener not ready: {status}")
+                return {"ok": False,
+                          "error": f"{cad} listener not ready: {status}"}
             # Fresh document before each generation — beginPlan only clears
             # the in-memory registry, not the actual Rhino/SW doc objects.
             # Without /new_doc the scene piles up across runs.
             try: c.post(f"{base}/new_doc", json={}, timeout=15.0)
             except Exception: pass
-    except HTTPException:
-        raise
     except Exception as exc:
-        raise HTTPException(502,
-            f"{cad} listener at {base} unreachable: {type(exc).__name__}: {exc}")
+        return {"ok": False,
+                  "error": f"{cad} listener at {base} unreachable: "
+                            f"{type(exc).__name__}: {exc}"}
 
-    # Plan via the LLM planner — same path /api/generate uses.
+    # Plan via the LLM planner
     from aria_os.native_planner.llm_planner import plan_from_llm
     try:
-        spec = {}  # spec extraction would be nice; planner can survive empty
-        ops = plan_from_llm(req.goal, spec,
-                             quality=req.quality_tier,
-                             repo_root=REPO_ROOT)
+        ops = plan_from_llm(goal, {}, quality=quality_tier,
+                              repo_root=REPO_ROOT)
     except Exception as exc:
-        raise HTTPException(500,
-            f"planner failed: {type(exc).__name__}: {exc}")
+        return {"ok": False,
+                  "error": f"planner failed: {type(exc).__name__}: {exc}"}
     if not ops:
         return {"ok": False, "error": "planner returned no ops",
-                 "cad": cad, "goal": req.goal}
+                 "cad": cad, "goal": goal}
 
-    # Dispatch each op to the target CAD listener. Stop at first failure
-    # — the cache + LLM-args layer in the addin handles arg-combo retries
-    # internally; an op-level failure here means something genuinely
-    # outside the autonomous-recovery scope.
+    # Dispatch each op — keep going past individual failures.
     results = []
-    failed_at = None
+    first_failed_at = None
     with _httpx.Client(timeout=120.0) as c:
         for i, op in enumerate(ops):
             payload = {"kind": op.get("kind"), "params": op.get("params", {})}
             try:
                 r = c.post(f"{base}/op", json=payload)
                 r_json = r.json()
+                ok = (r_json.get("result") or {}).get("ok",
+                                                       r_json.get("ok"))
                 results.append({
                     "i": i, "kind": payload["kind"],
                     "label": op.get("label"),
-                    "ok": (r_json.get("result") or {}).get("ok",
-                                                            r_json.get("ok")),
+                    "ok": ok,
                     "result": r_json.get("result"),
                     "error": r_json.get("error"),
                 })
-                if not results[-1]["ok"]:
-                    failed_at = i
-                    break
+                if not ok and first_failed_at is None:
+                    first_failed_at = i
             except Exception as exc:
                 results.append({
                     "i": i, "kind": payload["kind"], "ok": False,
                     "error": f"transport: {type(exc).__name__}: {exc}",
                 })
-                failed_at = i
-                break
+                if first_failed_at is None:
+                    first_failed_at = i
 
     n_ok = sum(1 for r in results if r["ok"])
     return {
-        "ok": failed_at is None,
-        "cad": cad,
-        "goal": req.goal,
-        "n_ops_planned": len(ops),
+        "ok": first_failed_at is None,
+        "cad": cad, "goal": goal,
+        "n_ops_planned":    len(ops),
         "n_ops_dispatched": len(results),
-        "n_ops_succeeded": n_ok,
-        "failed_at": failed_at,
-        "results": results,
+        "n_ops_succeeded":  n_ok,
+        "failed_at":        first_failed_at,
+        "results":          results,
     }
+
+
+@app.post("/api/cad/text-to-part")
+def text_to_part(req: TextToPartRequest):
+    """End-to-end: goal text → planner ops → target CAD via HTTP."""
+    result = _run_text_to_part_inproc(req.goal, req.cad, req.quality_tier)
+    if "error" in result and not result.get("ok") and "listener" in result.get("error", ""):
+        # Listener-level errors deserve 502 status
+        raise HTTPException(502, result["error"])
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -1245,19 +1255,21 @@ def full_build(req: FullBuildRequest):
         step("ecad_step_export", False, error=str(exc))
 
     # --- 2. MCAD: generate frame ------------------------------------------
-    with _httpx.Client(timeout=180.0) as c:
-        try:
-            r = c.post(f"http://localhost:8001/api/cad/text-to-part",
-                        json={"goal": frame_goal,
-                              "cad": req.mcad_cad,
-                              "quality_tier": req.quality_tier})
-            mcad = r.json()
-            step("mcad_generate", mcad.get("ok"),
-                  ops_ok=mcad.get("n_ops_succeeded"),
-                  ops_total=mcad.get("n_ops_planned"))
-        except Exception as exc:
-            mcad = {}
-            step("mcad_generate", False, error=str(exc))
+    # In-process call (NOT HTTP recursion) — single-worker uvicorn would
+    # deadlock on a self-call: the inner request waits for the worker
+    # that's blocked waiting on the outer. Calling the helper directly
+    # bypasses the HTTP layer and keeps the same goal text → planner →
+    # SW dispatch flow.
+    try:
+        mcad = _run_text_to_part_inproc(
+            frame_goal, req.mcad_cad, req.quality_tier)
+        step("mcad_generate", mcad.get("ok"),
+              ops_ok=mcad.get("n_ops_succeeded"),
+              ops_total=mcad.get("n_ops_planned"),
+              error=mcad.get("error") if not mcad.get("ok") else None)
+    except Exception as exc:
+        mcad = {}
+        step("mcad_generate", False, error=str(exc))
 
     frame_step = bundle / "drone_frame.step"
     try:
@@ -1582,42 +1594,52 @@ def full_build(req: FullBuildRequest):
             step("pcb_gdt_overlay", False,
                   error=f"{type(exc).__name__}: {exc}")
 
-    # --- 7c. Frame DXF via FreeCAD TechDraw + GD&T overlay --------------
-    # SW's SaveAs path doesn't support DXF/DWG for Part documents (only
-    # for Drawing documents). FreeCAD TechDraw handles part → 2D
-    # projection headlessly and outputs a real DXF accepted by every
-    # fab shop.
+    # --- 7c. Frame DXF — CadQuery cross-section is the primary source --
+    # FreeCAD TechDraw's `writeDXFPage` saves the template skeleton but
+    # doesn't bake projected geometry into the DXF in headless 1.0 mode
+    # (verified: 0 entities). The CQ-based projector imports the STEP,
+    # slices at mid-height, and writes lines/arcs/circles directly — a
+    # real DXF the GD&T overlay can read holes from. TechDraw still runs
+    # for the .FCStd (good for GUI annotation) and as a redundancy check.
     frame_dxf      = bundle / "drone_frame.dxf"
     frame_dxf_gdt  = bundle / "drone_frame_gdt.dxf"
     frame_dwg      = bundle / "drone_frame.dwg"
     if (frame_step.is_file()
             and frame_step.stat().st_size > 10_000):
+        # Primary: CadQuery cross-section -> DXF
+        try:
+            from aria_os.drawings.cq_dxf_projector import step_to_top_view_dxf
+            r_cq = step_to_top_view_dxf(str(frame_step), str(frame_dxf))
+            step("frame_cq_projection", r_cq.get("ok", False),
+                  edges=r_cq.get("n_edges"),
+                  circles=r_cq.get("n_circles"),
+                  arcs=r_cq.get("n_arcs"),
+                  lines=r_cq.get("n_lines"),
+                  bbox=r_cq.get("bbox_mm"))
+            if frame_dxf.is_file():
+                shutil.copy(frame_dxf, frame_dwg)
+        except Exception as exc:
+            step("frame_cq_projection", False,
+                  error=f"{type(exc).__name__}: {exc}")
+
+        # Secondary: FreeCAD TechDraw (FCStd handoff for human review)
         try:
             from aria_os.drawings.mbd_drawings import generate_drawing
             tdraw_dir = bundle / "drawings" / "frame_techdraw"
-            r = generate_drawing(
+            r_td = generate_drawing(
                 str(frame_step), out_dir=str(tdraw_dir),
                 title=f"Frame — {req.bundle_name}",
                 part_no=f"{req.bundle_name}-FRAME",
                 material="cfrp", revision="A", company="ARIA-OS")
-            step("frame_techdraw", r.get("passed", False),
-                  dxf=r.get("dxf_path"),
-                  fcstd=r.get("fcstd_path"),
-                  n_views=r.get("n_views"))
-            td_dxf_path = r.get("dxf_path")
-            if r.get("passed") and td_dxf_path and Path(td_dxf_path).is_file():
-                shutil.copy(td_dxf_path, frame_dxf)
-                # DWG is just an alternate container — copy the same DXF
-                # bytes with the .dwg extension so toolchains expecting
-                # `*.dwg` can ingest the content. Most modern shops
-                # accept either format.
-                shutil.copy(td_dxf_path, frame_dwg)
+            step("frame_techdraw", r_td.get("passed", False),
+                  fcstd=r_td.get("fcstd_path"),
+                  template=r_td.get("template"),
+                  n_views=r_td.get("n_views"))
         except Exception as exc:
             step("frame_techdraw", False, error=str(exc))
     else:
-        step("frame_techdraw", False,
-              reason="frame STEP missing or too small "
-                     "(SW didn't regen a real frame)")
+        step("frame_cq_projection", False,
+              reason="frame STEP missing or too small")
 
     # GD&T overlay on the produced frame DXF
     if frame_dxf.is_file():
