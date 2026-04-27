@@ -157,8 +157,167 @@ _REQUIRED_PARAMS = {
 _BOOLEAN_OPS = ("new", "cut", "join", "intersect")
 
 
+# ---------------------------------------------------------------------------
+# Pre-validation normalization
+#
+# LLM planners drift on naming. Two common drifts hit hard:
+#   1. plane spec — "Top", "Front", "horizontal", "X-Y", "XY plane",
+#      "+Z" — all valid English, none accepted by the executor which
+#      wants strictly "XY"/"XZ"/"YZ".
+#   2. param-name aliases — "radius"/"diameter"/"d" instead of "r";
+#      "width"/"height" instead of "w"/"h"; "depth"/"length" instead
+#      of "distance"; "type"/"mode" instead of "operation".
+#
+# Reject-and-regenerate works but burns tokens and time on something
+# we can fix locally. Per the autonomy-first rule: build the next
+# recovery layer into the code. We rewrite ambiguous params to their
+# canonical form before validation, so a 1-token slip never aborts a
+# full plan. If the rewrite changes a value (e.g. diameter → radius),
+# we record it on the op as `_normalized` for downstream tracing.
+# ---------------------------------------------------------------------------
+
+# Plane name + axis shorthand -> canonical XY/XZ/YZ. Aligned with the
+# SW addin's plane mapping (SwPlaneName in AriaSwAddin.cs):
+#   XY -> Front Plane   (normal Z, "lay flat" orientation)
+#   XZ -> Top Plane     (normal Y, looking down)
+#   YZ -> Right Plane   (normal X, side view)
+_PLANE_ALIASES = {
+    # Direct canonical (idempotent)
+    "XY": "XY", "XZ": "XZ", "YZ": "YZ",
+    "X-Y": "XY", "X-Z": "XZ", "Y-Z": "YZ",
+    "XY PLANE": "XY", "XZ PLANE": "XZ", "YZ PLANE": "YZ",
+    # SW / Fusion / Onshape canonical plane names
+    "FRONT": "XY", "FRONT PLANE": "XY",
+    "TOP":   "XZ", "TOP PLANE":   "XZ",
+    "RIGHT": "YZ", "RIGHT PLANE": "YZ",
+    "SIDE":  "YZ", "SIDE PLANE":  "YZ",
+    # English orientation hints
+    "HORIZONTAL": "XZ", "GROUND": "XZ", "FLOOR": "XZ",
+    "VERTICAL":   "XY",
+    "LATERAL":    "YZ",
+    # Axis normals — picking the plane whose normal is the named axis
+    "+Z": "XY", "-Z": "XY", "Z": "XY",
+    "+Y": "XZ", "-Y": "XZ", "Y": "XZ",
+    "+X": "YZ", "-X": "YZ", "X": "YZ",
+}
+
+# Param-name aliases per op. Each entry says "if you see <alias>, treat
+# it as <canonical>; if the value needs unit conversion (e.g. diameter
+# halved into radius), the convert callable handles that."
+_PARAM_ALIASES_PER_KIND = {
+    "sketchCircle": {
+        "radius":      ("r", None),
+        "rad":         ("r", None),
+        "r_mm":        ("r", None),
+        "diameter":    ("r", lambda v: v / 2.0),
+        "diameter_mm": ("r", lambda v: v / 2.0),
+        "dia":         ("r", lambda v: v / 2.0),
+        "d":           ("r", lambda v: v / 2.0),
+    },
+    "sketchRect": {
+        "width":     ("w", None),
+        "width_mm":  ("w", None),
+        "x":         ("w", None),
+        "height":    ("h", None),
+        "height_mm": ("h", None),
+        "y":         ("h", None),
+        "length":    ("w", None),  # ambiguous but "length" reads as horizontal
+    },
+    "extrude": {
+        "depth":     ("distance", None),
+        "depth_mm":  ("distance", None),
+        "length":    ("distance", None),
+        "length_mm": ("distance", None),
+        "height":    ("distance", None),
+        "height_mm": ("distance", None),
+        "thickness": ("distance", None),
+        "type":      ("operation", None),
+        "mode":      ("operation", None),
+    },
+    "fillet": {
+        "radius":   ("r", None),
+        "rad":      ("r", None),
+        "r_mm":     ("r", None),
+    },
+    "circularPattern": {
+        "n":           ("count", None),
+        "instances":   ("count", None),
+        "occurrences": ("count", None),
+    },
+    "addComponent": {
+        "name":   ("id", None),
+        "kind":   ("type", None),
+    },
+}
+
+# Normalize the value side of `operation` in extrude ops.
+_EXTRUDE_OPERATION_ALIASES = {
+    "add":      "new",  "boss":   "new",  "create": "new",
+    "remove":   "cut",  "subtract": "cut", "hole":  "cut",
+    "merge":    "join",
+    "join":     "join",
+    "intersect": "intersect",
+    "new":      "new",
+    "cut":      "cut",
+}
+
+
+def _normalize_plan(plan: list[dict]) -> list[dict]:
+    """Mutate each op's params in-place to canonical form. Returns plan
+    so callers can chain. Records changes on op["_normalized"]."""
+    if not plan:
+        return plan
+    for op in plan:
+        kind = op.get("kind")
+        params = op.get("params") or {}
+        changes: list[str] = []
+
+        # 1. Plane normalization (only meaningful on newSketch)
+        if kind == "newSketch":
+            plane = params.get("plane")
+            if isinstance(plane, str):
+                key = plane.strip().upper()
+                canon = _PLANE_ALIASES.get(key)
+                if canon and canon != plane:
+                    params["plane"] = canon
+                    changes.append(f"plane:{plane!r}->{canon!r}")
+
+        # 2. Param-name aliases per kind
+        aliases = _PARAM_ALIASES_PER_KIND.get(kind, {})
+        for src, (dst, convert) in list(aliases.items()):
+            if src in params and dst not in params:
+                v = params.pop(src)
+                if convert is not None:
+                    try:
+                        v = convert(float(v))
+                    except (TypeError, ValueError):
+                        # Leave as-is; the validator will catch it.
+                        pass
+                params[dst] = v
+                changes.append(f"{src}->{dst}")
+
+        # 3. Extrude operation value normalization
+        if kind == "extrude" and "operation" in params:
+            v = params["operation"]
+            if isinstance(v, str):
+                canon = _EXTRUDE_OPERATION_ALIASES.get(v.lower())
+                if canon and canon != v:
+                    params["operation"] = canon
+                    changes.append(f"operation:{v!r}->{canon!r}")
+
+        if changes:
+            op["_normalized"] = changes
+        op["params"] = params
+    return plan
+
+
 def validate_plan(plan: list[dict]) -> tuple[bool, list[str]]:
-    """Structural check. Returns (ok, list_of_issues). Empty issues == ok."""
+    """Structural check. Returns (ok, list_of_issues). Empty issues == ok.
+
+    Calls `_normalize_plan` first so plane/param drift never fails
+    validation when the intent was unambiguous.
+    """
+    plan = _normalize_plan(plan)
     issues: list[str] = []
     if not plan:
         return False, ["Plan is empty"]

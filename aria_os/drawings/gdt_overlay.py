@@ -84,16 +84,30 @@ def _draw_datum(msp: Any, x: float, y: float, label: str,
                   size: float = 3.5) -> None:
     """Draw a filled datum triangle pointing at (x, y), label box offset
     by (dx, dy) from the apex.
+
+    Implementation note: FreeCAD's DXF importer rejects DXF SOLID
+    entities ("Unsupported DXF features: Entity type 'SOLID'"). We draw
+    the triangle as a closed LWPOLYLINE outline + a HATCH fill, both of
+    which import cleanly into FreeCAD, AutoCAD, SolidWorks, SolidEdge.
     """
-    # Filled triangle — apex at (x, y), base centered at (x + dx, y + dy)
     base_cx = x + dx
     base_cy = y + dy
     half = size / 2.0
-    msp.add_solid([(x, y),
-                   (base_cx - half, base_cy),
-                   (base_cx + half, base_cy),
-                   (base_cx + half, base_cy)],
-                  dxfattribs={"layer": "ARIA_DATUM"})
+    tri = [(x, y), (base_cx - half, base_cy), (base_cx + half, base_cy)]
+
+    # Outline — closed LWPOLYLINE (universally imported)
+    msp.add_lwpolyline(tri + [tri[0]],
+                        dxfattribs={"layer": "ARIA_DATUM"})
+
+    # Fill — HATCH with SOLID pattern. Wrapped in try/except so an
+    # ezdxf-version quirk on hatch creation cannot drop the outline.
+    try:
+        hatch = msp.add_hatch(color=1,
+                                dxfattribs={"layer": "ARIA_DATUM"})
+        hatch.paths.add_polyline_path(tri + [tri[0]], is_closed=True)
+    except Exception:
+        # Outline alone is still readable; downstream importers fine.
+        pass
     # Box around the letter
     box_w = size * 1.4
     box_h = size * 1.2
@@ -478,6 +492,13 @@ def overlay_gdt(dxf_path: str | Path, *,
             (x_min, note_y + 4 * (len(notes) - i)),
             align=TextEntityAlignment.LEFT)
 
+    # ---- Sanitize: convert any SOLID / 3DFACE entities to LWPOLYLINE
+    #      + HATCH so FreeCAD's importer (which rejects SOLID with
+    #      "Unsupported DXF features") still loads the drawing. This is
+    #      a belt-and-braces pass: even if upstream geometry (KiCad
+    #      Edge_Cuts, FreeCAD TechDraw) emits a SOLID, we rewrite it.
+    sanitized = _sanitize_freecad(msp)
+
     try:
         doc.saveas(out_path)
     except Exception as exc:
@@ -492,7 +513,95 @@ def overlay_gdt(dxf_path: str | Path, *,
         "page_size_mm": [round(page_w, 1), round(page_h, 1)],
         "bbox_mm": [round(x_min, 2), round(y_min, 2),
                        round(x_max, 2), round(y_max, 2)],
+        "sanitized": sanitized,
     }
+
+
+# ---------------------------------------------------------------------------
+# Sanitizer — rewrite entities that FreeCAD's DXF importer rejects
+# ---------------------------------------------------------------------------
+
+def _sanitize_freecad(msp: Any) -> dict:
+    """Rewrite SOLID and 3DFACE entities as closed LWPOLYLINE + HATCH.
+
+    FreeCAD's built-in DXF importer (Draft.importDXF) emits warnings of
+    the form "Unsupported DXF features: Entity type 'SOLID': N time(s)
+    first at line ..." and silently skips those entities, leaving the
+    drawing partially blank. This pass converts every SOLID/3DFACE in
+    the modelspace into a closed polyline outline + a HATCH fill on the
+    same layer/color, both of which FreeCAD imports natively.
+
+    Returns counts so the caller can record the rewrite in the run
+    manifest.
+    """
+    rewrote_solid = 0
+    rewrote_3dface = 0
+
+    # Convert SOLID entities (4 vertices in DXF; OCP/AutoCAD fill order)
+    for ent in list(msp.query("SOLID")):
+        try:
+            verts = [
+                (float(ent.dxf.vtx0[0]), float(ent.dxf.vtx0[1])),
+                (float(ent.dxf.vtx1[0]), float(ent.dxf.vtx1[1])),
+                (float(ent.dxf.vtx3[0]), float(ent.dxf.vtx3[1])),
+                (float(ent.dxf.vtx2[0]), float(ent.dxf.vtx2[1])),
+            ]
+            # Drop duplicate trailing vertex (triangle stored as quad
+            # by repeating the last point)
+            uniq: list[tuple[float, float]] = []
+            for v in verts:
+                if not uniq or (abs(v[0] - uniq[-1][0]) > 1e-6
+                                  or abs(v[1] - uniq[-1][1]) > 1e-6):
+                    uniq.append(v)
+            if len(uniq) < 3:
+                msp.delete_entity(ent)
+                continue
+            attrs = {"layer": ent.dxf.layer}
+            try:
+                attrs["color"] = ent.dxf.color
+            except Exception:
+                pass
+            msp.add_lwpolyline(uniq + [uniq[0]], dxfattribs=attrs)
+            try:
+                hatch = msp.add_hatch(color=attrs.get("color", 1),
+                                        dxfattribs={"layer": attrs["layer"]})
+                hatch.paths.add_polyline_path(uniq + [uniq[0]],
+                                                is_closed=True)
+            except Exception:
+                pass
+            msp.delete_entity(ent)
+            rewrote_solid += 1
+        except Exception:
+            # If any one entity is malformed, leave it alone rather than
+            # crashing the whole save — better a partial drawing than
+            # none at all.
+            continue
+
+    for ent in list(msp.query("3DFACE")):
+        try:
+            verts = [
+                (float(ent.dxf.vtx0[0]), float(ent.dxf.vtx0[1])),
+                (float(ent.dxf.vtx1[0]), float(ent.dxf.vtx1[1])),
+                (float(ent.dxf.vtx2[0]), float(ent.dxf.vtx2[1])),
+                (float(ent.dxf.vtx3[0]), float(ent.dxf.vtx3[1])),
+            ]
+            uniq = []
+            for v in verts:
+                if not uniq or (abs(v[0] - uniq[-1][0]) > 1e-6
+                                  or abs(v[1] - uniq[-1][1]) > 1e-6):
+                    uniq.append(v)
+            if len(uniq) < 3:
+                msp.delete_entity(ent)
+                continue
+            attrs = {"layer": ent.dxf.layer}
+            msp.add_lwpolyline(uniq + [uniq[0]], dxfattribs=attrs)
+            msp.delete_entity(ent)
+            rewrote_3dface += 1
+        except Exception:
+            continue
+
+    return {"solid_rewrites": rewrote_solid,
+              "face3d_rewrites": rewrote_3dface}
 
 
 __all__ = ["overlay_gdt", "_SYM"]

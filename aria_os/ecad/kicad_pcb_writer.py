@@ -353,6 +353,14 @@ def write_kicad_pcb(
 {trace_block}
 )
 '''
+    # Belt-and-braces sanitizer: KiCad 10's S-expression parser fails
+    # silently with "Failed to load board" if any stray ";;" line comment
+    # leaks into the file (an older code path here used to emit one for
+    # the "no traces" case). Strip them before write so a future
+    # regression in any sub-builder cannot reintroduce the bug.
+    pcb = "\n".join(
+        line for line in pcb.splitlines()
+        if not line.lstrip().startswith(";"))
     out_pcb_path.write_text(pcb, encoding="utf-8")
     return out_pcb_path
 
@@ -678,8 +686,11 @@ def _build_traces_sexpr(components: list,
     trace-less. This is "boards have copper now", not "boards are well
     routed". A human or proper autorouter should re-route before fab.
     """
+    # NB: KiCad 10's S-expression parser rejects ";;" line comments —
+    # any "Failed to load board" error from kicad-cli traces back here
+    # if a comment leaked into the file. Return empty strings instead.
     if not components or not nets:
-        return "    ;; no traces emitted (no components or no nets)"
+        return ""
 
     # Naive star routing produces ~200 solder_mask_bridge DRC errors as
     # straight segments cross pads of unrelated nets. Default OFF; the
@@ -688,9 +699,7 @@ def _build_traces_sexpr(components: list,
     # behaviour for visual rats-nest debugging.
     import os as _os
     if _os.environ.get("ARIA_EMIT_TRACES", "0") != "1":
-        return ("    ;; no traces emitted (ARIA_EMIT_TRACES=0). "
-                "Pads are netted; route via KiCad's interactive router or "
-                "Freerouting. GND pour provides ground connectivity.")
+        return ""
 
     # Build per-net pad lists: [(ref, (x, y)), ...]
     # Use explicit per-component net assignments when present; otherwise
@@ -749,7 +758,7 @@ def _build_traces_sexpr(components: list,
                 f'(net {nidx}) (tstamp {uuid4()}))'
             )
     if not lines:
-        return "    ;; no traces emitted (no multi-pin nets)"
+        return ""
     return "\n".join(lines)
 
 

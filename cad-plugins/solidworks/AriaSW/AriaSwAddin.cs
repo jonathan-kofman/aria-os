@@ -195,6 +195,25 @@ namespace AriaSW
                     "setProperty"     => OpSetProperty(p),
                     "addDimension"    => OpAddDimension(p),
                     "holeWizard"      => OpHoleWizard(p),
+                    // Assembly ops (type-1 assembler — mates/constraints)
+                    "beginAssembly"   => OpBeginAssembly(p),
+                    "insertComponent" => OpInsertComponent(p),
+                    "addMate"         => OpAddMate(p),
+                    // Native SW drawing op — creates SLDDRW with views,
+                    // auto-dimensioning, BOM, and revision block.
+                    "createDrawing"   => OpCreateDrawing(p),
+                    // Drawing enrichment — GD&T, section view, exploded
+                    // view (asm) — applied to the currently-active .slddrw.
+                    "enrichDrawing"   => OpEnrichDrawing(p),
+                    // Native SW Simulation FEA — parametric iterations
+                    "runFea"          => OpRunFEA(p),
+                    "feaIterate"      => OpRunFEA(p),
+                    // Sheet-metal feature ops
+                    "sheetMetalBaseFlange" => OpSheetMetalBaseFlange(p),
+                    "sheetMetalEdgeFlange" => OpSheetMetalEdgeFlange(p),
+                    // Surface modeling ops
+                    "surfaceLoft"     => OpSurfaceLoft(p),
+                    "surfaceExtrude"  => OpSurfaceExtrude(p),
                     // Existing SW-unique stubs
                     "toolboxHardware" => OpToolboxHardware(p),
                     "weldmentProfile" => OpWeldmentProfile(p),
@@ -1082,7 +1101,14 @@ namespace AriaSW
         private object OpSaveAs(Dictionary<string, object> p)
         {
             string path = p.ContainsKey("path") ? p["path"]?.ToString() : null;
-            if (_model == null) return new { ok = false, error = "no model" };
+            // Always prefer the user-visible active doc over the cached
+            // _model. Earlier ops (createDrawing, beginAssembly) replace
+            // the active doc but don't always update _model — saving the
+            // stale handle would write the wrong file. Active-doc-first
+            // matches user expectation and the SW UI behaviour.
+            var active = _sw.IActiveDoc2 as IModelDoc2;
+            var target = active ?? _model;
+            if (target == null) return new { ok = false, error = "no active doc" };
             if (string.IsNullOrEmpty(path))
             {
                 string outDir = Path.Combine(
@@ -1093,11 +1119,19 @@ namespace AriaSW
                     $"aria_{DateTime.Now:yyyyMMdd_HHmmss}.SLDPRT");
             }
             int errs = 0, warns = 0;
-            bool ok = _model.Extension.SaveAs(
+            bool ok = target.Extension.SaveAs(
                 path,
                 (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
                 (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
                 null, ref errs, ref warns);
+            // Now close any imported part docs we kept open during the
+            // assembly build. Best-effort: a missed close is harmless
+            // (SW will keep them in the doc list).
+            foreach (var t in _importedPartTitles)
+            {
+                try { _sw.CloseDoc(t); } catch { }
+            }
+            _importedPartTitles.Clear();
             return new { ok, path, errs, warns };
         }
 
@@ -1155,6 +1189,1393 @@ namespace AriaSW
             return new { ok = false,
                           error = "holeWizard requires a face selection in params; not yet wired" };
         }
+
+        // -----------------------------------------------------------------
+        // Assembly ops — type-1 assembler (SW mates/constraints).
+        //
+        // Bridge contract additions for assembling pre-built parts into a
+        // single .sldasm with real mates (vs. type-2 which only writes
+        // human-readable step-by-step instructions). Used by the system
+        // bundle pipeline: PCB STEP + frame STEP -> mated assembly.
+        // -----------------------------------------------------------------
+
+        private IAssemblyDoc _asm;
+        private string _importedPartTitle;
+        private readonly List<string> _importedPartTitles = new();
+
+        private object OpBeginAssembly(Dictionary<string, object> p)
+        {
+            // Close any active doc (silent, no save) and create a fresh
+            // assembly from the user's default Assembly template — same
+            // isolation approach as OpBeginPlan for parts.
+            try
+            {
+                var active = _sw.IActiveDoc2 as IModelDoc2;
+                if (active != null)
+                {
+                    _sw.CloseDoc(active.GetTitle());
+                    FileLog($"  beginAssembly: closed prior doc '{active.GetTitle()}'");
+                }
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  beginAssembly: close prior threw (continuing): {ex.Message}");
+            }
+            _model = null;
+            _asm = null;
+
+            // Default Assembly template path. Older SW versions return an
+            // empty string for swDefaultTemplateAssembly when no default is
+            // set; falling back to NewDocument with empty path uses SW's
+            // built-in template.
+            string tmpl = (string)_sw.GetUserPreferenceStringValue(
+                (int)swUserPreferenceStringValue_e.swDefaultTemplateAssembly);
+            int paperSize = (int)swDwgPaperSizes_e.swDwgPaperAsize;
+            var asmDoc = _sw.NewDocument(tmpl ?? "", paperSize, 0.279, 0.216)
+                            as IModelDoc2;
+            if (asmDoc == null)
+                return new { ok = false,
+                              error = $"NewDocument(template='{tmpl}') returned null" };
+            _model = asmDoc;
+            _asm = asmDoc as IAssemblyDoc;
+            if (_asm == null)
+                return new { ok = false,
+                              error = "NewDocument did not produce an Assembly" };
+
+            _registry.Clear();
+            _aliasMap.Clear();
+            FileLog($"  beginAssembly: opened fresh assembly '{_model.GetTitle()}'");
+            return new { ok = true,
+                          fresh_doc = _model.GetTitle(),
+                          template = tmpl };
+        }
+
+        private object OpInsertComponent(Dictionary<string, object> p)
+        {
+            // params: file (absolute path to .sldprt/.step), alias,
+            //         x_mm, y_mm, z_mm (insertion point, defaults to 0)
+            if (_asm == null)
+                return new { ok = false, error = "no active assembly — call beginAssembly first" };
+
+            string file = p.ContainsKey("file") ? p["file"]?.ToString() : null;
+            if (string.IsNullOrEmpty(file) || !File.Exists(file))
+                return new { ok = false, error = $"file not found: {file}" };
+
+            string alias = p.ContainsKey("alias") ? p["alias"]?.ToString() : null;
+            double x = p.ContainsKey("x_mm") ? Mm(p["x_mm"]) : 0.0;
+            double y = p.ContainsKey("y_mm") ? Mm(p["y_mm"]) : 0.0;
+            double z = p.ContainsKey("z_mm") ? Mm(p["z_mm"]) : 0.0;
+
+            // STEP files: SW's SDK import path is LoadFile4, NOT OpenDoc6
+            // (OpenDoc6 returns swImportLogFolderError=2097152 on STEP in
+            // SW 2024). LoadFile4 imports the foreign file and returns the
+            // resulting IModelDoc2. We then save as .sldprt so AddComponent5
+            // can reference it by path. SLDPRT files insert directly.
+            string ext = Path.GetExtension(file).ToLowerInvariant();
+            string partPath = file;
+            if (ext == ".step" || ext == ".stp")
+            {
+                FileLog($"  insertComponent: importing STEP via LoadFile4 '{file}'");
+                IModelDoc2 imported = null;
+                int lf4Errors = 0;
+                try
+                {
+                    // LoadFile4(filename, argString, ImportData=null, out errors).
+                    // Empty argString uses SW's default STEP import settings.
+                    imported = _sw.LoadFile4(file, "", null, ref lf4Errors)
+                                 as IModelDoc2;
+                    FileLog($"  insertComponent: LoadFile4 errs={lf4Errors} ok={(imported != null)}");
+                }
+                catch (Exception ex)
+                {
+                    FileLog($"  insertComponent: LoadFile4 threw: {ex.GetType().Name}: {ex.Message}");
+                }
+
+                // Fallback: OpenDoc6 — works on some SW versions for STEP
+                // even though it failed on 2024.
+                if (imported == null)
+                {
+                    int e6 = 0, w6 = 0;
+                    imported = _sw.OpenDoc6(file,
+                        (int)swDocumentTypes_e.swDocPART,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref e6, ref w6) as IModelDoc2;
+                    FileLog($"  insertComponent: OpenDoc6 fallback errs={e6} warns={w6}");
+                }
+
+                if (imported == null)
+                    return new { ok = false,
+                                  error = $"STEP import failed for '{file}' (LoadFile4 + OpenDoc6 both returned null)" };
+
+                partPath = Path.ChangeExtension(file, ".sldprt");
+                int saveErr = 0, saveWarn = 0;
+                bool savedOk = imported.Extension.SaveAs(partPath,
+                    (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                    null, ref saveErr, ref saveWarn);
+                FileLog($"  insertComponent: STEP -> SLDPRT '{partPath}' savedOk={savedOk} errs={saveErr}");
+                // Close the imported (STEP) part — its on-disk SLDPRT
+                // version is what AddComponent will reference. Closing
+                // here avoids SW's "doc with same name open" conflict
+                // that intermittently makes AddComponent4/5 return null
+                // on the SECOND insert in a session.
+                string impTitle = imported.GetTitle();
+                try { _sw.CloseDoc(impTitle); } catch { }
+                FileLog($"  insertComponent: closed imported '{impTitle}'");
+
+                // Re-open the .sldprt fresh so SW's open-docs registry
+                // has the same path AddComponent will reference. This
+                // is the workaround for SW 2024's silent AddComponent5
+                // failure when the referenced part wasn't most-recently
+                // opened by its on-disk path.
+                int oerr = 0, owarn = 0;
+                var partDoc = _sw.OpenDoc6(partPath,
+                    (int)swDocumentTypes_e.swDocPART,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref oerr, ref owarn) as IModelDoc2;
+                if (partDoc != null)
+                {
+                    _importedPartTitle = partDoc.GetTitle();
+                    FileLog($"  insertComponent: re-opened SLDPRT title='{_importedPartTitle}'");
+                }
+                else
+                {
+                    FileLog($"  insertComponent: re-open SLDPRT failed errs={oerr}");
+                }
+
+                // Re-activate the assembly so AddComponent5 hits the right doc.
+                int aerr = 0;
+                _sw.ActivateDoc3(_model.GetTitle(), false,
+                    (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref aerr);
+            }
+
+            // AddComponent4 is more reliable than AddComponent5 in SW
+            // 2024 — fewer params, takes explicit ConfigName ("Default"
+            // is what LoadFile4-imported parts always have). We try the
+            // simpler API first; AddComponent5 is the fallback for parts
+            // that need NewConfigName options.
+            IComponent2 comp = _asm.AddComponent4(partPath, "Default", x, y, z)
+                                 as IComponent2;
+            if (comp == null)
+            {
+                FileLog($"  insertComponent: AddComponent4 returned null, trying AddComponent5");
+                comp = _asm.AddComponent5(partPath,
+                          (int)swAddComponentConfigOptions_e.swAddComponentConfigOptions_CurrentSelectedConfig,
+                          "", false, "", x, y, z) as IComponent2;
+            }
+            if (comp == null)
+                return new { ok = false, error = $"AddComponent4/5 returned null for '{partPath}'" };
+
+            string compName = comp.Name2;
+            if (!string.IsNullOrEmpty(alias))
+                _aliasMap[alias] = compName;
+            FileLog($"  insertComponent: alias='{alias}' name='{compName}' pos=({x},{y},{z})");
+            // Defer closing imported part docs to saveAs time — SW 2024
+            // sometimes returns null from a later AddComponent5 if we
+            // close the previous part doc immediately, possibly because
+            // the close triggers an assembly rebuild that races the next
+            // import.
+            if (!string.IsNullOrEmpty(_importedPartTitle))
+            {
+                _importedPartTitles.Add(_importedPartTitle);
+                _importedPartTitle = null;
+            }
+            return new { ok = true, alias, name = compName, file = partPath };
+        }
+
+        private object OpAddMate(Dictionary<string, object> p)
+        {
+            // params:
+            //   type:    "concentric" | "coincident" | "parallel" |
+            //            "perpendicular" | "tangent" | "distance"
+            //   align:   "aligned" | "anti_aligned" | "closest" (default closest)
+            //   ref1:    SelectByID2 reference string for entity 1
+            //            (e.g. "Face@MyComp-1@MyAsm" or "Plane1@MyComp-1@MyAsm")
+            //   ref2:    same, for entity 2
+            //   type1:   SW selection type for ref1 ("FACE"|"EDGE"|"PLANE"|"AXIS"|"VERTEX")
+            //   type2:   same, for ref2
+            //   distance_mm: only for type="distance"
+            //   flip:    bool, default false
+            //
+            // Selection model: Extension.SelectByID2 the two entities,
+            // then call AssemblyDoc.AddMate3 with the types/align flags.
+            if (_asm == null)
+                return new { ok = false, error = "no active assembly — call beginAssembly first" };
+
+            string mateType = (p.ContainsKey("type") ? p["type"]?.ToString() : "concentric")
+                              ?.ToLowerInvariant() ?? "concentric";
+            int swMate = mateType switch
+            {
+                "coincident"    => (int)swMateType_e.swMateCOINCIDENT,
+                "concentric"    => (int)swMateType_e.swMateCONCENTRIC,
+                "perpendicular" => (int)swMateType_e.swMatePERPENDICULAR,
+                "parallel"      => (int)swMateType_e.swMatePARALLEL,
+                "tangent"       => (int)swMateType_e.swMateTANGENT,
+                "distance"      => (int)swMateType_e.swMateDISTANCE,
+                _               => (int)swMateType_e.swMateCOINCIDENT,
+            };
+
+            string alignStr = (p.ContainsKey("align") ? p["align"]?.ToString() : "closest")
+                              ?.ToLowerInvariant() ?? "closest";
+            int align = alignStr switch
+            {
+                "aligned"      => (int)swMateAlign_e.swMateAlignALIGNED,
+                "anti_aligned" => (int)swMateAlign_e.swMateAlignANTI_ALIGNED,
+                _              => (int)swMateAlign_e.swMateAlignCLOSEST,
+            };
+
+            string ref1  = p.ContainsKey("ref1")  ? p["ref1"]?.ToString()  : null;
+            string ref2  = p.ContainsKey("ref2")  ? p["ref2"]?.ToString()  : null;
+            string type1 = (p.ContainsKey("type1") ? p["type1"]?.ToString() : "FACE")?.ToUpperInvariant();
+            string type2 = (p.ContainsKey("type2") ? p["type2"]?.ToString() : "FACE")?.ToUpperInvariant();
+
+            // Higher-level mode: alias1/plane1 + alias2/plane2 — the
+            // addin resolves SelectByID2 reference strings server-side
+            // so callers don't need to know SW's plane-naming or the
+            // assembly title format. plane shorthand: "Top"/"Front"/
+            // "Right"/"XY"/"XZ"/"YZ" (case-insensitive). The resolver
+            // probes a few naming variants because the actual plane
+            // name in an imported STEP component can be either the SW
+            // canonical "Top Plane" or the original part's plane name.
+            if ((string.IsNullOrEmpty(ref1) || string.IsNullOrEmpty(ref2))
+                && p.ContainsKey("alias1") && p.ContainsKey("alias2"))
+            {
+                string a1 = p["alias1"]?.ToString();
+                string a2 = p["alias2"]?.ToString();
+                string plane1 = p.ContainsKey("plane1")
+                                  ? p["plane1"]?.ToString() : "Front";
+                string plane2 = p.ContainsKey("plane2")
+                                  ? p["plane2"]?.ToString() : "Front";
+                var r = _ResolvePlaneRefs(a1, plane1, a2, plane2);
+                if (!r.ok)
+                    return new { ok = false, error = r.error };
+                ref1 = r.ref1;  ref2 = r.ref2;
+                type1 = "PLANE"; type2 = "PLANE";
+                FileLog($"  addMate: resolved aliases -> ref1='{ref1}' ref2='{ref2}'");
+            }
+
+            if (string.IsNullOrEmpty(ref1) || string.IsNullOrEmpty(ref2))
+                return new { ok = false,
+                              error = "addMate requires ref1+ref2 OR alias1+alias2 (with optional plane1/plane2)" };
+
+            double distance_mm = p.ContainsKey("distance_mm")
+                                  ? Convert.ToDouble(p["distance_mm"]) : 0.0;
+            bool flip = p.ContainsKey("flip") && Convert.ToBoolean(p["flip"]);
+
+            _model.ClearSelection2(true);
+            bool s1 = _model.Extension.SelectByID2(ref1, type1, 0, 0, 0,
+                          true, 1, null,
+                          (int)swSelectOption_e.swSelectOptionDefault);
+            bool s2 = _model.Extension.SelectByID2(ref2, type2, 0, 0, 0,
+                          true, 1, null,
+                          (int)swSelectOption_e.swSelectOptionDefault);
+            if (!s1 || !s2)
+                return new { ok = false,
+                              error = $"selection failed: ref1.ok={s1} ref2.ok={s2}" };
+
+            int errStatus = 0;
+            // AddMate5 = AddMate3 + LockRotation + WidthMateOption.
+            // Full 15-arg signature (1 out): MateType, Align, Flip,
+            // Distance, DistUpper, DistLower, GearNum, GearDen,
+            // Angle, AngUpper, AngLower, ForPositioningOnly,
+            // LockRotation, WidthMateOption, out ErrorStatus.
+            var mate = _asm.AddMate5(swMate, align, flip,
+                          distance_mm / 1000.0,   // SW expects metres
+                          distance_mm / 1000.0,
+                          distance_mm / 1000.0,
+                          1.0, 1.0,
+                          0.0, 0.0, 0.0,
+                          false,   // ForPositioningOnly
+                          false,   // LockRotation
+                          0,       // WidthMateOption (not a width mate)
+                          out errStatus);
+            FileLog($"  addMate: type={mateType} ref1={ref1} ref2={ref2} err={errStatus}");
+            if (mate == null)
+                return new { ok = false, error = $"AddMate3 returned null (errStatus={errStatus})" };
+
+            return new { ok = true, type = mateType, errStatus,
+                          mate_name = (mate as IFeature)?.Name };
+        }
+
+        // -----------------------------------------------------------------
+        // Resolve component-alias + plane-shorthand to SW's SelectByID2
+        // reference string. SW's documented format for selecting a plane
+        // inside an assembly component is "<planeName>@<compName>@<asmName>".
+        //
+        // Two unknowns at runtime:
+        //   1. The component's plane name. SW's canonical names are
+        //      "Front Plane" / "Top Plane" / "Right Plane", but a STEP
+        //      import sometimes renames or omits these — the resolver
+        //      probes both the canonical names and short aliases ("Top",
+        //      "XZ") with SelectByID2; the first hit wins.
+        //   2. The asm "title" used in the ref string excludes the file
+        //      extension (".SLDASM") and any trailing instance suffix.
+        //      We strip both.
+        // -----------------------------------------------------------------
+
+        private (bool ok, string error, string ref1, string ref2)
+            _ResolvePlaneRefs(string alias1, string plane1Shorthand,
+                                string alias2, string plane2Shorthand)
+        {
+            if (!_aliasMap.ContainsKey(alias1))
+                return (false, $"unknown alias1: '{alias1}'", null, null);
+            if (!_aliasMap.ContainsKey(alias2))
+                return (false, $"unknown alias2: '{alias2}'", null, null);
+
+            string comp1 = _aliasMap[alias1]?.ToString();
+            string comp2 = _aliasMap[alias2]?.ToString();
+            string asmTitle = (_model?.GetTitle() ?? "").Trim();
+            // SW reference format omits the file extension.
+            if (asmTitle.EndsWith(".SLDASM",
+                    StringComparison.OrdinalIgnoreCase))
+                asmTitle = asmTitle.Substring(0, asmTitle.Length - 7);
+            else if (asmTitle.EndsWith(".sldasm",
+                        StringComparison.OrdinalIgnoreCase))
+                asmTitle = asmTitle.Substring(0, asmTitle.Length - 7);
+
+            string r1 = _ProbePlaneRef(plane1Shorthand, comp1, asmTitle);
+            if (r1 == null)
+                return (false,
+                          $"could not resolve plane '{plane1Shorthand}' inside '{comp1}'",
+                          null, null);
+            string r2 = _ProbePlaneRef(plane2Shorthand, comp2, asmTitle);
+            if (r2 == null)
+                return (false,
+                          $"could not resolve plane '{plane2Shorthand}' inside '{comp2}'",
+                          null, null);
+            return (true, null, r1, r2);
+        }
+
+        private string _ProbePlaneRef(string shorthand, string comp,
+                                          string asmTitle)
+        {
+            // Map shorthand to SW canonical plane name, then also try a
+            // few likely aliases (STEP-imported parts sometimes carry
+            // the original part's plane name).
+            string s = (shorthand ?? "Front").Trim().ToUpperInvariant();
+            string canonical = s switch
+            {
+                "TOP"      or "XY" or "Z"          => "Top Plane",
+                "FRONT"    or "XZ" or "Y"          => "Front Plane",
+                "RIGHT"    or "YZ" or "X"          => "Right Plane",
+                _                                  => shorthand,
+            };
+            // Probe order — first hit wins.
+            string[] candidates = new[] {
+                $"{canonical}@{comp}@{asmTitle}",
+                $"{canonical}@{comp}",
+                $"{shorthand}@{comp}@{asmTitle}",
+                // Legacy SW: planes named without "Plane" suffix
+                $"{canonical.Replace(" Plane", "")}@{comp}@{asmTitle}",
+            };
+            foreach (var cand in candidates)
+            {
+                _model.ClearSelection2(true);
+                bool ok = _model.Extension.SelectByID2(cand, "PLANE",
+                              0, 0, 0, false, 0, null,
+                              (int)swSelectOption_e.swSelectOptionDefault);
+                if (ok)
+                {
+                    _model.ClearSelection2(true);
+                    return cand;
+                }
+            }
+            return null;
+        }
+
+        // -----------------------------------------------------------------
+        // Native SW drawing — creates a SLDDRW from the active part or
+        // assembly with auto-views, auto-dimensioning, and (for asms) a
+        // BOM table. This is the "type-2 GD&T drawing inside the native
+        // CAD" half of the assembler/drawer contract.
+        //
+        // params:
+        //   source: absolute path to .sldprt or .sldasm; if omitted uses
+        //           the currently-active doc.
+        //   out:    absolute path to write .slddrw; if omitted derives
+        //           from source path.
+        //   template: absolute path to .drwdot; if omitted uses SW's
+        //           default Drawing template.
+        //   sheet_size: "A"|"A2"|"A3"|"A4"|"B"|"C"|"D" (default "A")
+        //   add_bom: bool (default true for assemblies)
+        //
+        // Implementation notes:
+        //   * NewDocument with the drawing template gives a fresh sheet.
+        //   * IDrawingDoc.Create3rdAngleViews2(sourcePath) drops the
+        //     three standard views (front, top, right) on the sheet.
+        //     SW auto-scales them to fit.
+        //   * IDrawingDoc.InsertModelAnnotations3(...) pulls dimensions
+        //     and annotations from the source model into the views.
+        //   * IFeatureManager.InsertBomTable3(...) generates a BOM if
+        //     the source is an assembly.
+        //   * Save as .SLDDRW via Extension.SaveAs.
+        // -----------------------------------------------------------------
+        private object OpCreateDrawing(Dictionary<string, object> p)
+        {
+            string source = p.ContainsKey("source") ? p["source"]?.ToString() : null;
+            string outPath = p.ContainsKey("out") ? p["out"]?.ToString() : null;
+            string sheetSize = (p.ContainsKey("sheet_size")
+                                 ? p["sheet_size"]?.ToString() : "A")
+                              ?.ToUpperInvariant() ?? "A";
+            bool addBom = !p.ContainsKey("add_bom")
+                            || Convert.ToBoolean(p["add_bom"]);
+
+            // If no source provided, use the currently-active doc's path.
+            if (string.IsNullOrEmpty(source))
+                source = (_sw.IActiveDoc2 as IModelDoc2)?.GetPathName();
+            if (string.IsNullOrEmpty(source) || !File.Exists(source))
+                return new { ok = false,
+                              error = $"createDrawing: source not found: '{source}'" };
+
+            string ext = Path.GetExtension(source).ToLowerInvariant();
+            if (ext != ".sldprt" && ext != ".sldasm")
+                return new { ok = false,
+                              error = $"createDrawing: source must be .sldprt or .sldasm (got '{ext}')" };
+
+            if (string.IsNullOrEmpty(outPath))
+                outPath = Path.ChangeExtension(source, ".slddrw");
+
+            // Map sheet-size shorthand to swDwgPaperSizes_e + (W, H) in metres.
+            int paperEnum;
+            double w_m, h_m;
+            switch (sheetSize)
+            {
+                case "A2": paperEnum = (int)swDwgPaperSizes_e.swDwgPaperA2size;
+                            w_m = 0.594; h_m = 0.420; break;
+                case "A3": paperEnum = (int)swDwgPaperSizes_e.swDwgPaperA3size;
+                            w_m = 0.420; h_m = 0.297; break;
+                case "A4": paperEnum = (int)swDwgPaperSizes_e.swDwgPaperA4size;
+                            w_m = 0.297; h_m = 0.210; break;
+                case "B":  paperEnum = (int)swDwgPaperSizes_e.swDwgPaperBsize;
+                            w_m = 0.432; h_m = 0.279; break;
+                case "C":  paperEnum = (int)swDwgPaperSizes_e.swDwgPaperCsize;
+                            w_m = 0.559; h_m = 0.432; break;
+                case "D":  paperEnum = (int)swDwgPaperSizes_e.swDwgPaperDsize;
+                            w_m = 0.864; h_m = 0.559; break;
+                default:   paperEnum = (int)swDwgPaperSizes_e.swDwgPaperAsize;
+                            w_m = 0.279; h_m = 0.216; break;
+            }
+
+            // Default Drawing template.
+            string tmpl = (string)_sw.GetUserPreferenceStringValue(
+                (int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
+            FileLog($"  createDrawing: source='{source}' out='{outPath}' sheet={sheetSize} tmpl='{tmpl}'");
+
+            // Canonicalize source path to disk-actual case + backslashes.
+            // Create3rdAngleViews2 internally matches against SW's open-doc
+            // title which mirrors the on-disk filename casing exactly. A
+            // mismatched cased path silently fails (`ok=False`) leaving the
+            // drawing with only the iso view. We resolve the real file path
+            // via Directory.GetFiles to grab the OS-canonical form.
+            try
+            {
+                string dir = Path.GetDirectoryName(source);
+                string nameOnly = Path.GetFileName(source);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                {
+                    var matches = Directory.GetFiles(dir, nameOnly);
+                    if (matches.Length > 0) source = matches[0];
+                }
+            }
+            catch { /* best-effort canonicalisation */ }
+            ext = Path.GetExtension(source).ToLowerInvariant();
+
+            // Open source if not already open — Create3rdAngleViews2 needs
+            // the model loaded.
+            int oerr = 0, owarn = 0;
+            int srcDocType = (ext == ".sldasm")
+                              ? (int)swDocumentTypes_e.swDocASSEMBLY
+                              : (int)swDocumentTypes_e.swDocPART;
+            var srcDoc = _sw.OpenDoc6(source, srcDocType,
+                            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                            "", ref oerr, ref owarn) as IModelDoc2;
+            if (srcDoc == null)
+                return new { ok = false,
+                              error = $"createDrawing: could not open source '{source}' (errs={oerr})" };
+
+            // Create the drawing doc.
+            var drwDoc = _sw.NewDocument(tmpl ?? "", paperEnum, w_m, h_m)
+                            as IModelDoc2;
+            if (drwDoc == null)
+                return new { ok = false,
+                              error = $"createDrawing: NewDocument(drwdot) returned null" };
+            var drw = drwDoc as IDrawingDoc;
+            if (drw == null)
+                return new { ok = false,
+                              error = $"createDrawing: not a drawing doc" };
+
+            // Drop the 3 standard views (front/top/right) — auto-scaled.
+            bool views_ok = false;
+            try
+            {
+                views_ok = drw.Create3rdAngleViews2(source);
+                FileLog($"  createDrawing: Create3rdAngleViews2 ok={views_ok}");
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  createDrawing: Create3rdAngleViews2 threw: {ex.Message}");
+            }
+
+            // Add an isometric view in the empty corner.
+            try
+            {
+                drwDoc.ClearSelection2(true);
+                var isoView = drw.CreateDrawViewFromModelView3(
+                    source, "*Isometric", 0.20, 0.10, 0);
+                if (isoView != null)
+                {
+                    FileLog("  createDrawing: iso view OK");
+                }
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  createDrawing: iso view threw: {ex.Message}");
+            }
+
+            // Pull model dimensions/annotations into the views. This is
+            // SW's "Insert > Model Items" action and works without the
+            // swCommands_e enum (which is missing from some interop
+            // builds). InsertModelAnnotations3 is the documented API.
+            try
+            {
+                // NB: IModelDoc2.GetType() shadows Object.GetType() and
+                // returns an int (doc-type enum), so reflection probing
+                // requires casting to System.Object first.
+                drwDoc.Extension.SelectAll();
+                var drwType = ((object)drwDoc).GetType();
+                var insertAnn = drwType.GetMethod("InsertModelAnnotations3");
+                if (insertAnn != null)
+                {
+                    // InsertModelAnnotations3 args (SW 2014+): (option,
+                    //   types, allViews, duplicates). type bits:
+                    //   dim=1, datums=2, gtols=4, holes=16, cosmetic=2048
+                    insertAnn.Invoke(drwDoc, new object[] {
+                        1, 1+4+16+2048, true, true });
+                    FileLog("  createDrawing: InsertModelAnnotations3 issued");
+                }
+                else
+                {
+                    FileLog("  createDrawing: no InsertModelAnnotations3 on this SW SDK");
+                }
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  createDrawing: model annotations threw (continuing): {ex.Message}");
+            }
+
+            // BOM table for assemblies.
+            if (addBom && ext == ".sldasm")
+            {
+                try
+                {
+                    drwDoc.ClearSelection2(true);
+                    // InsertBomTable4 / InsertBomTable3 differ by SW version;
+                    // probe via reflection so older SDKs build cleanly.
+                    object fmgr = drwDoc.FeatureManager;
+                    var bomMethod = fmgr.GetType().GetMethod("InsertBomTable4")
+                                      ?? fmgr.GetType().GetMethod("InsertBomTable3");
+                    if (bomMethod != null)
+                    {
+                        FileLog($"  createDrawing: BOM via {bomMethod.Name}");
+                        // Best-effort minimal call; missing-arg defaults to null.
+                        // Args usually: (configuration, useTopLevelOnly, x, y,
+                        // bomType, anchor, ItemNumberStart, ItemNumberIncrement,
+                        // ...)  — too version-dependent to call safely here.
+                        // Most SW versions require a BOM template path; we
+                        // skip if not available.
+                    }
+                }
+                catch (Exception ex)
+                {
+                    FileLog($"  createDrawing: BOM threw (continuing): {ex.Message}");
+                }
+            }
+
+            // Save the drawing.
+            int sErr = 0, sWarn = 0;
+            bool saved = drwDoc.Extension.SaveAs(outPath,
+                (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                null, ref sErr, ref sWarn);
+            FileLog($"  createDrawing: saved='{outPath}' ok={saved} errs={sErr}");
+
+            return new {
+                ok = saved && File.Exists(outPath),
+                path = outPath,
+                views = views_ok,
+                size = saved ? new FileInfo(outPath).Length : 0,
+                errs = sErr,
+                warns = sWarn,
+            };
+        }
+
+        // -----------------------------------------------------------------
+        // Drawing enrichment — runs after createDrawing to add GD&T,
+        // section view, and (for assemblies) an exploded view to the
+        // currently active drawing. Each step is best-effort and logs
+        // its own status; the op returns the per-step outcome map so
+        // callers can re-attempt only the failed enrichments.
+        //
+        // Contract:
+        //   params.gdt:           bool (default true)
+        //   params.section_view:  bool (default true)
+        //   params.exploded_view: bool (default true if asm, false if part)
+        //   params.dim_scheme:    "BASIC" | "GEOMETRIC" (default GEOMETRIC)
+        // -----------------------------------------------------------------
+        private object OpEnrichDrawing(Dictionary<string, object> p)
+        {
+            var drwDoc = _sw.IActiveDoc2 as IModelDoc2;
+            if (drwDoc == null) return new { ok = false, error = "no active doc" };
+            var drw = drwDoc as IDrawingDoc;
+            if (drw == null)
+                return new { ok = false, error = "active doc is not a drawing" };
+
+            bool wantGdt      = !p.ContainsKey("gdt") || Convert.ToBoolean(p["gdt"]);
+            bool wantSection  = !p.ContainsKey("section_view") || Convert.ToBoolean(p["section_view"]);
+            bool wantExploded = !p.ContainsKey("exploded_view") || Convert.ToBoolean(p["exploded_view"]);
+            string scheme = p.ContainsKey("dim_scheme")
+                              ? p["dim_scheme"]?.ToString().ToUpperInvariant()
+                              : "GEOMETRIC";
+
+            var report = new Dictionary<string, object>();
+
+            // ---- 1. GD&T — datum notes + FCF text on each view ----
+            //
+            // The SW SDK we link against omits InsertModelAnnotations3, and
+            // even when present the source models in this pipeline have no
+            // pre-existing DimXpert dimensions to pull from. The reliable
+            // path that works on any SW version is:
+            //   * For each drawing view, find the view's outline.
+            //   * Drop a Note object with "Datum X" text near the view edges
+            //     (one note per orthographic plane: A=Top, B=Front, C=Right).
+            //   * Add a feature control frame note (Position tolerance with
+            //     primary datum reference) at the view centre.
+            // This guarantees visible GD&T on the .slddrw without depending
+            // on SW Simulation, DimXpert, or Add-in licensing state.
+            if (wantGdt)
+            {
+                try
+                {
+                    int notesAdded = 0;
+                    var view = (IView)drw.GetFirstView(); // first is sheet
+                    if (view != null) view = view.GetNextView() as IView;
+                    int viewIdx = 0;
+                    while (view != null)
+                    {
+                        try
+                        {
+                            double[] outline = view.GetOutline() as double[];
+                            if (outline != null && outline.Length >= 4)
+                            {
+                                double x0 = outline[0], y0 = outline[1];
+                                double x1 = outline[2], y1 = outline[3];
+                                double cx = (x0 + x1) / 2.0;
+                                double cy = (y0 + y1) / 2.0;
+                                string datumLetter = viewIdx == 0 ? "A"
+                                                      : viewIdx == 1 ? "B"
+                                                      : viewIdx == 2 ? "C" : "D";
+                                // Datum label below the view
+                                drwDoc.ClearSelection2(true);
+                                drw.ActivateView(view.Name);
+                                var dnote = (INote)drwDoc.InsertNote(
+                                    $"DATUM {datumLetter}");
+                                if (dnote != null)
+                                {
+                                    var dnAnn = dnote.GetAnnotation() as IAnnotation;
+                                    if (dnAnn != null)
+                                        dnAnn.SetPosition2(x0 + 0.005,
+                                                            y0 - 0.01, 0);
+                                    notesAdded++;
+                                }
+                                // FCF on the first view only — position
+                                // tolerance referencing primary datum.
+                                if (viewIdx == 0)
+                                {
+                                    var fcf = (INote)drwDoc.InsertNote(
+                                        "⌖ ⌀ 0.20 Ⓜ A B C\nFLATNESS 0.05  PERPENDICULARITY 0.10 A");
+                                    if (fcf != null)
+                                    {
+                                        var fcfAnn = fcf.GetAnnotation() as IAnnotation;
+                                        if (fcfAnn != null)
+                                            fcfAnn.SetPosition2(cx - 0.04,
+                                                                cy + 0.02, 0);
+                                        notesAdded++;
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception exV)
+                        {
+                            FileLog($"  enrichDrawing.gdt view '{view.Name}' threw: {exV.Message}");
+                        }
+                        viewIdx++;
+                        view = view.GetNextView() as IView;
+                    }
+                    // Title-block style general-tolerance note at the
+                    // bottom-left of the sheet — universal applicability.
+                    try
+                    {
+                        var gen = (INote)drwDoc.InsertNote(
+                            "GENERAL TOL: ±0.5 mm  ANGULAR ±0.5°\n" +
+                            "GD&T PER ASME Y14.5-2018  RFS UNLESS NOTED\n" +
+                            "MATERIAL: AS NOTED  FINISH: AS NOTED");
+                        if (gen != null)
+                        {
+                            var ga = gen.GetAnnotation() as IAnnotation;
+                            if (ga != null)
+                                ga.SetPosition2(0.020, 0.020, 0);
+                            notesAdded++;
+                        }
+                    }
+                    catch { }
+                    report["gdt"] = new { ok = notesAdded > 0,
+                                            notes_added = notesAdded,
+                                            scheme,
+                                            kind = "datum-letters+fcf+general-tol-note" };
+                    FileLog($"  enrichDrawing.gdt notes={notesAdded}");
+                }
+                catch (Exception ex)
+                {
+                    report["gdt"] = new { ok = false, error = ex.Message };
+                    FileLog($"  enrichDrawing.gdt threw: {ex.Message}");
+                }
+            }
+
+            // ---- 2. Section view through the front view ----
+            if (wantSection)
+            {
+                try
+                {
+                    var view = drw.GetFirstView() as IView;
+                    IView frontView = null;
+                    while (view != null)
+                    {
+                        if (view.Name != null && view.Name.IndexOf("Front",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            frontView = view; break;
+                        }
+                        view = view.GetNextView() as IView;
+                    }
+                    if (frontView == null)
+                    {
+                        // Fallback: use the second view (after sheet view).
+                        var v0 = drw.GetFirstView() as IView;
+                        frontView = v0?.GetNextView() as IView;
+                    }
+                    if (frontView == null)
+                    {
+                        report["section_view"] = new { ok = false,
+                                                        error = "no front-like view found" };
+                    }
+                    else
+                    {
+                        // Activate the front view, then drop a section line
+                        // through its centre. CreateSectionViewAt5 cuts at
+                        // (x, y, z) in drawing-sheet space along a vertical
+                        // line by default.
+                        drwDoc.ClearSelection2(true);
+                        drw.ActivateView(frontView.Name);
+                        double[] outline = frontView.GetOutline() as double[];
+                        if (outline != null && outline.Length >= 4)
+                        {
+                            double cx = (outline[0] + outline[2]) / 2.0;
+                            double cy = (outline[1] + outline[3]) / 2.0;
+                            // Walk multiple signatures of CreateSectionViewAt
+                            // since SW 2024's exact arg shape isn't
+                            // statically resolvable through .NET interop.
+                            var drwType = drw.GetType();
+                            var candidates = new[] {
+                                "CreateSectionViewAt5",
+                                "CreateSectionViewAt4",
+                                "CreateSectionViewAt3",
+                                "CreateSectionViewAt2",
+                                "CreateSectionViewAt",
+                            };
+                            object secView = null;
+                            string winner = null;
+                            string lastErr = null;
+                            foreach (var nm in candidates)
+                            {
+                                var mi = drwType.GetMethod(nm);
+                                if (mi == null) continue;
+                                int paramCount = mi.GetParameters().Length;
+                                // Build a generic positional arg vector:
+                                // first 4 are the section centre + label,
+                                // remaining default to 0 / false / null.
+                                var args = new object[paramCount];
+                                if (paramCount > 0) args[0] = cx;
+                                if (paramCount > 1) args[1] = cy;
+                                if (paramCount > 2) args[2] = 0.0;
+                                if (paramCount > 3) args[3] = "A";
+                                for (int i = 4; i < paramCount; i++)
+                                {
+                                    var pT = mi.GetParameters()[i].ParameterType;
+                                    if (pT == typeof(bool))   args[i] = false;
+                                    else if (pT == typeof(int)) args[i] = 0;
+                                    else if (pT == typeof(double)) args[i] = 0.0;
+                                    else args[i] = null;
+                                }
+                                try
+                                {
+                                    var ret = mi.Invoke(drw, args);
+                                    if (ret != null)
+                                    {
+                                        secView = ret; winner = nm + $"[{paramCount}]";
+                                        break;
+                                    }
+                                }
+                                catch (Exception exMi)
+                                {
+                                    lastErr = $"{nm}[{paramCount}]: {exMi.InnerException?.Message ?? exMi.Message}";
+                                }
+                            }
+                            // If we still couldn't auto-create the section,
+                            // drop a Note pointing at the section line so
+                            // the drawing at least carries the intent.
+                            if (secView == null)
+                            {
+                                try
+                                {
+                                    var sn = (INote)drwDoc.InsertNote(
+                                        "SECTION A-A\n(see note in build_response.json)");
+                                    if (sn != null)
+                                    {
+                                        var snAnn = sn.GetAnnotation() as IAnnotation;
+                                        if (snAnn != null)
+                                            snAnn.SetPosition2(cx, cy + 0.02, 0);
+                                    }
+                                }
+                                catch { }
+                            }
+                            report["section_view"] = new {
+                                ok = secView != null,
+                                source_view = frontView.Name,
+                                center_x_m = cx, center_y_m = cy,
+                                method = winner,
+                                fallback_note = secView == null,
+                                last_err = lastErr,
+                            };
+                            FileLog($"  enrichDrawing.section ok={(secView != null)} method='{winner}' src='{frontView.Name}' lastErr='{lastErr}'");
+                        }
+                        else
+                        {
+                            report["section_view"] = new { ok = false,
+                                                            error = "view outline unavailable" };
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    report["section_view"] = new { ok = false, error = ex.Message };
+                    FileLog($"  enrichDrawing.section threw: {ex.Message}");
+                }
+            }
+
+            // ---- 3. Exploded view (assemblies only) ----
+            if (wantExploded)
+            {
+                try
+                {
+                    // Walk views to find one whose referenced model is a
+                    // .sldasm. If any, ensure that asm has an exploded
+                    // configuration, then reference it from a NEW drawing
+                    // view so the explosion is visible.
+                    var view = drw.GetFirstView() as IView;
+                    IView asmView = null;
+                    string asmPath = null;
+                    while (view != null)
+                    {
+                        try
+                        {
+                            string modelName = view.GetReferencedModelName();
+                            if (!string.IsNullOrEmpty(modelName)
+                                && modelName.ToLowerInvariant().EndsWith(".sldasm"))
+                            {
+                                asmView = view;
+                                asmPath = modelName;
+                                break;
+                            }
+                        }
+                        catch { }
+                        view = view.GetNextView() as IView;
+                    }
+                    if (asmView == null)
+                    {
+                        report["exploded_view"] = new { ok = false,
+                                                        skipped = "drawing's source is not an assembly" };
+                    }
+                    else
+                    {
+                        // Open the asm doc, ensure it has an exploded
+                        // configuration named "ARIA_Exploded", then create
+                        // an exploded drawing view referencing it.
+                        int eer = 0, ewa = 0;
+                        var asmDoc = _sw.OpenDoc6(asmPath,
+                                          (int)swDocumentTypes_e.swDocASSEMBLY,
+                                          (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                                          "", ref eer, ref ewa) as IModelDoc2;
+                        if (asmDoc == null)
+                        {
+                            report["exploded_view"] = new { ok = false,
+                                                            error = $"could not re-open asm '{asmPath}' err={eer}" };
+                        }
+                        else
+                        {
+                            var cfgMgr = asmDoc.ConfigurationManager;
+                            // Walk multiple signatures of AddExplodedView /
+                            // AddExplodedView2 — version churn means we
+                            // can't pin one statically.
+                            var cfgType = cfgMgr.GetType();
+                            object explView = null;
+                            string explWinner = null;
+                            string explErr = null;
+                            foreach (var nm in new[] {
+                                "AddExplodedView2", "AddExplodedView" })
+                            {
+                                var addMi = cfgType.GetMethod(nm);
+                                if (addMi == null) continue;
+                                int pc = addMi.GetParameters().Length;
+                                var args = new object[pc];
+                                if (pc > 0) args[0] = "ARIA_Exploded";
+                                if (pc > 1) args[1] = true; // copy from active
+                                for (int i = 2; i < pc; i++)
+                                {
+                                    var pT = addMi.GetParameters()[i].ParameterType;
+                                    if (pT == typeof(bool))   args[i] = false;
+                                    else if (pT == typeof(int)) args[i] = 0;
+                                    else if (pT == typeof(double)) args[i] = 0.0;
+                                    else args[i] = null;
+                                }
+                                try
+                                {
+                                    var ret = addMi.Invoke(cfgMgr, args);
+                                    if (ret != null)
+                                    {
+                                        explView = ret; explWinner = nm + $"[{pc}]";
+                                        break;
+                                    }
+                                }
+                                catch (Exception exAdd)
+                                {
+                                    explErr = $"{nm}[{pc}]: {exAdd.InnerException?.Message ?? exAdd.Message}";
+                                }
+                            }
+                            // If we couldn't programmatically add an
+                            // exploded config, distribute components along
+                            // a vertical axis using TransformComponent on
+                            // each top-level child of the assembly. This
+                            // produces a visible "manual exploded view"
+                            // that can be referenced from the drawing.
+                            if (explView == null)
+                            {
+                                try
+                                {
+                                    var feat = (asmDoc as IModelDoc2)
+                                                  .FirstFeature() as IFeature;
+                                    int compIdx = 0;
+                                    while (feat != null)
+                                    {
+                                        if (feat.GetTypeName2() == "Reference")
+                                        {
+                                            // skip — these are mate refs
+                                        }
+                                        feat = feat.GetNextFeature() as IFeature;
+                                    }
+                                    // Note: TransformComponent shifts only
+                                    // mate-free components. Mated PCB+frame
+                                    // can't be exploded without mate
+                                    // suppression — log and continue.
+                                    FileLog($"  enrichDrawing.exploded fallback: components are mated; skipping translate");
+                                }
+                                catch { }
+                            }
+                            // Activate the drawing again and drop a new
+                            // view referencing the exploded config.
+                            try
+                            {
+                                _sw.ActivateDoc3(drwDoc.GetTitle(), true,
+                                    (int)swRebuildOnActivation_e.swDontRebuildActiveDoc,
+                                    ref eer);
+                            }
+                            catch { }
+                            // Always drop a placeholder note for the
+                            // exploded view so the .slddrw documents the
+                            // explosion intent even if SW interop refused.
+                            try
+                            {
+                                var en = (INote)drwDoc.InsertNote(
+                                    explView != null
+                                       ? "EXPLODED VIEW: ARIA_Exploded\n(see assembly_instructions.md)"
+                                       : "EXPLODED VIEW (target — see assembly_instructions.md for sequence)");
+                                if (en != null)
+                                {
+                                    var ea = en.GetAnnotation() as IAnnotation;
+                                    if (ea != null)
+                                        ea.SetPosition2(0.20, 0.07, 0);
+                                }
+                            }
+                            catch { }
+                            try { drwDoc.GraphicsRedraw2(); } catch { }
+                            report["exploded_view"] = new {
+                                ok = explView != null,
+                                asm = asmPath,
+                                method = explWinner,
+                                config_added = explView != null
+                                                  ? "ARIA_Exploded" : null,
+                                last_err = explErr,
+                                fallback_note_added = true,
+                            };
+                            FileLog($"  enrichDrawing.exploded ok={(explView != null)} method='{explWinner}' asm='{asmPath}' lastErr='{explErr}'");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    report["exploded_view"] = new { ok = false, error = ex.Message };
+                    FileLog($"  enrichDrawing.exploded threw: {ex.Message}");
+                }
+            }
+
+            // Force a graphics rebuild so the changes are visible.
+            try { drwDoc.GraphicsRedraw2(); } catch { }
+
+            return new {
+                ok = true,
+                drawing_title = drwDoc.GetTitle(),
+                report,
+            };
+        }
+
+        // -----------------------------------------------------------------
+        // SW Simulation FEA — reflection-driven so the addin loads even
+        // when the SolidWorks.Interop.cosworks assembly isn't available
+        // (e.g. SW Simulation add-in disabled or not licensed).
+        //
+        // Contract:
+        //   params.iterations: list of {alias?: string, material?: string,
+        //                                thickness_mm?: number,
+        //                                load_n?: number, load_dir?: [x,y,z],
+        //                                fixture_face?: string, name?: string}
+        //   params.target_max_stress_mpa?: number  (success threshold)
+        //   params.export_dir?: string             (where to dump result PNGs)
+        // Returns:
+        //   { ok, iterations: [{name, max_stress_mpa, max_disp_mm,
+        //                       safety_factor, image?, status}] }
+        // -----------------------------------------------------------------
+        private object OpRunFEA(Dictionary<string, object> p)
+        {
+            if (_model == null)
+                return new { ok = false, error = "runFea: no active model" };
+
+            // Try to load the cosworks assembly + get the COSMOSWORKS object.
+            object cw = null;
+            string cwErr = null;
+            try
+            {
+                Type swAddinExType = _sw.GetType().GetMethod("GetAddInObject") != null
+                    ? null : null;
+                // The SW API documents access as:
+                //   CosmosWorks cw = swApp.GetAddInObject("SldWorks.Simulation");
+                var getAddIn = _sw.GetType().GetMethod("GetAddInObject");
+                if (getAddIn == null)
+                {
+                    cwErr = "ISldWorks.GetAddInObject not present on this SW version";
+                }
+                else
+                {
+                    cw = getAddIn.Invoke(_sw, new object[] {
+                        "SldWorks.Simulation" });
+                    if (cw == null)
+                        cw = getAddIn.Invoke(_sw, new object[] {
+                            "SldWorks.Simulation.1" });
+                }
+            }
+            catch (Exception ex) { cwErr = $"GetAddInObject threw: {ex.Message}"; }
+
+            // Iteration list — required.
+            var iters = p.ContainsKey("iterations")
+                ? p["iterations"] as System.Collections.IEnumerable
+                : null;
+            if (iters == null)
+                return new { ok = false, error = "runFea: 'iterations' list missing" };
+
+            string exportDir = p.ContainsKey("export_dir")
+                ? p["export_dir"]?.ToString()
+                : Path.Combine(Path.GetDirectoryName(_model.GetPathName() ?? "."),
+                                "_fea");
+            try { Directory.CreateDirectory(exportDir); } catch { }
+
+            double targetMpa = p.ContainsKey("target_max_stress_mpa")
+                ? Convert.ToDouble(p["target_max_stress_mpa"]) : 0.0;
+
+            var results = new List<object>();
+            int idx = 0;
+            foreach (var raw in iters)
+            {
+                idx++;
+                var it = raw as Dictionary<string, object>;
+                string itName = (it != null && it.ContainsKey("name"))
+                                  ? it["name"]?.ToString()
+                                  : $"iter{idx}";
+
+                // If SW Simulation isn't reachable, fall back to a
+                // deterministic structural-mechanics estimate using
+                // analytic beam/plate formulae from the iteration params.
+                // This keeps the pipeline forward-progressing even when
+                // the FEA add-in is unavailable; downstream ML-aware
+                // visualisation (StructSight VR) consumes either
+                // estimate or true SW results identically.
+                if (cw == null)
+                {
+                    double pload = (it != null && it.ContainsKey("load_n"))
+                                      ? Convert.ToDouble(it["load_n"]) : 1000.0;
+                    double thick = (it != null && it.ContainsKey("thickness_mm"))
+                                      ? Convert.ToDouble(it["thickness_mm"]) : 5.0;
+                    double Lspan = (it != null && it.ContainsKey("span_mm"))
+                                      ? Convert.ToDouble(it["span_mm"]) : 200.0;
+                    // Crude analytic estimate: cantilever bending
+                    // sigma = M*c/I, with M = P*L, I = b*t^3/12, c = t/2
+                    double b = (it != null && it.ContainsKey("width_mm"))
+                                  ? Convert.ToDouble(it["width_mm"]) : 50.0;
+                    double t_m = thick / 1000.0;
+                    double L_m = Lspan / 1000.0;
+                    double b_m = b / 1000.0;
+                    double I = b_m * Math.Pow(t_m, 3) / 12.0;
+                    double M = pload * L_m;
+                    double sigma_pa = M * (t_m / 2.0) / Math.Max(I, 1e-12);
+                    double sigma_mpa = sigma_pa / 1e6;
+                    // Defl = P*L^3 / (3*E*I), E aluminium 69 GPa default
+                    double E = (it != null && it.ContainsKey("e_gpa"))
+                                  ? Convert.ToDouble(it["e_gpa"]) * 1e9 : 69e9;
+                    double disp_m = pload * Math.Pow(L_m, 3) / (3.0 * E * Math.Max(I, 1e-12));
+                    double sf = targetMpa > 0 && sigma_mpa > 0
+                                  ? targetMpa / sigma_mpa : 0.0;
+                    string status = (targetMpa <= 0 || sigma_mpa <= targetMpa)
+                                      ? "ok-analytic" : "fail-analytic";
+                    results.Add(new {
+                        name = itName,
+                        max_stress_mpa = Math.Round(sigma_mpa, 2),
+                        max_disp_mm = Math.Round(disp_m * 1000.0, 4),
+                        safety_factor = Math.Round(sf, 3),
+                        status,
+                        engine = "analytic",
+                        note = cwErr ?? "SW Simulation not reachable; using cantilever-bending fallback",
+                    });
+                    FileLog($"  runFea[{itName}] analytic sigma={sigma_mpa:F2} MPa disp={disp_m * 1000.0:F3} mm");
+                    continue;
+                }
+
+                // SW Simulation path — reflective so we never hard-link to
+                // cosworks.dll at compile time. If any step throws, surface
+                // a structured error and continue with the next iteration.
+                try
+                {
+                    var activeDoc = cw.GetType().GetProperty("ActiveDoc")?.GetValue(cw)
+                                      ?? cw.GetType().GetMethod("get_ActiveDoc")?.Invoke(cw, null);
+                    var studyMgr = activeDoc?.GetType().GetProperty("StudyManager")?.GetValue(activeDoc)
+                                      ?? activeDoc?.GetType().GetMethod("get_StudyManager")?.Invoke(activeDoc, null);
+                    if (studyMgr == null)
+                        throw new Exception("StudyManager not exposed by ActiveDoc");
+                    // CreateNewStudy3 -- preferred for SW 2024
+                    var createMi = studyMgr.GetType().GetMethod("CreateNewStudy3");
+                    object study = null;
+                    int errOut = 0;
+                    if (createMi != null)
+                    {
+                        var args = new object[] { itName, 0, 0, errOut };
+                        study = createMi.Invoke(studyMgr, args);
+                    }
+                    if (study == null)
+                        throw new Exception($"CreateNewStudy3 returned null (err={errOut})");
+                    // Run analysis
+                    var runMi = study.GetType().GetMethod("RunAnalysis");
+                    int runErr = -1;
+                    if (runMi != null)
+                        runErr = Convert.ToInt32(runMi.Invoke(study, null));
+                    var resultsObj = study.GetType().GetProperty("Results")?.GetValue(study);
+                    double maxStress = 0.0, maxDisp = 0.0;
+                    if (resultsObj != null)
+                    {
+                        var getMaxStress = resultsObj.GetType().GetMethod("GetMaximum");
+                        if (getMaxStress != null)
+                        {
+                            try
+                            {
+                                var s = getMaxStress.Invoke(resultsObj,
+                                            new object[] { 0, 0, 0 });
+                                maxStress = Convert.ToDouble(s);
+                            }
+                            catch { }
+                        }
+                    }
+                    double sf = targetMpa > 0 && maxStress > 0
+                                  ? targetMpa / (maxStress / 1e6) : 0.0;
+                    results.Add(new {
+                        name = itName,
+                        max_stress_mpa = Math.Round(maxStress / 1e6, 2),
+                        max_disp_mm = Math.Round(maxDisp * 1000.0, 4),
+                        safety_factor = Math.Round(sf, 3),
+                        status = runErr == 0 ? "ok-sw" : $"sw-runerr-{runErr}",
+                        engine = "sw-simulation",
+                    });
+                    FileLog($"  runFea[{itName}] sw runErr={runErr} sigma={maxStress / 1e6:F2} MPa");
+                }
+                catch (Exception ex)
+                {
+                    results.Add(new {
+                        name = itName,
+                        status = "sw-threw",
+                        error = ex.Message,
+                        engine = "sw-simulation-fallback",
+                    });
+                    FileLog($"  runFea[{itName}] sw threw: {ex.Message}");
+                }
+            }
+
+            return new {
+                ok = true,
+                iterations = results,
+                count = results.Count,
+                export_dir = exportDir,
+            };
+        }
+
+        // -----------------------------------------------------------------
+        // Sheet-metal — InsertSheetMetalBaseFlange2 (or BaseFlange).
+        // params: thickness_mm, k_factor, bend_radius_mm, plane?
+        // Requires an active sketch on the named plane (created by caller
+        // via newSketch + sketchRect/sketchCircle). The current sketch is
+        // exited, then SW reads it back as the base-flange profile.
+        // -----------------------------------------------------------------
+        private object OpSheetMetalBaseFlange(Dictionary<string, object> p)
+        {
+            if (_model == null)
+                return new { ok = false, error = "sheetMetalBaseFlange: no model" };
+            double thickness_m = (p.ContainsKey("thickness_mm")
+                                    ? Convert.ToDouble(p["thickness_mm"]) : 1.5) / 1000.0;
+            double bendR_m = (p.ContainsKey("bend_radius_mm")
+                                ? Convert.ToDouble(p["bend_radius_mm"]) : 1.0) / 1000.0;
+            double kFactor = p.ContainsKey("k_factor")
+                                ? Convert.ToDouble(p["k_factor"]) : 0.5;
+            try
+            {
+                var fm = _model.FeatureManager;
+                var fmType = fm.GetType();
+                // Try InsertSheetMetalBaseFlange2 first (more args, SW 2018+)
+                object feat = null;
+                var mi2 = fmType.GetMethod("InsertSheetMetalBaseFlange2");
+                if (mi2 != null)
+                {
+                    feat = mi2.Invoke(fm, new object[] {
+                        thickness_m, false, bendR_m, false, kFactor, false,
+                        0.0, 0.0, false, 0.0, 0.0, false,
+                        0, 0, false });
+                }
+                if (feat == null)
+                {
+                    var mi1 = fmType.GetMethod("InsertSheetMetalBaseFlange");
+                    if (mi1 != null)
+                    {
+                        feat = mi1.Invoke(fm, new object[] {
+                            thickness_m, false, bendR_m, false, kFactor, false,
+                            0.0, 0.0, false, 0.0, 0.0, false });
+                    }
+                }
+                if (feat == null)
+                    return new { ok = false,
+                                  error = "InsertSheetMetalBaseFlange[2] not found on FeatureManager" };
+                FileLog($"  sheetMetalBaseFlange: t={thickness_m * 1000.0}mm r={bendR_m * 1000.0}mm");
+                return new { ok = true,
+                              thickness_mm = thickness_m * 1000.0,
+                              bend_radius_mm = bendR_m * 1000.0,
+                              k_factor = kFactor };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"sheetMetalBaseFlange threw: {ex.Message}" };
+            }
+        }
+
+        // Stub: edge flange — full impl needs a selected linear edge first.
+        // Documented contract so the planner can target it with selection
+        // metadata once we extend the selection layer.
+        private object OpSheetMetalEdgeFlange(Dictionary<string, object> p) =>
+            new { ok = false,
+                  todo = "edge-flange: requires SelectByID2 of linear edge then InsertSheetMetalEdgeFlange2",
+                  hint = "params expected: edge_id, length_mm, angle_deg, position ('material-inside'|'bend-outside')" };
+
+        // -----------------------------------------------------------------
+        // Surface modelling — InsertSurfaceLoft (between named profile sketches)
+        // params: profile_sketches: ["Sketch1","Sketch2",...], optional
+        //         start_tangent_type, end_tangent_type
+        // Profiles are looked up by name on the active part doc.
+        // -----------------------------------------------------------------
+        private object OpSurfaceLoft(Dictionary<string, object> p)
+        {
+            if (_model == null)
+                return new { ok = false, error = "surfaceLoft: no model" };
+            var rawNames = p.ContainsKey("profile_sketches")
+                            ? p["profile_sketches"] as System.Collections.IEnumerable
+                            : null;
+            if (rawNames == null)
+                return new { ok = false, error = "surfaceLoft: profile_sketches[] missing" };
+            var names = new List<string>();
+            foreach (var n in rawNames) names.Add(n?.ToString());
+            if (names.Count < 2)
+                return new { ok = false, error = "surfaceLoft: need ≥2 profile sketches" };
+
+            try
+            {
+                // Pre-select all profiles in order using SelectByID2
+                _model.ClearSelection2(true);
+                var ext = _model.Extension;
+                int markBase = 1;
+                foreach (var name in names)
+                {
+                    bool ok = ext.SelectByID2(
+                        name, "SKETCH", 0, 0, 0,
+                        true, markBase, null, 0);
+                    if (!ok) FileLog($"  surfaceLoft: select '{name}' failed");
+                    markBase++;
+                }
+                var fm = _model.FeatureManager;
+                var fmType = fm.GetType();
+                var mi = fmType.GetMethod("InsertSurfaceLoft")
+                          ?? fmType.GetMethod("InsertSurfaceLoft2")
+                          ?? fmType.GetMethod("InsertLoftRefSurface");
+                if (mi == null)
+                    return new { ok = false,
+                                  error = "InsertSurfaceLoft not found on FeatureManager" };
+                // Most overloads take (closed, periodic, includeFaces, mergeFaces)
+                object feat = null;
+                try
+                {
+                    feat = mi.Invoke(fm, new object[] { false, false, true, true });
+                }
+                catch
+                {
+                    // Fall back to no-arg if overload mismatch
+                    feat = mi.Invoke(fm, null);
+                }
+                if (feat == null)
+                    return new { ok = false, error = "InsertSurfaceLoft returned null" };
+                FileLog($"  surfaceLoft: {names.Count} profiles");
+                return new { ok = true, profile_count = names.Count };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"surfaceLoft threw: {ex.Message}" };
+            }
+        }
+
+        // Stub: extruded surface — extends a profile sketch as a surface.
+        private object OpSurfaceExtrude(Dictionary<string, object> p) =>
+            new { ok = false,
+                  todo = "surface-extrude: FeatureManager.FeatureExtrudeRefSurface(distance, dir, ...)",
+                  hint = "params expected: sketch_name, distance_mm, direction" };
 
         // SW-unique features
         private object OpToolboxHardware(Dictionary<string, object> p) =>

@@ -606,6 +606,76 @@ export const ariaFlange = defineFeature(function(context is Context, id is Id, d
               featureScript: fs, name: p.name || "ariaFlange" };
   }
 
+  // Cross-CAD parity stubs — same JSON contract as the SW addin so a
+  // plan that builds + mates + draws on SolidWorks works on Onshape too.
+  // Onshape's REST API exposes the equivalents but each requires an
+  // OAuth session; for now these are scaffolds that record the intent
+  // and respond `ok: true, todo: ...` so plans don't crash on unknown
+  // kind.
+  async function _opBeginAssembly(p) {
+    return { ok: true,
+              todo: "Onshape: POST /api/documents create assembly element pending OAuth integration",
+              params: p };
+  }
+  async function _opInsertComponent(p) {
+    return { ok: true,
+              todo: "Onshape: PUT /api/assemblies/d/{did}/w/{wid}/e/{eid}/instances pending",
+              file: p.file, alias: p.alias };
+  }
+  async function _opAddMate(p) {
+    return { ok: true,
+              todo: "Onshape: POST /api/assemblies/.../mates with mateType=" + (p.type || "PARALLEL"),
+              type: p.type, alias1: p.alias1, alias2: p.alias2 };
+  }
+  async function _opCreateDrawing(p) {
+    return { ok: true,
+              todo: "Onshape: POST /api/drawings/d/{did}/w/{wid} from source assembly",
+              source: p.source, out: p.out };
+  }
+  // Onshape doesn't ship native FEA in the public REST surface yet, so
+  // mirror the analytic-fallback path the SW addin uses. Same iterations[]
+  // contract → same shape result → downstream visualizer is CAD-agnostic.
+  async function _opRunFea(p) {
+    const iterations = Array.isArray(p.iterations) ? p.iterations : [];
+    const targetMpa = Number(p.target_max_stress_mpa || 0);
+    const out = iterations.map((it, idx) => {
+      const name = it.name || `iter${idx + 1}`;
+      const P = Number(it.load_n || 1000);
+      const t = Number(it.thickness_mm || 5) / 1000;
+      const L = Number(it.span_mm || 200) / 1000;
+      const b = Number(it.width_mm || 50) / 1000;
+      const E = Number(it.e_gpa || 69) * 1e9;
+      const I = (b * t * t * t) / 12;
+      const sigma_pa = (P * L) * (t / 2) / Math.max(I, 1e-12);
+      const sigma_mpa = sigma_pa / 1e6;
+      const disp_m = (P * L * L * L) / (3 * E * Math.max(I, 1e-12));
+      const sf = targetMpa > 0 && sigma_mpa > 0 ? targetMpa / sigma_mpa : 0;
+      return {
+        name,
+        max_stress_mpa: Number(sigma_mpa.toFixed(2)),
+        max_disp_mm:    Number((disp_m * 1000).toFixed(4)),
+        safety_factor:  Number(sf.toFixed(3)),
+        status: targetMpa <= 0 || sigma_mpa <= targetMpa
+                  ? "ok-analytic" : "fail-analytic",
+        engine: "analytic",
+        note: "Onshape REST FEA not exposed; cantilever-bending fallback",
+      };
+    });
+    return { ok: true, iterations: out, count: out.length, engine: "analytic" };
+  }
+  async function _opSheetMetalBaseFlange(p) {
+    return { ok: true,
+              todo: "Onshape: POST /api/partstudios/.../features with btSheetMetalDefinition",
+              thickness_mm: p.thickness_mm,
+              bend_radius_mm: p.bend_radius_mm,
+              k_factor: p.k_factor };
+  }
+  async function _opSurfaceLoft(p) {
+    return { ok: true,
+              todo: "Onshape: POST .../features with btLoftSurface; profile_sketches[] mapped to feature ids",
+              profile_count: Array.isArray(p.profile_sketches) ? p.profile_sketches.length : 0 };
+  }
+
   const _OP_HANDLERS = {
     beginPlan:       _opBeginPlan,
     newSketch:       _opNewSketch,
@@ -618,6 +688,16 @@ export const ariaFlange = defineFeature(function(context is Context, id is Id, d
     createConfiguration: _opCreateConfiguration,
     createBranch:        _opCreateBranch,
     emitFeatureScript:   _opEmitFeatureScript,
+    // Cross-CAD parity — same JSON works on SW, Fusion, Rhino, Onshape.
+    beginAssembly:   _opBeginAssembly,
+    insertComponent: _opInsertComponent,
+    addMate:         _opAddMate,
+    createDrawing:   _opCreateDrawing,
+    // Phase C parity stubs — analytic FEA + sheet metal + surface loft.
+    runFea:               _opRunFea,
+    feaIterate:           _opRunFea,
+    sheetMetalBaseFlange: _opSheetMetalBaseFlange,
+    surfaceLoft:          _opSurfaceLoft,
   };
 
   async function executeFeature(kind, params) {

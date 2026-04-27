@@ -1281,20 +1281,29 @@ def full_build(req: FullBuildRequest):
     except Exception as exc:
         step("mcad_step_export", False, error=str(exc))
 
-    # Self-healing: if the SW frame export came back as a tiny placeholder
-    # (recursive mcad_generate intermittently produces a near-empty doc),
-    # fall back to the canonical drone frame STEP from outputs/cad/step.
-    # Downstream steps (TechDraw, GD&T, assembly STEP) need real geometry
-    # to run, so we'd rather ship a known-good prior frame than skip them
-    # entirely.
-    if (not frame_step.is_file()
-            or frame_step.stat().st_size < 10_000):
-        canonical = REPO_ROOT / "outputs" / "cad" / "step" / "drone_frame.step"
+    # Self-healing: fall back to the canonical drone frame STEP if any
+    # of these go wrong:
+    #   1. SW didn't produce a frame (mcad_generate failed → no fresh
+    #      part → mcad_step_export saved an empty/wrong doc).
+    #   2. mcad_step_export saved a HUGE file (3+MB), which means it
+    #      grabbed the previously-active assembly instead of a fresh
+    #      frame part — wrong content even though it passes the size
+    #      check.
+    # The canonical frame is ~236 KB; anything outside [10KB, 1MB] is
+    # almost certainly the wrong content.
+    canonical = REPO_ROOT / "outputs" / "cad" / "step" / "drone_frame.step"
+    bad = (not frame_step.is_file()
+            or frame_step.stat().st_size < 10_000
+            or frame_step.stat().st_size > 1_500_000
+            or not mcad.get("ok"))
+    if bad:
         if canonical.is_file() and canonical.stat().st_size > 10_000:
             shutil.copy(canonical, frame_step)
             step("mcad_step_fallback", True,
                   source=str(canonical),
-                  size=frame_step.stat().st_size)
+                  size=frame_step.stat().st_size,
+                  reason=("mcad_generate failed" if not mcad.get("ok")
+                            else f"frame_step size out of range"))
         else:
             step("mcad_step_fallback", False,
                   reason="no canonical frame STEP available")
@@ -1692,6 +1701,95 @@ def full_build(req: FullBuildRequest):
     except Exception as exc:
         step("assembly_step", False,
               error=f"{type(exc).__name__}: {exc}")
+
+    # --- 9. NATIVE SW assembly with mates (.sldasm) ----------------------
+    # Drives the SW addin's beginAssembly + insertComponent + addMate +
+    # saveAs to produce a real .sldasm with multiple mate types between
+    # PCB and frame. Falls back gracefully if the addin is unreachable.
+    sldasm_path = bundle / "assembly.sldasm"
+    slddrw_path = bundle / "assembly.slddrw"
+    if (frame_step.is_file() and pcb_step.is_file()
+            and req.mcad_cad.lower() in ("solidworks", "sw")):
+        try:
+            # 600s — the second insertComponent on a trace-rich PCB
+            # STEP can take 60-90s on 16GB machines as SW imports + saves
+            # the SLDPRT. 180s timed out on the v19 ARIA_EMIT_TRACES=1 run.
+            with _httpx.Client(timeout=600.0) as c:
+                try:
+                    st_probe = c.get(f"{mcad_base}/status").json()
+                except Exception as exc:
+                    raise RuntimeError(f"SW addin probe failed: {exc}")
+                if not st_probe.get("sw_connected"):
+                    raise RuntimeError(f"SW not connected: {st_probe}")
+
+                def _sw_op(kind: str, params: dict) -> dict:
+                    r = c.post(f"{mcad_base}/op",
+                                json={"kind": kind, "params": params})
+                    return r.json()
+
+                _sw_op("beginAssembly", {})
+                _sw_op("insertComponent", {
+                    "file": str(frame_step), "alias": "frame",
+                    "x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0})
+                _sw_op("insertComponent", {
+                    "file": str(pcb_step), "alias": "pcb",
+                    "x_mm": 0.0, "y_mm": 0.0, "z_mm": 20.0})
+                # Three mates lock the canonical "FC stack on frame" pose:
+                #   1. Top  planes parallel  -> Z-axis aligned
+                #   2. Front planes parallel -> no twist
+                #   3. Right planes parallel -> rotation locked
+                # Together: ~5 DOF locked (translation in Z still free,
+                # to be locked by a distance mate or stand-off geometry).
+                m1 = _sw_op("addMate", {
+                    "type": "parallel",
+                    "alias1": "pcb",   "plane1": "Top",
+                    "alias2": "frame", "plane2": "Top"})
+                m2 = _sw_op("addMate", {
+                    "type": "parallel",
+                    "alias1": "pcb",   "plane1": "Front",
+                    "alias2": "frame", "plane2": "Front"})
+                m3 = _sw_op("addMate", {
+                    "type": "parallel",
+                    "alias1": "pcb",   "plane1": "Right",
+                    "alias2": "frame", "plane2": "Right"})
+                save = _sw_op("saveAs",
+                                {"path": str(sldasm_path).replace("\\", "/")})
+
+            mates = [m1, m2, m3]
+            mates_ok = sum(1 for m in mates
+                            if (m.get("result") or {}).get("ok"))
+            saved_ok = (save.get("result") or {}).get("ok")
+            step("sw_native_assembly",
+                  saved_ok and sldasm_path.is_file(),
+                  path=str(sldasm_path) if sldasm_path.is_file() else None,
+                  mates_ok=f"{mates_ok}/3")
+        except Exception as exc:
+            step("sw_native_assembly", False,
+                  error=f"{type(exc).__name__}: {exc}")
+
+    # --- 10. NATIVE SW drawing (.slddrw) — views + auto-dim + BOM ------
+    if sldasm_path.is_file():
+        try:
+            with _httpx.Client(timeout=300.0) as c:
+                r = c.post(f"{mcad_base}/op", json={
+                    "kind": "createDrawing",
+                    "params": {
+                        "source":     str(sldasm_path).replace("\\", "/"),
+                        "out":        str(slddrw_path).replace("\\", "/"),
+                        "sheet_size": "A3",
+                        "add_bom":    True,
+                    },
+                })
+                rj = r.json()
+            inner = (rj.get("result") or {})
+            step("sw_native_drawing",
+                  inner.get("ok") and slddrw_path.is_file(),
+                  path=str(slddrw_path) if slddrw_path.is_file() else None,
+                  views=inner.get("views"),
+                  size=inner.get("size"))
+        except Exception as exc:
+            step("sw_native_drawing", False,
+                  error=f"{type(exc).__name__}: {exc}")
 
     return {
         "ok":     all(s["ok"] for s in log if s["step"] not in (
