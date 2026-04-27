@@ -1089,6 +1089,294 @@ def board_and_enclosure(req: BoardAndEnclosureRequest):
 
 
 # --------------------------------------------------------------------------- #
+# /api/system/full-build — END-TO-END drone (or any electromechanical product)
+# build pipeline. Goes from a text goal all the way to:
+#   1. KiCad PCB (Gerbers + STEP)
+#   2. SolidWorks frame (STEP + screenshot)
+#   3. Combined assembly STEP (mated)
+#   4. eBOM (electrical, from KiCad components)
+#   5. MBOM (mechanical, from frame parts + catalog: motors, props, ESCs, …)
+#   6. Engineering drawings (PDF for PCB fab, optional GD&T for frame)
+#   7. Assembly manual (markdown — uses existing drone presets)
+#
+# This is the "fully integrate the two CADs" pipeline — MCAD↔ECAD coupling
+# extends here from the geometric handshake (board outline → enclosure
+# cavity) into manufacturing handoff (assembly + BOMs + docs).
+# --------------------------------------------------------------------------- #
+
+class FullBuildRequest(BaseModel):
+    goal: str
+    pcb_goal: str | None = None       # override goal for ECAD half
+    frame_goal: str | None = None     # override goal for MCAD half
+    mcad_cad: str = "solidworks"
+    quality_tier: str = "fast"
+    bundle_name: str = "drone_build"
+    motor_count: int = 4
+    prop_size_in: float = 5.0
+    battery_capacity_mah: int = 1500
+    battery_cells: int = 4
+
+
+@app.post("/api/system/full-build")
+def full_build(req: FullBuildRequest):
+    """End-to-end drone build: PCB + frame + assembly + BOM + docs."""
+    import httpx as _httpx
+    import shutil
+
+    bundle = REPO_ROOT / "outputs" / "system_builds" / req.bundle_name
+    bundle.mkdir(parents=True, exist_ok=True)
+
+    pcb_goal = req.pcb_goal or req.goal
+    frame_goal = req.frame_goal or req.goal
+    mcad_base = _CAD_BASE_URL.get(req.mcad_cad.lower())
+    ecad_base = _ECAD_BASE_URL["kicad"]
+    if not mcad_base:
+        raise HTTPException(400, f"unknown mcad_cad: {req.mcad_cad}")
+
+    log: list[dict] = []
+    def step(name, ok, **extra):
+        rec = {"step": name, "ok": ok, **extra}
+        log.append(rec)
+        return rec
+
+    # --- 1. ECAD: generate PCB --------------------------------------------
+    with _httpx.Client(timeout=180.0) as c:
+        try:
+            r = c.post(f"http://localhost:8001/api/ecad/text-to-board",
+                        json={"goal": pcb_goal})
+            ecad = r.json()
+            step("ecad_generate", ecad.get("ok"),
+                  components=ecad.get("n_components"),
+                  ops_ok=ecad.get("n_ops_succeeded"))
+        except Exception as exc:
+            step("ecad_generate", False, error=str(exc))
+            return {"ok": False, "log": log, "bundle": str(bundle)}
+
+    pcb_kicad_path = None
+    for r in (ecad.get("results") or []):
+        if r.get("kind") == "save_pcb":
+            pcb_kicad_path = (r.get("result") or {}).get("path")
+            break
+    if not pcb_kicad_path:
+        return {"ok": False, "log": log, "error": "no PCB save path"}
+
+    # Export PCB as STEP
+    cli = shutil.which("kicad-cli") or \
+        r"C:\Users\jonko\AppData\Local\Programs\KiCad\10.0\bin\kicad-cli.exe"
+    pcb_step = bundle / "fc_pcb.step"
+    try:
+        proc = __import__("subprocess").run(
+            [cli, "pcb", "export", "step",
+             "--output", str(pcb_step), pcb_kicad_path],
+            capture_output=True, timeout=60)
+        step("ecad_step_export", proc.returncode == 0,
+              size=pcb_step.stat().st_size if pcb_step.exists() else 0)
+    except Exception as exc:
+        step("ecad_step_export", False, error=str(exc))
+
+    # --- 2. MCAD: generate frame ------------------------------------------
+    with _httpx.Client(timeout=180.0) as c:
+        try:
+            r = c.post(f"http://localhost:8001/api/cad/text-to-part",
+                        json={"goal": frame_goal,
+                              "cad": req.mcad_cad,
+                              "quality_tier": req.quality_tier})
+            mcad = r.json()
+            step("mcad_generate", mcad.get("ok"),
+                  ops_ok=mcad.get("n_ops_succeeded"),
+                  ops_total=mcad.get("n_ops_planned"))
+        except Exception as exc:
+            mcad = {}
+            step("mcad_generate", False, error=str(exc))
+
+    frame_step = bundle / "drone_frame.step"
+    try:
+        with _httpx.Client(timeout=60.0) as c:
+            r = c.post(f"{mcad_base}/save_step",
+                        json={"path": str(frame_step).replace("\\", "/")})
+            step("mcad_step_export", r.json().get("ok"),
+                  size=frame_step.stat().st_size if frame_step.exists() else 0)
+    except Exception as exc:
+        step("mcad_step_export", False, error=str(exc))
+
+    # --- 3. Build a hierarchical assembly config --------------------------
+    config = {
+        "name":            req.bundle_name,
+        "preset":          "fpv_drone",
+        "parts": [
+            {"id": "frame",     "step": str(frame_step),
+             "pos": [0, 0, 0],   "rot": [0, 0, 0],
+             "fabricated": True},
+            {"id": "fc_pcb",    "step": str(pcb_step),
+             "pos": [0, 0, 8],   "rot": [0, 0, 0],
+             "ecad": pcb_kicad_path},
+        ],
+        # Catalog parts — pulled by generate_bom() from aria_os.components.catalog
+        "components": [
+            {"designation": f"FPV motor 2207 1750KV",
+             "quantity":    req.motor_count},
+            {"designation": f"Propeller {req.prop_size_in:.0f}-inch tri-blade",
+             "quantity":    req.motor_count},
+            {"designation": f"ESC 30A BLHeli32",
+             "quantity":    req.motor_count},
+            {"designation": f"LiPo {req.battery_cells}S {req.battery_capacity_mah}mAh",
+             "quantity":    1},
+            {"designation": "M3x6 socket-cap (motor mount)",
+             "quantity":    req.motor_count * 4},
+            {"designation": "M3x8 socket-cap (FC standoff)",
+             "quantity":    8},
+            {"designation": "M3x6 brass standoff",
+             "quantity":    4},
+            {"designation": "Velcro battery strap 200x20mm",
+             "quantity":    1},
+        ],
+    }
+    cfg_path = bundle / "build_config.json"
+    cfg_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+    # --- 4. Generate combined BOM (mBOM + eBOM) ---------------------------
+    bom: dict = {}
+    try:
+        from aria_os.assembly_bom import generate_bom
+        bom = generate_bom(config, config_path=cfg_path)
+        bom_path = bundle / "bom.json"
+        bom_path.write_text(json.dumps(bom, indent=2, default=str),
+                              encoding="utf-8")
+        step("bom_generate", True,
+              total_parts=bom.get("summary", {}).get("total_parts"),
+              total_cost_usd=bom.get("summary", {}).get(
+                  "total_purchased_cost_usd"))
+    except Exception as exc:
+        step("bom_generate", False,
+              error=f"{type(exc).__name__}: {exc}")
+
+    # --- 5. eBOM via KiCad (component-list export) -----------------------
+    try:
+        proc = __import__("subprocess").run(
+            [cli, "sch", "export", "bom",
+             "--output", str(bundle / "ebom.csv"),
+             pcb_kicad_path.replace(".kicad_pcb", ".kicad_sch")],
+            capture_output=True, timeout=30)
+        # Schematic may not exist (pcb_writer doesn't produce one) — try
+        # alternative: list components from the .kicad_pcb directly.
+        step("ebom_kicad", proc.returncode == 0,
+              path=str(bundle / "ebom.csv") if (bundle / "ebom.csv").is_file()
+                   else "(no schematic)")
+    except Exception as exc:
+        step("ebom_kicad", False, error=str(exc))
+
+    # Fallback: extract eBOM from the .kicad_pcb footprint refs.
+    # KiCad 9/10 uses `(property "Reference" "X")` (not the old
+    # `fp_text reference X` from KiCad 7). Split on footprint boundaries
+    # so per-footprint regex doesn't run away across the whole file.
+    try:
+        import re as _re
+        pcb_text = Path(pcb_kicad_path).read_text(encoding="utf-8",
+                                                    errors="replace")
+        ebom_rows = []
+        fp_blocks = _re.split(r'(?=\n\s*\(footprint\s+")', pcb_text)
+        for block in fp_blocks:
+            if not block.strip().startswith('(footprint'):
+                continue
+            fp_m = _re.match(r'\s*\(footprint\s+"([^"]+)"', block)
+            ref_m = _re.search(r'\(property\s+"Reference"\s+"([^"]+)"',
+                                block)
+            val_m = _re.search(r'\(property\s+"Value"\s+"([^"]+)"',
+                                block)
+            if fp_m and ref_m and val_m:
+                ebom_rows.append({
+                    "ref":       ref_m.group(1),
+                    "value":     val_m.group(1),
+                    "footprint": fp_m.group(1),
+                })
+        ebom_csv = bundle / "ebom.csv"
+        with ebom_csv.open("w", encoding="utf-8") as f:
+            f.write("ref,value,footprint\n")
+            for r in ebom_rows:
+                f.write(f"{r['ref']},{r['value']},{r['footprint']}\n")
+        step("ebom_extract", True, count=len(ebom_rows),
+              path=str(ebom_csv))
+    except Exception as exc:
+        step("ebom_extract", False, error=str(exc))
+
+    # --- 6. Assembly instructions ----------------------------------------
+    try:
+        from aria_os.assembly_instructions import generate_assembly_md
+        # generate_assembly_md takes a "bom" dict but expects assembly_name +
+        # parts + breakdown. We feed it a flatter shape:
+        asm_bom = {
+            "assembly_name":  req.bundle_name,
+            "name":           req.bundle_name,
+            "parts":          (bom.get("purchased") or [])
+                              + [{"designation": "Drone frame (CNC carbon)",
+                                   "step_path": str(frame_step), "mass_g": 38},
+                                 {"designation": "FC PCB",
+                                   "step_path": str(pcb_step), "mass_g": 7}],
+            "preset":         "fpv_drone",
+            "total_mass_g":   sum(float(p.get("mass_g") or 0)
+                                    for p in (bom.get("purchased") or [])),
+        }
+        asm_path = generate_assembly_md(asm_bom, bundle)
+        step("assembly_md", True, path=str(asm_path))
+    except Exception as exc:
+        step("assembly_md", False,
+              error=f"{type(exc).__name__}: {exc}")
+
+    # --- 7. PCB fab drawing (PDF) ----------------------------------------
+    try:
+        proc = __import__("subprocess").run(
+            [cli, "pcb", "export", "pdf",
+             "--output", str(bundle / "fc_pcb_fab.pdf"),
+             "--layers", "F.Cu,F.Silkscreen,B.Cu,B.Silkscreen,Edge.Cuts",
+             pcb_kicad_path],
+            capture_output=True, timeout=30)
+        step("pcb_fab_pdf",
+              (bundle / "fc_pcb_fab.pdf").is_file(),
+              path=str(bundle / "fc_pcb_fab.pdf"))
+    except Exception as exc:
+        step("pcb_fab_pdf", False, error=str(exc))
+
+    # --- 8. CadQuery STEP assembly (real mated assembly) -----------------
+    assembly_step_path = None
+    try:
+        from aria_os.assembler import Assembler, AssemblyPart
+        a = Assembler(repo_root=REPO_ROOT)
+        parts = [
+            AssemblyPart(step_path=str(frame_step),
+                          position=(0, 0, 0), rotation=(0, 0, 0),
+                          name="frame"),
+            AssemblyPart(step_path=str(pcb_step),
+                          position=(0, 0, 8), rotation=(0, 0, 0),
+                          name="fc_pcb"),
+        ]
+        # Verify both files exist
+        valid_parts = [p for p in parts if Path(p.step_path).is_file()]
+        if len(valid_parts) >= 2:
+            assembly_step_path = a.assemble(valid_parts, name=req.bundle_name)
+            # Copy into the bundle
+            target = bundle / "assembly.step"
+            shutil.copy(assembly_step_path, target)
+            step("assembly_step", True,
+                  path=str(target),
+                  size=target.stat().st_size)
+        else:
+            step("assembly_step", False,
+                  error=f"only {len(valid_parts)} STEP files available")
+    except Exception as exc:
+        step("assembly_step", False,
+              error=f"{type(exc).__name__}: {exc}")
+
+    return {
+        "ok":     all(s["ok"] for s in log if s["step"] not in (
+            "pcb_fab_pdf", "ebom_kicad")),  # tolerated optionals
+        "bundle": str(bundle),
+        "log":    log,
+        "files":  sorted([str(p.relative_to(bundle))
+                            for p in bundle.rglob("*") if p.is_file()]),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Pipeline runner (runs in background thread to keep FastAPI responsive)
 # --------------------------------------------------------------------------- #
 

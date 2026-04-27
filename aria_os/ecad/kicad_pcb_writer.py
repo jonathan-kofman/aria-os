@@ -287,6 +287,10 @@ def write_kicad_pcb(
     # Board outline rectangle on Edge.Cuts layer
     edge_cuts = _build_edge_cuts(page_x_mm, page_y_mm, board_w, board_h)
 
+    # NPTH mounting holes at the 4 corners (M3 default).
+    mounting_holes = _build_mounting_holes(page_x_mm, page_y_mm,
+                                             board_w, board_h)
+
     # Final s-expression
     timestamp = int(time.time())
     pcb = f'''(kicad_pcb
@@ -344,6 +348,7 @@ def write_kicad_pcb(
     (net 0 "")
 {net_lines}
 {edge_cuts}
+{mounting_holes}
 {chr(10).join(footprint_blocks)}
 {trace_block}
 )
@@ -424,6 +429,18 @@ def _embed_real_footprint(*, raw_fp_text: str, library_name: str, fp_name: str,
                    f'\\1"{ref}"', text, count=1)
     text = _re.sub(r'(\(property\s+"Value"\s+)""',
                    f'\\1"{value}"', text, count=1)
+
+    # Apply per-footprint solder mask margin override. KiCad's default
+    # mask aperture (~0.05mm) bridges between adjacent QFP/QFN pads on
+    # tight pitches (was 212 solder_mask_bridge DRC errors on the v4 FC).
+    # Setting the FP-level margin to 0.0 = mask aperture exactly equals
+    # pad copper, so no bridging.
+    if not _re.search(r'\(solder_mask_margin\s+', text):
+        # Inject right after the (at ...) block we placed
+        text = _re.sub(
+            r'(\(at\s+[\d.\-]+\s+[\d.\-]+\s+[\d.\-]+\)\n)',
+            r'\1        (solder_mask_margin 0)\n',
+            text, count=1)
 
     # Inject (net N "name") into each (pad "X" smd|thru_hole ... ) block.
     # KiCad pad format: (pad "1" smd rect (at ...) (size ...) (layers ...)
@@ -547,6 +564,12 @@ def _build_footprint_sexpr(ref: str, value: str, footprint_field: str,
     net_index = net_index or {}
 
     pad_lines = []
+    # Per-pad solder mask margin override. The KiCad default is ~0.05mm
+    # which fails DRC on tight pad spacing (mask apertures merge). 0.0
+    # here makes each pad's mask aperture exactly match the pad — eliminates
+    # the "Front solder mask aperture bridges items with different nets"
+    # DRC errors that dominated the 60x60 v4 board.
+    mask_margin = 0.0
     for i in range(n_pads):
         pad_num = i + 1
         px = -w / 2.0 + pad_pitch_x * (i + 1)
@@ -557,7 +580,8 @@ def _build_footprint_sexpr(ref: str, value: str, footprint_field: str,
                 f'        (pad "{pad_num}" smd rect '
                 f'(at {px:.3f} {py:.3f}) '
                 f'(size 1.0 0.6) '
-                f'(layers "F.Cu" "F.Paste" "F.Mask"){net_frag})'
+                f'(layers "F.Cu" "F.Paste" "F.Mask") '
+                f'(solder_mask_margin {mask_margin:.3f}){net_frag})'
             )
 
     return f'''    (footprint "{footprint_field}"
@@ -664,17 +688,15 @@ def _build_traces_sexpr(components: list,
     if have_any_explicit:
         net_to_endpoints = explicit_assignments
     else:
-        # Fallback: every component joins every default net via pad 1.
-        # This is obviously electrically wrong, but it gives the fab a
-        # board with copper. Real netlists should be provided in the BOM.
+        # No explicit netlist provided. The historical fallback was to
+        # connect every component's pad 1 to every default net, which
+        # produces a board with COPPER but also produces hundreds of
+        # DRC shorts (e.g. +3V3 and PWM3 shorted at the MCU pin).
+        # Better to ship a board with NO traces than a board with bad
+        # traces — the user/router can add real routing later. Tracks
+        # are skipped entirely; only the GND copper pour (added
+        # downstream as a zone) provides any inter-component net.
         net_to_endpoints = {}
-        for n in nets:
-            net_to_endpoints[n] = [
-                (str(c.get("ref", "?")),
-                 component_pad_positions.get(str(c.get("ref", "?")), [(0.0, 0.0)])[0])
-                for c in components
-                if component_pad_positions.get(str(c.get("ref", "?")))
-            ]
 
     lines: list[str] = []
     for net_name, endpoints in net_to_endpoints.items():
@@ -714,6 +736,50 @@ def _build_edge_cuts(x0: float, y0: float, w: float, h: float) -> str:
             f'(layer "Edge.Cuts") (width 0.15) (tstamp {uuid4()}))'
         )
     return "\n".join(lines)
+
+
+def _build_mounting_holes(page_x_mm: float, page_y_mm: float,
+                           board_w: float, board_h: float,
+                           *,
+                           inset: float = 3.5,
+                           hole_d: float = 3.2,
+                           pad_d: float = 6.0,
+                           plated: bool = False) -> str:
+    """Emit four corner mounting holes as KiCad footprints. Default M3
+    (3.2mm clearance / 6mm pad). NPTH (no plating) for mechanical-only
+    holes. The footprints have no nets, so they don't trigger DRC short
+    errors against any pour.
+    """
+    holes = []
+    positions = [
+        (page_x_mm + inset,             page_y_mm + inset),
+        (page_x_mm + board_w - inset,   page_y_mm + inset),
+        (page_x_mm + board_w - inset,   page_y_mm + board_h - inset),
+        (page_x_mm + inset,             page_y_mm + board_h - inset),
+    ]
+    pad_layers = '"*.Cu" "*.Mask"' if plated else '"F.Mask" "B.Mask" "Edge.Cuts"'
+    pad_type = "thru_hole" if plated else "np_thru_hole"
+    for i, (cx, cy) in enumerate(positions, start=1):
+        ref = f"H{i}"
+        holes.append(f'''    (footprint "MountingHole:MountingHole_3.2mm_M3"
+        (layer "F.Cu")
+        (tstamp {uuid4()})
+        (at {cx:.3f} {cy:.3f})
+        (descr "auto-generated mounting hole")
+        (attr {('through_hole' if plated else 'exclude_from_pos_files exclude_from_bom')})
+        (fp_text reference "{ref}" (at 0 -3.5) (layer "F.SilkS")
+            (effects (font (size 0.8 0.8) (thickness 0.15)))
+            (tstamp {uuid4()}))
+        (fp_text value "M3" (at 0 3.5) (layer "F.Fab")
+            (effects (font (size 0.6 0.6) (thickness 0.12)))
+            (tstamp {uuid4()}))
+        (fp_circle (center 0 0) (end {pad_d/2:.3f} 0)
+            (stroke (width 0.05) (type default)) (fill none) (layer "F.CrtYd")
+            (tstamp {uuid4()}))
+        (pad "" {pad_type} circle (at 0 0) (size {pad_d:.3f} {pad_d:.3f})
+            (drill {hole_d:.3f}) (layers {pad_layers}))
+    )''')
+    return "\n".join(holes)
 
 
 def _collect_nets(components: list) -> list[str]:

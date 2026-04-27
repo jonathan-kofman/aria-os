@@ -1340,14 +1340,18 @@ def place_components(components: List[Component], board_w: float, board_h: float
     Guarantees at least 5 mm clearance between every pair of components and
     keeps everything inside the board margins.
     """
-    # Small boards (drone FCs, fingertip PCBs) need tighter margins to fit components.
+    # Small boards (drone FCs, fingertip PCBs) need tighter margins to
+    # fit components, but courtyards still need real clearance — KiCad
+    # default is 0.5mm courtyard outside silkscreen, so MIN_GAP=1.5mm
+    # virtually guarantees pth_inside_courtyard / courtyards_overlap
+    # DRC errors. Bumped to 2.5mm minimum across the board.
     _board_min = min(board_w, board_h)
     if _board_min < 40.0:
-        MARGIN  = 2.0
-        MIN_GAP = 1.5
+        MARGIN  = 2.5
+        MIN_GAP = 2.5
     elif _board_min < 60.0:
-        MARGIN  = 3.0
-        MIN_GAP = 3.0
+        MARGIN  = 3.5
+        MIN_GAP = 3.5
     else:
         MARGIN  = 5.0
         MIN_GAP = 5.0
