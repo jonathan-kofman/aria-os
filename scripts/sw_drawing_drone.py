@@ -53,17 +53,25 @@ def main() -> int:
             else src.with_suffix(".slddrw"))
 
     base = f"http://localhost:{args.port}"
-    print(f"[probe ] {base}/status")
+    print(f"[probe ] sw_preflight.ensure_ready(port={args.port})")
     try:
-        st = _get(base, "/status")
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from sw_preflight import ensure_ready  # type: ignore
+        ensure_ready(args.port)
+    except SystemExit:
+        raise
     except Exception as exc:
-        raise SystemExit(
-            f"SW addin not reachable at {base} ({exc}). "
-            f"Is SolidWorks open and the ARIA add-in loaded?")
-    if not st.get("sw_connected"):
-        raise SystemExit(f"addin reachable but not connected to SW: {st}")
-    print(f"  SW connected: doc={st.get('doc')!r} "
-            f"ops_dispatched={st.get('ops_dispatched')}")
+        print(f"  preflight unavailable ({exc}); using legacy probe")
+        try:
+            st = _get(base, "/status")
+        except Exception as exc2:
+            raise SystemExit(
+                f"SW addin not reachable at {base} ({exc2}). "
+                f"Is SolidWorks open and the ARIA add-in loaded?")
+        if not st.get("sw_connected"):
+            raise SystemExit(f"addin reachable but not connected to SW: {st}")
+        print(f"  SW connected: doc={st.get('doc')!r} "
+                f"ops_dispatched={st.get('ops_dispatched')}")
 
     payload = {
         "kind": "createDrawing",

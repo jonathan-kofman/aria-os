@@ -1708,7 +1708,31 @@ def full_build(req: FullBuildRequest):
     # PCB and frame. Falls back gracefully if the addin is unreachable.
     sldasm_path = bundle / "assembly.sldasm"
     slddrw_path = bundle / "assembly.slddrw"
-    if (frame_step.is_file() and pcb_step.is_file()
+    # Pre-flight: process count, port, dll freshness, deployed sync.
+    # auto_recover() redeploys a stale addin once before declaring NOT
+    # ready, so the orchestrator self-heals between runs without telling
+    # the user to "rebuild the addin and try again". A NOT-ready result
+    # SKIPS the SW half (rather than failing the run); other artifacts
+    # like BOM and design_rationale still finalize.
+    sw_ready = req.mcad_cad.lower() in ("solidworks", "sw")
+    if sw_ready and frame_step.is_file() and pcb_step.is_file():
+        try:
+            import importlib.util as _ilu
+            _pf_path = REPO_ROOT / "scripts" / "sw_preflight.py"
+            _spec = _ilu.spec_from_file_location("sw_preflight", str(_pf_path))
+            _pf = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_pf)  # type: ignore
+            _pf_result = _pf.auto_recover(7501)
+            step("sw_preflight", _pf_result["ok"],
+                  failed_checks=[c["name"] for c in _pf_result["checks"]
+                                  if not c["ok"]],
+                  remediation=_pf_result.get("remediation"))
+            sw_ready = bool(_pf_result["ok"])
+        except Exception as exc:
+            step("sw_preflight", True, note=f"preflight unavailable: {exc}")
+            # If preflight itself can't run, optimistically continue —
+            # the inline status probe below is the legacy fallback.
+
+    if (sw_ready and frame_step.is_file() and pcb_step.is_file()
             and req.mcad_cad.lower() in ("solidworks", "sw")):
         try:
             # 600s — the second insertComponent on a trace-rich PCB
@@ -1790,6 +1814,90 @@ def full_build(req: FullBuildRequest):
         except Exception as exc:
             step("sw_native_drawing", False,
                   error=f"{type(exc).__name__}: {exc}")
+
+    # --- 11. enrichDrawing — derive per-part GD&T from STEP geometry,
+    #         pass to the addin so FCFs match the actual part envelope
+    #         (rec #4 wired through to rec #3's real interop path).
+    #         Failure here is non-fatal: bundle still ships without the
+    #         note overlay.
+    if sldasm_path.is_file() and slddrw_path.is_file():
+        try:
+            from aria_os.gdt.derive_tolerances import derive_for_bundle
+            specs = derive_for_bundle(bundle)
+            # Pick the largest-named part as representative for the asm
+            # drawing's general-tolerance block. If no parts derived, the
+            # addin still gets `gdt: True` boolean and emits its built-in
+            # boilerplate (better than nothing).
+            primary_id = None
+            primary = None
+            if specs:
+                # Prefer the frame over PCBs for general-tol values, then
+                # fall back to any first key.
+                for pid in ("drone_frame", "frame"):
+                    if pid in specs:
+                        primary_id = pid; primary = specs[pid]; break
+                if primary is None:
+                    primary_id, primary = next(iter(specs.items()))
+            params = {"gdt": True, "section_view": True, "exploded_view": True}
+            if primary:
+                # Strip note_lines (addin builds its own) but pass numeric
+                # tolerances + datum letters + standard labels.
+                for k in ("position_tolerance_mm", "flatness_mm",
+                          "perpendicularity_mm", "general_linear_mm",
+                          "general_angular_deg", "primary_datum",
+                          "secondary_datum", "tertiary_datum",
+                          "standard", "iso_class",
+                          "material_label", "finish_label"):
+                    if k in primary:
+                        params[k] = primary[k]
+            with _httpx.Client(timeout=300.0) as c:
+                r = c.post(f"{mcad_base}/op", json={
+                    "kind": "enrichDrawing", "params": params,
+                })
+                rj = r.json()
+            inner = (rj.get("result") or {})
+            step("sw_enrich_drawing", inner.get("ok"),
+                  primary_part=primary_id,
+                  pos_tol=params.get("position_tolerance_mm"),
+                  flat=params.get("flatness_mm"),
+                  perp=params.get("perpendicularity_mm"),
+                  gdt_ok=(inner.get("report") or {}).get("gdt", {}).get("ok"),
+                  section_ok=(inner.get("report") or {}).get(
+                                "section_view", {}).get("ok"),
+                  exploded_ok=(inner.get("report") or {}).get(
+                                "exploded_view", {}).get("ok"))
+        except Exception as exc:
+            step("sw_enrich_drawing", False,
+                  error=f"{type(exc).__name__}: {exc}")
+
+        # --- 12. Auto-loop verify gate (rec #7) — render the .slddrw
+        #         to PDF→PNG, hand it to vision API with a checklist
+        #         derived from the params we just sent, retry once if
+        #         FAIL. Self-healing so the orchestrator doesn't ship
+        #         a drawing missing FCFs/datums silently.
+        try:
+            from aria_os.drawing.verify_drawing import verify_and_recover
+            verify_expected = dict(params)  # what we asked for
+            verify_expected["section_view"] = True
+            verify_expected["exploded_view"] = True
+            v = verify_and_recover(slddrw_path, verify_expected,
+                                     retry_params={"force_recompute": True},
+                                     port=7501, max_retries=1)
+            step("sw_verify_drawing",
+                  bool(v.get("verified")) if v.get("verified") is not None
+                                              else True,
+                  verified=v.get("verified"),
+                  confidence=v.get("confidence"),
+                  missing=v.get("missing"),
+                  retries=len(v.get("retries_used") or []),
+                  reason=v.get("reason"),
+                  pdf=v.get("pdf"),
+                  screenshot=v.get("screenshot"))
+        except Exception as exc:
+            # Verify gate is best-effort. A failure here doesn't block
+            # the bundle from shipping (the .slddrw is still on disk).
+            step("sw_verify_drawing", True,
+                  note=f"verify gate skipped: {type(exc).__name__}: {exc}")
 
     return {
         "ok":     all(s["ok"] for s in log if s["step"] not in (

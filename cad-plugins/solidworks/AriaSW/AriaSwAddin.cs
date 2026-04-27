@@ -244,6 +244,9 @@ namespace AriaSW
                     // Drawing enrichment — GD&T, section view, exploded
                     // view (asm) — applied to the currently-active .slddrw.
                     "enrichDrawing"   => OpEnrichDrawing(p),
+                    // Drawing → PDF for downstream visual verification by
+                    // the orchestrator's auto-loop verify gate.
+                    "exportDrawingPdf"=> OpExportDrawingPdf(p),
                     // Native SW Simulation FEA — parametric iterations
                     "runFea"          => OpRunFEA(p),
                     "feaIterate"      => OpRunFEA(p),
@@ -2328,6 +2331,58 @@ namespace AriaSW
                 drawing_title = drwDoc.GetTitle(),
                 report,
             };
+        }
+
+        // -----------------------------------------------------------------
+        // Export the active drawing (.slddrw) to PDF so the orchestrator's
+        // verify gate can render it via pymupdf and feed the PNG to the
+        // vision API for a "are the GD&T notes / section / exploded view
+        // actually present?" check.
+        //
+        // params:
+        //   out:      output .pdf path (default: alongside .slddrw)
+        // returns:
+        //   { ok, path, size, errs, warns }
+        // -----------------------------------------------------------------
+        private object OpExportDrawingPdf(Dictionary<string, object> p)
+        {
+            string outPdf = p.ContainsKey("out") ? p["out"]?.ToString() : null;
+            var active = _sw.IActiveDoc2 as IModelDoc2;
+            if (active == null)
+                return new { ok = false, error = "exportDrawingPdf: no active doc" };
+            string srcPath = active.GetPathName();
+            if (string.IsNullOrEmpty(srcPath)
+                || !srcPath.ToLowerInvariant().EndsWith(".slddrw"))
+                return new { ok = false, error =
+                              $"exportDrawingPdf: active doc is not a drawing ('{srcPath}')" };
+            if (string.IsNullOrEmpty(outPdf))
+                outPdf = Path.ChangeExtension(srcPath, ".pdf");
+            try { Directory.CreateDirectory(Path.GetDirectoryName(outPdf)); }
+            catch { }
+            outPdf = CanonPath(outPdf) ?? outPdf;
+            int errs = 0, warns = 0;
+            bool ok;
+            try
+            {
+                // SaveAs auto-detects PDF from .pdf extension. Silent flag
+                // suppresses any UI prompts (e.g. "save in current version").
+                ok = active.Extension.SaveAs(
+                    outPdf,
+                    (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                    null, ref errs, ref warns);
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  exportDrawingPdf threw: {ex.Message}");
+                return new { ok = false, error = ex.Message,
+                              errs, warns };
+            }
+            long size = 0;
+            try { size = new FileInfo(outPdf).Length; } catch { }
+            FileLog($"  exportDrawingPdf '{outPdf}' ok={ok} size={size} errs={errs} warns={warns}");
+            return new { ok = ok && size > 0, path = outPdf,
+                          size, errs, warns };
         }
 
         // -----------------------------------------------------------------
