@@ -130,6 +130,45 @@ namespace AriaSW
         }
 
         // -----------------------------------------------------------------
+        // Path canonicalization — fixes the silent-failure class
+        //
+        // Several SW string-matched APIs (Create3rdAngleViews2, AddMate's
+        // SelectByID2, ActivateDoc3) compare a path against SW's internal
+        // open-doc title which mirrors disk filename casing exactly. A
+        // mismatched-case or forward-slash path silently fails ("ok=False"
+        // returned, no exception). This helper resolves any user-supplied
+        // path to its OS-canonical form before we hand it to SW.
+        //
+        // Returns the input verbatim if the file doesn't exist (caller
+        // gets a chance to error on its own). Idempotent: calling on an
+        // already-canonical path is a no-op aside from the directory
+        // walk cost.
+        // -----------------------------------------------------------------
+        internal static string CanonPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return path;
+            try
+            {
+                string dir = Path.GetDirectoryName(path);
+                string nameOnly = Path.GetFileName(path);
+                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
+                    return path;
+                var matches = Directory.GetFiles(dir, nameOnly);
+                if (matches.Length > 0)
+                {
+                    // GetFiles returns OS-canonical case + native separators
+                    // but the directory portion may still be the caller's
+                    // form. Re-resolve via FileInfo for full canon.
+                    return new FileInfo(matches[0]).FullName;
+                }
+            }
+            catch { /* best-effort — never throw on canonicalisation */ }
+            // Even if file doesn't exist, normalize separators so
+            // downstream string compares behave.
+            return path.Replace('/', Path.DirectorySeparatorChar);
+        }
+
+        // -----------------------------------------------------------------
         // Shared op dispatcher — same contract as Fusion / Rhino / Onshape
         // -----------------------------------------------------------------
 
@@ -1258,6 +1297,7 @@ namespace AriaSW
                 return new { ok = false, error = "no active assembly — call beginAssembly first" };
 
             string file = p.ContainsKey("file") ? p["file"]?.ToString() : null;
+            file = CanonPath(file);  // disk-case + native separators
             if (string.IsNullOrEmpty(file) || !File.Exists(file))
                 return new { ok = false, error = $"file not found: {file}" };
 
@@ -1623,6 +1663,7 @@ namespace AriaSW
             // If no source provided, use the currently-active doc's path.
             if (string.IsNullOrEmpty(source))
                 source = (_sw.IActiveDoc2 as IModelDoc2)?.GetPathName();
+            source = CanonPath(source);
             if (string.IsNullOrEmpty(source) || !File.Exists(source))
                 return new { ok = false,
                               error = $"createDrawing: source not found: '{source}'" };
@@ -1661,23 +1702,7 @@ namespace AriaSW
                 (int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
             FileLog($"  createDrawing: source='{source}' out='{outPath}' sheet={sheetSize} tmpl='{tmpl}'");
 
-            // Canonicalize source path to disk-actual case + backslashes.
-            // Create3rdAngleViews2 internally matches against SW's open-doc
-            // title which mirrors the on-disk filename casing exactly. A
-            // mismatched cased path silently fails (`ok=False`) leaving the
-            // drawing with only the iso view. We resolve the real file path
-            // via Directory.GetFiles to grab the OS-canonical form.
-            try
-            {
-                string dir = Path.GetDirectoryName(source);
-                string nameOnly = Path.GetFileName(source);
-                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
-                {
-                    var matches = Directory.GetFiles(dir, nameOnly);
-                    if (matches.Length > 0) source = matches[0];
-                }
-            }
-            catch { /* best-effort canonicalisation */ }
+            source = CanonPath(source);
             ext = Path.GetExtension(source).ToLowerInvariant();
 
             // Open source if not already open — Create3rdAngleViews2 needs

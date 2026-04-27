@@ -617,10 +617,33 @@ export const ariaFlange = defineFeature(function(context is Context, id is Id, d
               todo: "Onshape: POST /api/documents create assembly element pending OAuth integration",
               params: p };
   }
+  /**
+   * Disk-canonical path. Onshape itself is cloud-only so this is mostly
+   * cosmetic when the bridge is invoked from a Node CLI proxying STEP
+   * uploads — it normalizes separators so log output matches the SW /
+   * Fusion / Rhino bridges and exact-string keys (e.g. recipe-cache
+   * lookups by source path) collide as expected across CADs.
+   */
+  function _canonPath(p) {
+    if (!p) return p;
+    try {
+      const path = require("path");
+      const fs = require("fs");
+      const dir = path.dirname(p);
+      const base = path.basename(p);
+      if (dir && fs.existsSync(dir)) {
+        const entries = fs.readdirSync(dir);
+        const hit = entries.find(e => e.toLowerCase() === base.toLowerCase());
+        if (hit) return path.resolve(dir, hit);
+      }
+    } catch {}
+    return p.replace(/\//g, require("path").sep);
+  }
+
   async function _opInsertComponent(p) {
     return { ok: true,
               todo: "Onshape: PUT /api/assemblies/d/{did}/w/{wid}/e/{eid}/instances pending",
-              file: p.file, alias: p.alias };
+              file: _canonPath(p.file), alias: p.alias };
   }
   async function _opAddMate(p) {
     return { ok: true,
@@ -630,7 +653,7 @@ export const ariaFlange = defineFeature(function(context is Context, id is Id, d
   async function _opCreateDrawing(p) {
     return { ok: true,
               todo: "Onshape: POST /api/drawings/d/{did}/w/{wid} from source assembly",
-              source: p.source, out: p.out };
+              source: _canonPath(p.source), out: _canonPath(p.out) };
   }
   // Onshape doesn't ship native FEA in the public REST surface yet, so
   // mirror the analytic-fallback path the SW addin uses. Same iterations[]

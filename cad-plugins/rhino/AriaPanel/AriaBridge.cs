@@ -361,6 +361,30 @@ namespace AriaPanel
             };
         }
 
+        // -----------------------------------------------------------------
+        // Path canonicalization — same purpose as SW's CanonPath. Rhino's
+        // file readers are more permissive on case but `File3dm.Read` and
+        // STEP imports still benefit from disk-canonical paths so error
+        // messages are consistent across CADs.
+        // -----------------------------------------------------------------
+        internal static string CanonPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return path;
+            try
+            {
+                var dir = Path.GetDirectoryName(path);
+                var name = Path.GetFileName(path);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                {
+                    var matches = Directory.GetFiles(dir, name);
+                    if (matches.Length > 0)
+                        return new FileInfo(matches[0]).FullName;
+                }
+            }
+            catch { /* best-effort */ }
+            return path.Replace('/', Path.DirectorySeparatorChar);
+        }
+
         // --- Cross-CAD parity stubs -------------------------------------
         // These keep Rhino accepting the same JSON op stream the SW
         // addin handles, even though Rhino's native concepts differ.
@@ -379,7 +403,7 @@ namespace AriaPanel
         private static object OpInsertComponentRhino(RhinoDoc doc, JObject p)
         {
             // Insert a STEP/3DM as a block instance at (x, y, z).
-            string file  = p["file"]?.ToString();
+            string file  = CanonPath(p["file"]?.ToString());
             string alias = p["alias"]?.ToString() ?? Path.GetFileNameWithoutExtension(file ?? "comp");
             double x = (double?)p["x_mm"] ?? 0.0;
             double y = (double?)p["y_mm"] ?? 0.0;

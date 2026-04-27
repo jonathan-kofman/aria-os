@@ -1305,6 +1305,27 @@ _FEATURE_HANDLERS.update({
 # existing Fusion ops above with the SW kind names.
 # --------------------------------------------------------------------
 
+def _canon_path(path: str | None) -> str | None:
+    """Disk-canonical file path (case-corrected, native separators).
+
+    Mirrors the SW addin's CanonPath helper so the same JSON op stream
+    behaves identically across CADs. Idempotent + best-effort: returns
+    the input verbatim if the file doesn't exist or any error occurs.
+    """
+    if not path:
+        return path
+    try:
+        p = Path(path)
+        parent = p.parent
+        if parent.is_dir():
+            for actual in parent.iterdir():
+                if actual.name.lower() == p.name.lower():
+                    return str(actual.resolve())
+    except Exception:
+        pass
+    return path.replace("/", os.sep)
+
+
 def _op_begin_assembly_alias(params: dict) -> dict:
     return _op_asm_begin(params)
 
@@ -1313,7 +1334,10 @@ def _op_insert_component_alias(params: dict) -> dict:
     # SW contract: {file, alias, x_mm, y_mm, z_mm}
     # Fusion's addComponent expects: {file, alias, transform...} — close
     # enough that we can pass through.
-    return _op_asm_add_component(params)
+    p = dict(params)
+    if p.get("file"):
+        p["file"] = _canon_path(p["file"])
+    return _op_asm_add_component(p)
 
 
 def _op_add_mate_alias(params: dict) -> dict:
@@ -1338,8 +1362,9 @@ def _op_create_drawing_alias(params: dict) -> dict:
     workflow is a sequence (beginDrawing → newSheet → addView × N →
     addTitleBlock). We compose them here so a single `createDrawing` op
     delivers the same artifact as on SW."""
+    src_canon = _canon_path(params.get("source"))
     try:
-        _op_dwg_begin({"source": params.get("source")})
+        _op_dwg_begin({"source": src_canon})
         _op_dwg_new_sheet({
             "sheet_size": params.get("sheet_size", "A3"),
             "name": "Sheet1",
