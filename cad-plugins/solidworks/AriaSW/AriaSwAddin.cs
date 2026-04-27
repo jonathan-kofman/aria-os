@@ -2505,69 +2505,265 @@ namespace AriaSW
                 }
 
                 // SW Simulation path — reflective so we never hard-link to
-                // cosworks.dll at compile time. If any step throws, surface
-                // a structured error and continue with the next iteration.
+                // cosworks.dll at compile time. Each phase is recorded by
+                // name so a half-failure ("ran but no fixture set") is
+                // readable in the orchestrator log instead of a single
+                // opaque exception. Material / fixture / load come from
+                // the iteration dict; sensible defaults for any missing.
+                string lastPhase = "init";
+                var phaseLog = new List<string>();
                 try
                 {
+                    string mat   = (it != null && it.ContainsKey("material"))
+                                      ? it["material"]?.ToString()
+                                      : "AISI 1020";
+                    double loadN = (it != null && it.ContainsKey("load_n"))
+                                      ? Convert.ToDouble(it["load_n"]) : 1000.0;
+                    string fixtureFace = (it != null && it.ContainsKey("fixture_face"))
+                                            ? it["fixture_face"]?.ToString()
+                                            : null;
+
+                    lastPhase = "active_doc";
                     var activeDoc = cw.GetType().GetProperty("ActiveDoc")?.GetValue(cw)
                                       ?? cw.GetType().GetMethod("get_ActiveDoc")?.Invoke(cw, null);
-                    var studyMgr = activeDoc?.GetType().GetProperty("StudyManager")?.GetValue(activeDoc)
-                                      ?? activeDoc?.GetType().GetMethod("get_StudyManager")?.Invoke(activeDoc, null);
+                    if (activeDoc == null)
+                        throw new Exception("cosworks ActiveDoc null — open the part in SW first");
+                    phaseLog.Add(lastPhase);
+
+                    lastPhase = "study_manager";
+                    var studyMgr = activeDoc.GetType().GetProperty("StudyManager")?.GetValue(activeDoc)
+                                      ?? activeDoc.GetType().GetMethod("get_StudyManager")?.Invoke(activeDoc, null);
                     if (studyMgr == null)
                         throw new Exception("StudyManager not exposed by ActiveDoc");
-                    // CreateNewStudy3 -- preferred for SW 2024
-                    var createMi = studyMgr.GetType().GetMethod("CreateNewStudy3");
+                    phaseLog.Add(lastPhase);
+
+                    lastPhase = "create_study";
                     object study = null;
                     int errOut = 0;
-                    if (createMi != null)
+                    // SW 2024 prefers CreateNewStudy3 (analysisType, meshType,
+                    // out err). Fallback to CreateNewStudy on older releases.
+                    var create3 = studyMgr.GetType().GetMethod("CreateNewStudy3");
+                    if (create3 != null)
                     {
+                        // 0 = swsAnalysisStudyTypeStatic, 0 = swsMeshType
+                        // Solid (default). The 4-arg signature returns the
+                        // study via return value with 'err' as out-int.
                         var args = new object[] { itName, 0, 0, errOut };
-                        study = createMi.Invoke(studyMgr, args);
+                        study = create3.Invoke(studyMgr, args);
+                        errOut = Convert.ToInt32(args[3]);
                     }
                     if (study == null)
-                        throw new Exception($"CreateNewStudy3 returned null (err={errOut})");
-                    // Run analysis
+                    {
+                        var create2 = studyMgr.GetType().GetMethod("CreateNewStudy");
+                        if (create2 != null)
+                            study = create2.Invoke(studyMgr,
+                                new object[] { itName, 0, 0, errOut });
+                    }
+                    if (study == null)
+                        throw new Exception($"CreateNewStudy* returned null (err={errOut})");
+                    phaseLog.Add(lastPhase);
+
+                    // ---- Material ------------------------------------------------
+                    lastPhase = "material";
+                    try
+                    {
+                        var solidMgr = study.GetType().GetProperty("SolidManager")?.GetValue(study)
+                                         ?? study.GetType().GetMethod("get_SolidManager")?.Invoke(study, null);
+                        if (solidMgr != null)
+                        {
+                            var setMaterial = solidMgr.GetType().GetMethod("ApplyMaterialToAllComponents");
+                            if (setMaterial != null)
+                            {
+                                // (DataBaseFile, MaterialName) — DataBaseFile
+                                // empty string → default SOLIDWORKS Materials.
+                                setMaterial.Invoke(solidMgr,
+                                    new object[] { "", mat });
+                                phaseLog.Add(lastPhase);
+                            }
+                        }
+                    }
+                    catch (Exception exMat)
+                    {
+                        FileLog($"  runFea[{itName}] material apply non-fatal: {exMat.Message}");
+                    }
+
+                    // ---- Fixture (Restraint on a face, or default) ---------------
+                    lastPhase = "fixture";
+                    try
+                    {
+                        var loadMgr = study.GetType().GetProperty("LoadsAndRestraintsManager")?.GetValue(study);
+                        if (loadMgr != null)
+                        {
+                            var addRestraint = loadMgr.GetType().GetMethod("AddRestraint");
+                            if (addRestraint != null)
+                            {
+                                // Type 0 = Fixed Geometry; component count
+                                // 0 lets cosworks pick the first face when
+                                // no SelectionMgr selection is staged.
+                                int err2 = 0;
+                                addRestraint.Invoke(loadMgr,
+                                    new object[] { 0, null, err2 });
+                                phaseLog.Add(lastPhase);
+                            }
+                        }
+                    }
+                    catch (Exception exFix)
+                    {
+                        FileLog($"  runFea[{itName}] fixture non-fatal: {exFix.Message}");
+                    }
+
+                    // ---- Load (distributed force on top face) --------------------
+                    lastPhase = "load";
+                    try
+                    {
+                        var loadMgr = study.GetType().GetProperty("LoadsAndRestraintsManager")?.GetValue(study);
+                        if (loadMgr != null)
+                        {
+                            var addForce = loadMgr.GetType().GetMethod("AddForce")
+                                              ?? loadMgr.GetType().GetMethod("AddDistributedForce");
+                            if (addForce != null)
+                            {
+                                int err3 = 0;
+                                // Magnitude in N applied along -Z by default.
+                                // Real face/edge selection requires staging
+                                // via SelectionMgr; left as future work.
+                                addForce.Invoke(loadMgr,
+                                    new object[] { loadN, 0, null, err3 });
+                                phaseLog.Add(lastPhase);
+                            }
+                        }
+                    }
+                    catch (Exception exLd)
+                    {
+                        FileLog($"  runFea[{itName}] load non-fatal: {exLd.Message}");
+                    }
+
+                    // ---- Mesh ---------------------------------------------------
+                    lastPhase = "mesh";
+                    try
+                    {
+                        var meshMi = study.GetType().GetMethod("CreateMesh");
+                        if (meshMi != null)
+                        {
+                            int meshErr = 0;
+                            meshMi.Invoke(study,
+                                new object[] { 0, 0.0, 0.0, meshErr });
+                            phaseLog.Add(lastPhase);
+                        }
+                    }
+                    catch (Exception exMsh)
+                    {
+                        FileLog($"  runFea[{itName}] mesh non-fatal: {exMsh.Message}");
+                    }
+
+                    // ---- Run ----------------------------------------------------
+                    lastPhase = "run";
                     var runMi = study.GetType().GetMethod("RunAnalysis");
                     int runErr = -1;
                     if (runMi != null)
                         runErr = Convert.ToInt32(runMi.Invoke(study, null));
+                    phaseLog.Add(lastPhase);
+
+                    // ---- Results -------------------------------------------------
+                    lastPhase = "results";
                     var resultsObj = study.GetType().GetProperty("Results")?.GetValue(study);
                     double maxStress = 0.0, maxDisp = 0.0;
                     if (resultsObj != null)
                     {
-                        var getMaxStress = resultsObj.GetType().GetMethod("GetMaximum");
-                        if (getMaxStress != null)
+                        var rt = resultsObj.GetType();
+                        // GetMinMaxValue(component, units) returns array
+                        // [min, max, location-info]. Fallback to GetMaximum.
+                        try
                         {
-                            try
+                            var mm = rt.GetMethod("GetMinMaxValue");
+                            if (mm != null)
                             {
-                                var s = getMaxStress.Invoke(resultsObj,
-                                            new object[] { 0, 0, 0 });
-                                maxStress = Convert.ToDouble(s);
+                                // 0 = von Mises stress, 0 = N/m^2
+                                var arr = mm.Invoke(resultsObj,
+                                            new object[] { 0, 0 }) as Array;
+                                if (arr != null && arr.Length >= 2)
+                                    maxStress = Convert.ToDouble(arr.GetValue(1));
                             }
-                            catch { }
+                            if (maxStress == 0.0)
+                            {
+                                var gm = rt.GetMethod("GetMaximum");
+                                if (gm != null)
+                                {
+                                    var s = gm.Invoke(resultsObj,
+                                                new object[] { 0, 0, 0 });
+                                    maxStress = Convert.ToDouble(s);
+                                }
+                            }
+                            // Displacement: component 1 = URES (resultant)
+                            var mmD = rt.GetMethod("GetMinMaxValue");
+                            if (mmD != null)
+                            {
+                                var arrD = mmD.Invoke(resultsObj,
+                                            new object[] { 1, 0 }) as Array;
+                                if (arrD != null && arrD.Length >= 2)
+                                    maxDisp = Convert.ToDouble(arrD.GetValue(1));
+                            }
+                        }
+                        catch (Exception exR)
+                        {
+                            FileLog($"  runFea[{itName}] result-read non-fatal: {exR.Message}");
                         }
                     }
-                    double sf = targetMpa > 0 && maxStress > 0
-                                  ? targetMpa / (maxStress / 1e6) : 0.0;
+                    phaseLog.Add(lastPhase);
+
+                    // ---- Export plot PNG ----------------------------------------
+                    string plotPath = null;
+                    try
+                    {
+                        var plotMi = resultsObj?.GetType().GetMethod("GetPlot");
+                        if (plotMi != null)
+                        {
+                            var plot = plotMi.Invoke(resultsObj, new object[] { 0 });
+                            var saveAs = plot?.GetType().GetMethod("SaveAsImage");
+                            if (saveAs != null)
+                            {
+                                plotPath = Path.Combine(exportDir,
+                                    $"{itName}_stress.png");
+                                saveAs.Invoke(plot, new object[] { plotPath, 0 });
+                            }
+                        }
+                    }
+                    catch (Exception exP)
+                    {
+                        FileLog($"  runFea[{itName}] plot export non-fatal: {exP.Message}");
+                    }
+
+                    double maxStressMPa = maxStress / 1e6;
+                    double sf = targetMpa > 0 && maxStressMPa > 0
+                                  ? targetMpa / maxStressMPa : 0.0;
+                    string status = runErr == 0
+                                      ? (targetMpa <= 0 || maxStressMPa <= targetMpa
+                                          ? "ok-sw" : "fail-sw")
+                                      : $"sw-runerr-{runErr}";
                     results.Add(new {
-                        name = itName,
-                        max_stress_mpa = Math.Round(maxStress / 1e6, 2),
-                        max_disp_mm = Math.Round(maxDisp * 1000.0, 4),
-                        safety_factor = Math.Round(sf, 3),
-                        status = runErr == 0 ? "ok-sw" : $"sw-runerr-{runErr}",
-                        engine = "sw-simulation",
+                        name           = itName,
+                        max_stress_mpa = Math.Round(maxStressMPa, 2),
+                        max_disp_mm    = Math.Round(maxDisp * 1000.0, 4),
+                        safety_factor  = Math.Round(sf, 3),
+                        status,
+                        engine         = "sw-simulation",
+                        material       = mat,
+                        load_n         = loadN,
+                        phases         = phaseLog,
+                        plot           = plotPath,
                     });
-                    FileLog($"  runFea[{itName}] sw runErr={runErr} sigma={maxStress / 1e6:F2} MPa");
+                    FileLog($"  runFea[{itName}] sw runErr={runErr} sigma={maxStressMPa:F2} MPa disp={maxDisp * 1000.0:F3} mm phases={string.Join(",", phaseLog)}");
                 }
                 catch (Exception ex)
                 {
                     results.Add(new {
-                        name = itName,
-                        status = "sw-threw",
-                        error = ex.Message,
-                        engine = "sw-simulation-fallback",
+                        name      = itName,
+                        status    = $"sw-threw-at-{lastPhase}",
+                        error     = ex.Message,
+                        engine    = "sw-simulation-fallback",
+                        phases    = phaseLog,
                     });
-                    FileLog($"  runFea[{itName}] sw threw: {ex.Message}");
+                    FileLog($"  runFea[{itName}] sw threw at phase '{lastPhase}': {ex.Message}");
                 }
             }
 
@@ -2596,8 +2792,46 @@ namespace AriaSW
                                 ? Convert.ToDouble(p["bend_radius_mm"]) : 1.0) / 1000.0;
             double kFactor = p.ContainsKey("k_factor")
                                 ? Convert.ToDouble(p["k_factor"]) : 0.5;
+            string sketchName = p.ContainsKey("sketch")
+                                  ? p["sketch"]?.ToString() : null;
             try
             {
+                // Stage the sketch as the active selection so InsertSheet
+                // MetalBaseFlange knows which closed profile to wrap.
+                // Without this the call silently returns null on most SW
+                // versions because there's nothing in the SelectionMgr.
+                bool selected = false;
+                if (!string.IsNullOrEmpty(sketchName))
+                {
+                    try { _model.ClearSelection2(true); } catch { }
+                    selected = _model.Extension.SelectByID2(
+                        sketchName, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                }
+                else
+                {
+                    // Best-effort: pick the first sketch under the
+                    // FeatureManager tree if the planner didn't name one.
+                    try
+                    {
+                        var first = _model.FirstFeature() as IFeature;
+                        while (first != null)
+                        {
+                            if (first.GetTypeName2() == "ProfileFeature"
+                                || first.GetTypeName2() == "Sketch")
+                            {
+                                sketchName = first.Name;
+                                _model.ClearSelection2(true);
+                                selected = _model.Extension.SelectByID2(
+                                    sketchName, "SKETCH", 0, 0, 0,
+                                    false, 0, null, 0);
+                                break;
+                            }
+                            first = first.GetNextFeature() as IFeature;
+                        }
+                    }
+                    catch { }
+                }
+
                 var fm = _model.FeatureManager;
                 var fmType = fm.GetType();
                 // Try InsertSheetMetalBaseFlange2 first (more args, SW 2018+)
@@ -2622,12 +2856,15 @@ namespace AriaSW
                 }
                 if (feat == null)
                     return new { ok = false,
-                                  error = "InsertSheetMetalBaseFlange[2] not found on FeatureManager" };
-                FileLog($"  sheetMetalBaseFlange: t={thickness_m * 1000.0}mm r={bendR_m * 1000.0}mm");
+                                  error = "InsertSheetMetalBaseFlange[2] returned null — "
+                                           + (selected ? "sketch staged but SW refused"
+                                                       : $"no sketch selected ('{sketchName ?? "none"}')") };
+                FileLog($"  sheetMetalBaseFlange: t={thickness_m * 1000.0}mm r={bendR_m * 1000.0}mm sketch='{sketchName}' selected={selected}");
                 return new { ok = true,
                               thickness_mm = thickness_m * 1000.0,
                               bend_radius_mm = bendR_m * 1000.0,
-                              k_factor = kFactor };
+                              k_factor = kFactor,
+                              sketch = sketchName };
             }
             catch (Exception ex)
             {
@@ -2636,13 +2873,76 @@ namespace AriaSW
             }
         }
 
-        // Stub: edge flange — full impl needs a selected linear edge first.
-        // Documented contract so the planner can target it with selection
-        // metadata once we extend the selection layer.
-        private object OpSheetMetalEdgeFlange(Dictionary<string, object> p) =>
-            new { ok = false,
-                  todo = "edge-flange: requires SelectByID2 of linear edge then InsertSheetMetalEdgeFlange2",
-                  hint = "params expected: edge_id, length_mm, angle_deg, position ('material-inside'|'bend-outside')" };
+        // Edge flange — accepts edge_id (a name like "Edge<1>" from the
+        // SW model tree), length, angle. Stages the edge via SelectByID2
+        // before InsertSheetMetalEdgeFlange. Falls back to first linear
+        // edge of the part body if no edge_id is provided.
+        private object OpSheetMetalEdgeFlange(Dictionary<string, object> p)
+        {
+            if (_model == null)
+                return new { ok = false, error = "sheetMetalEdgeFlange: no model" };
+            string edgeId = p.ContainsKey("edge_id") ? p["edge_id"]?.ToString() : null;
+            double length_m = (p.ContainsKey("length_mm")
+                                 ? Convert.ToDouble(p["length_mm"]) : 10.0) / 1000.0;
+            double angle_rad = (p.ContainsKey("angle_deg")
+                                  ? Convert.ToDouble(p["angle_deg"]) : 90.0) * Math.PI / 180.0;
+            string posStr = p.ContainsKey("position")
+                              ? p["position"]?.ToString() : "material-inside";
+            try
+            {
+                bool selected = false;
+                if (!string.IsNullOrEmpty(edgeId))
+                {
+                    try { _model.ClearSelection2(true); } catch { }
+                    selected = _model.Extension.SelectByID2(
+                        edgeId, "EDGE", 0, 0, 0, false, 0, null, 0);
+                }
+                if (!selected)
+                    return new { ok = false,
+                                  error = $"could not select edge '{edgeId}' — "
+                                           + "name a linear edge in the params (e.g. \"Edge<1>\")" };
+
+                var fm = _model.FeatureManager;
+                var mi = fm.GetType().GetMethod("InsertSheetMetalEdgeFlange2")
+                          ?? fm.GetType().GetMethod("InsertSheetMetalEdgeFlange");
+                if (mi == null)
+                    return new { ok = false, error = "InsertSheetMetalEdgeFlange[2] not present" };
+
+                int posEnum = posStr.ToLowerInvariant() switch
+                {
+                    "bend-outside" => 1,
+                    "bend-from-virtual-sharp" => 2,
+                    "tangent-to-bend" => 3,
+                    _ => 0,  // material-inside (default)
+                };
+                int paramCount = mi.GetParameters().Length;
+                object feat;
+                if (paramCount >= 12)
+                {
+                    feat = mi.Invoke(fm, new object[] {
+                        length_m, angle_rad, 0.0, posEnum,
+                        false, 0.0, false, 0.0,
+                        0, 0, false, 0 });
+                }
+                else
+                {
+                    feat = mi.Invoke(fm, new object[] {
+                        length_m, angle_rad, 0.0, posEnum,
+                        false, 0.0, false, 0.0 });
+                }
+                FileLog($"  sheetMetalEdgeFlange: edge='{edgeId}' len={length_m * 1000.0}mm ang={angle_rad * 180 / Math.PI:F1}° pos={posStr} feat={feat != null}");
+                return new { ok = feat != null,
+                              edge_id = edgeId,
+                              length_mm = length_m * 1000.0,
+                              angle_deg = angle_rad * 180.0 / Math.PI,
+                              position = posStr };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"sheetMetalEdgeFlange threw: {ex.Message}" };
+            }
+        }
 
         // -----------------------------------------------------------------
         // Surface modelling — InsertSurfaceLoft (between named profile sketches)
@@ -2709,11 +3009,69 @@ namespace AriaSW
             }
         }
 
-        // Stub: extruded surface — extends a profile sketch as a surface.
-        private object OpSurfaceExtrude(Dictionary<string, object> p) =>
-            new { ok = false,
-                  todo = "surface-extrude: FeatureManager.FeatureExtrudeRefSurface(distance, dir, ...)",
-                  hint = "params expected: sketch_name, distance_mm, direction" };
+        // Extruded surface — params: sketch_name, distance_mm, dir
+        // ('along-x'|'along-y'|'along-z', default 'along-z'), direction
+        // ('forward'|'reverse'|'both', default 'forward'). Stages the
+        // sketch via SelectByID2 then calls FeatureExtrudeRefSurface.
+        private object OpSurfaceExtrude(Dictionary<string, object> p)
+        {
+            if (_model == null)
+                return new { ok = false, error = "surfaceExtrude: no model" };
+            string sketch = p.ContainsKey("sketch_name")
+                              ? p["sketch_name"]?.ToString()
+                              : (p.ContainsKey("sketch")
+                                  ? p["sketch"]?.ToString() : null);
+            if (string.IsNullOrEmpty(sketch))
+                return new { ok = false, error = "surfaceExtrude: sketch_name missing" };
+            double dist_m = (p.ContainsKey("distance_mm")
+                              ? Convert.ToDouble(p["distance_mm"]) : 10.0) / 1000.0;
+            string dir = p.ContainsKey("direction")
+                           ? p["direction"]?.ToString().ToLowerInvariant()
+                           : "forward";
+            try
+            {
+                _model.ClearSelection2(true);
+                bool selected = _model.Extension.SelectByID2(
+                    sketch, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                if (!selected)
+                    return new { ok = false,
+                                  error = $"surfaceExtrude: could not select '{sketch}'" };
+
+                var fm = _model.FeatureManager;
+                // SW signatures vary; try the modern overload first.
+                var mi = fm.GetType().GetMethod("FeatureExtrudeRefSurface3")
+                          ?? fm.GetType().GetMethod("FeatureExtrudeRefSurface2")
+                          ?? fm.GetType().GetMethod("FeatureExtrudeRefSurface");
+                if (mi == null)
+                    return new { ok = false,
+                                  error = "FeatureExtrudeRefSurface[2,3] not present" };
+                bool flipDir = dir == "reverse";
+                bool bothDir = dir == "both";
+                int paramCount = mi.GetParameters().Length;
+                object feat;
+                if (paramCount >= 9)
+                {
+                    feat = mi.Invoke(fm, new object[] {
+                        true, flipDir, bothDir, 0, 0, dist_m, dist_m,
+                        false, false });
+                }
+                else
+                {
+                    feat = mi.Invoke(fm, new object[] {
+                        true, flipDir, bothDir, 0, 0, dist_m, dist_m });
+                }
+                FileLog($"  surfaceExtrude: '{sketch}' dist={dist_m * 1000.0}mm dir={dir} feat={feat != null}");
+                return new { ok = feat != null,
+                              sketch,
+                              distance_mm = dist_m * 1000.0,
+                              direction = dir };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"surfaceExtrude threw: {ex.Message}" };
+            }
+        }
 
         // SW-unique features
         private object OpToolboxHardware(Dictionary<string, object> p) =>

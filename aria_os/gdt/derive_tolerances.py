@@ -22,7 +22,10 @@ not a copy-paste boilerplate.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -59,16 +62,122 @@ class GdtSpec:
         return d
 
 
+# --------------------------------------------------------------------------- #
+# Recipe cache (rec #8): persistent per-(STEP, build_config) GdtSpec store.
+# A cold derive_from_step on a 5MB drone-frame STEP costs ~1.5s for
+# bbox + face scan; on a 100-part bundle that's the difference between
+# instant and 2.5 min for re-runs. We cache aggressively because the
+# inputs (mtime + size + material_label + finish_label) capture every
+# axis on which the spec could change.
+# --------------------------------------------------------------------------- #
+
+_CACHE_LOCK = threading.Lock()
+_CACHE: dict[str, dict[str, Any]] = {}
+_CACHE_INIT = False
+
+
+def _cache_path() -> Path:
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(
+            Path.home() / "AppData" / "Local")
+        return Path(base) / "AriaGDT" / "specs.json"
+    return Path.home() / ".cache" / "AriaGDT" / "specs.json"
+
+
+def _cache_init() -> None:
+    global _CACHE, _CACHE_INIT
+    if _CACHE_INIT: return
+    p = _cache_path()
+    try:
+        if p.is_file():
+            _CACHE = json.loads(p.read_text("utf-8"))
+    except Exception:
+        _CACHE = {}
+    _CACHE_INIT = True
+
+
+def _cache_save() -> None:
+    p = _cache_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(_CACHE, indent=2), "utf-8")
+    except Exception:
+        pass
+
+
+def _cache_key(step: Path, part_cfg: dict | None) -> str | None:
+    """Key built from (mtime, size, material, finish). If the STEP file
+    can't be stat'd, returns None (no caching for that call)."""
+    try:
+        st = step.stat()
+    except OSError:
+        return None
+    mat = ""
+    fin = ""
+    if part_cfg:
+        mat = (part_cfg.get("material") or part_cfg.get("material_name")
+                or "")
+        fin = part_cfg.get("finish") or ""
+    key_src = f"{step.resolve()}|{int(st.st_mtime)}|{st.st_size}|{mat}|{fin}"
+    return hashlib.sha256(key_src.encode("utf-8")).hexdigest()[:24]
+
+
+def _cache_lookup(key: str | None) -> dict | None:
+    if not key: return None
+    _cache_init()
+    with _CACHE_LOCK:
+        v = _CACHE.get(key)
+        return dict(v) if isinstance(v, dict) else None
+
+
+def _cache_store(key: str | None, spec_dict: dict) -> None:
+    if not key: return
+    _cache_init()
+    with _CACHE_LOCK:
+        _CACHE[key] = dict(spec_dict)
+        _cache_save()
+
+
+def _spec_from_dict(d: dict) -> GdtSpec:
+    """Reverse of GdtSpec.as_dict — used to thaw a cache hit."""
+    fields = {k: d[k] for k in (
+        "position_tolerance_mm", "flatness_mm", "perpendicularity_mm",
+        "general_linear_mm", "general_angular_deg",
+        "primary_datum", "secondary_datum", "tertiary_datum",
+        "standard", "iso_class", "material_label", "finish_label",
+    ) if k in d}
+    s = GdtSpec(**fields)
+    if "note_lines" in d and isinstance(d["note_lines"], list):
+        s.note_lines = list(d["note_lines"])
+    return s
+
+
 def derive_from_step(step_path: str | Path,
-                      build_config_part: dict | None = None) -> GdtSpec:
+                      build_config_part: dict | None = None,
+                      *, use_cache: bool = True) -> GdtSpec:
     """Compute a GdtSpec by inspecting the STEP file's bbox + features.
 
     Best-effort: if the STEP can't be opened (no cadquery / OCP) we fall
     back to the dataclass defaults. The build_config_part dict (one
     entry from build_config.json's parts[]) overrides material if set.
 
+    With `use_cache=True` (default), the result is keyed on the STEP's
+    (mtime, size, material, finish) tuple and returned from
+    `%LOCALAPPDATA%\\AriaGDT\\specs.json` on a hit. Set False to force a
+    fresh derive (e.g. when CadQuery is upgraded and we want to retake
+    measurements).
+
     Returns a GdtSpec ready for `.as_dict()` -> JSON -> enrichDrawing.
     """
+    step = Path(step_path)
+    if use_cache:
+        key = _cache_key(step, build_config_part)
+        hit = _cache_lookup(key)
+        if hit is not None:
+            return _spec_from_dict(hit)
+    else:
+        key = None
+
     spec = GdtSpec()
 
     # 1. material from build_config (drone frame -> 6061 Alloy etc.)
@@ -122,6 +231,12 @@ def derive_from_step(step_path: str | Path,
             spec.position_tolerance_mm = round(pt, 3)
     except Exception:
         pass
+
+    if use_cache:
+        try:
+            _cache_store(key, spec.as_dict())
+        except Exception:
+            pass
 
     return spec
 
