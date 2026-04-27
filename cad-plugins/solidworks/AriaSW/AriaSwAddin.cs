@@ -1910,6 +1910,33 @@ namespace AriaSW
             {
                 try
                 {
+                    // First: pull every model dim/annotation from the
+                    // source model into all views via the documented
+                    // IDrawingDoc.InsertModelAnnotations3(Option, Types,
+                    // AllViews, DuplicateDims, HiddenFeatureDims,
+                    // UsePlacementInSketch). The signature was confirmed
+                    // by reflection probe (scripts/sw_probe_signatures.py).
+                    int modelDimResult = 0;
+                    try
+                    {
+                        var addedObj = drw.InsertModelAnnotations3(
+                            4,        // Option: swInsertDimensionsAllInModel
+                            0x1F,     // Types: dims+notes+ref-geom+centerlines+centermarks
+                            true,     // AllViews
+                            true,     // DuplicateDims
+                            false,    // HiddenFeatureDims
+                            false);   // UsePlacementInSketch
+                        if (addedObj is System.Array a) modelDimResult = a.Length;
+                        FileLog($"  enrichDrawing.gdt InsertModelAnnotations3 added {modelDimResult} model annotations");
+                    }
+                    catch (Exception exAnn)
+                    {
+                        FileLog($"  enrichDrawing.gdt InsertModelAnnotations3 threw: {exAnn.Message}");
+                    }
+
+                    // Then: layer in the human-readable datum letters +
+                    // FCF + general-tol note (works whether or not the
+                    // model has DimXpert dimensions to pull from).
                     int notesAdded = 0;
                     var view = (IView)drw.GetFirstView(); // first is sheet
                     if (view != null) view = view.GetNextView() as IView;

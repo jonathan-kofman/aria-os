@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ARIA-OS Console</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --border: #2a3242;
+    --accent: #4a8fa8;
+    --accent-bright: #6dd1ed;
+    --text: #d6deeb;
+    --muted: #8b95a6;
+    --ok: #5fffae;
+    --warn: #ffb86c;
+    --err: #ff5f6d;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 13px; height: 100%; }
+  body { display: grid; grid-template-rows: auto 1fr; }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 12px 18px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header .brand { font-weight: 700; letter-spacing: 1.5px; color: var(--accent-bright); }
+  header .status { color: var(--muted); font-size: 11px; }
+  header .pill { background: #1a2030; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border); }
+  header .pill.ok { color: var(--ok); border-color: rgba(95,255,174,0.4); }
+  header .pill.err { color: var(--err); border-color: rgba(255,95,109,0.4); }
+  main { display: grid; grid-template-columns: 320px 1fr; gap: 0; height: 100%; overflow: hidden; }
+  .sidebar {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    padding: 14px;
+    overflow-y: auto;
+  }
+  .stack { display: flex; flex-direction: column; gap: 10px; }
+  .card { background: #161c2a; border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+  .card h3 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--accent-bright); }
+  button {
+    width: 100%;
+    background: #1f2a3d; color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 10px; cursor: pointer;
+    font-family: var(--mono); font-size: 12px;
+    text-align: left;
+  }
+  button:hover { background: #25324a; border-color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  textarea, input[type="text"] {
+    width: 100%;
+    background: #0e131e; color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 6px 8px;
+    font-family: var(--mono); font-size: 12px;
+    resize: vertical;
+  }
+  .console {
+    background: #08090e;
+    padding: 14px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+  }
+  .log-line { padding: 1px 0; }
+  .log-line.info { color: var(--text); }
+  .log-line.ok   { color: var(--ok); }
+  .log-line.warn { color: var(--warn); }
+  .log-line.err  { color: var(--err); }
+  .log-line.dim  { color: var(--muted); }
+  .row { display: flex; gap: 6px; }
+  .row > * { flex: 1; }
+  details summary { cursor: pointer; padding: 4px 0; color: var(--muted); }
+  details[open] summary { color: var(--accent-bright); }
+  .img-out { max-width: 100%; border: 1px solid var(--border); border-radius: 4px; margin-top: 8px; }
+  code { background: #0e131e; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">ARIA-OS // CONSOLE</div>
+  <div id="status-pills" class="status">
+    <span id="addin-pill" class="pill">addin&nbsp;·&nbsp;…</span>
+    <span id="server-pill" class="pill ok">server&nbsp;·&nbsp;up</span>
+    <span id="bundle-pill" class="pill">bundle&nbsp;·&nbsp;—</span>
+  </div>
+  <div style="margin-left:auto" class="status">v0.4 — multi-CAD pipeline</div>
+</header>
+<main>
+  <aside class="sidebar">
+    <div class="stack">
+
+      <div class="card">
+        <h3>Full build</h3>
+        <textarea id="goal" rows="3" placeholder="goal text — e.g. 'FPV drone for Ukraine 5&quot; 4S 1500mAh'"></textarea>
+        <input type="text" id="bundle-name" placeholder="bundle_name (e.g. drone_v20)" style="margin-top:6px">
+        <button onclick="cmdFullBuild()" style="margin-top:6px">↳ POST /api/system/full-build</button>
+      </div>
+
+      <div class="card">
+        <h3>SW addin</h3>
+        <button onclick="cmdAddinStatus()">GET /status (port 7501)</button>
+        <button onclick="cmdRedeploy()">↳ scripts/sw_redeploy.py</button>
+        <button onclick="cmdSmokeDriver()">↳ sw_assemble_drone.py (last bundle)</button>
+        <button onclick="cmdEnrichDrawing()">↳ enrichDrawing on active doc</button>
+      </div>
+
+      <div class="card">
+        <h3>Bundle browser</h3>
+        <button onclick="cmdListBundles()">GET /api/gui/bundles</button>
+        <button onclick="cmdRenderActive()">↳ render last STEP -> PNG</button>
+        <div id="bundle-list" style="margin-top:6px;font-size:11px;color:var(--muted)"></div>
+      </div>
+
+      <div class="card">
+        <h3>Phase E (varied prompts)</h3>
+        <button onclick="cmdPhaseE()">↳ phase_e_varied_prompts.py</button>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">
+          rocket nozzle · motorcycle frame · cubesat<br>camera gimbal · telescope mount
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Git</h3>
+        <button onclick="cmdGitStatus()">git status</button>
+        <button onclick="cmdGitPush()">git push (current branch)</button>
+        <div id="git-out" style="font-size:10px;color:var(--muted);margin-top:4px"></div>
+      </div>
+
+    </div>
+  </aside>
+
+  <section class="console" id="console">
+    <div class="log-line dim">[ARIA-OS console ready]</div>
+    <div class="log-line dim">Buttons hit /api/gui/* on this server. Each handler shells the same script you'd run in a terminal — output streams here.</div>
+  </section>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const consoleEl = $('console');
+
+  function log(msg, cls = 'info') {
+    const div = document.createElement('div');
+    div.className = `log-line ${cls}`;
+    div.textContent = msg;
+    consoleEl.appendChild(div);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+    return div;
+  }
+
+  function logImage(url) {
+    const img = document.createElement('img');
+    img.src = url;
+    img.className = 'img-out';
+    consoleEl.appendChild(img);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+
+  async function api(path, method = 'GET', body = null) {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body !== null) opts.body = JSON.stringify(body);
+    log(`-> ${method} ${path}`, 'dim');
+    const r = await fetch(path, opts);
+    const txt = await r.text();
+    let parsed = null;
+    try { parsed = JSON.parse(txt); } catch {}
+    if (!r.ok) {
+      log(`[!] ${r.status} ${r.statusText}`, 'err');
+      log(txt.slice(0, 800), 'err');
+      return { ok: false, body: parsed || txt };
+    }
+    return { ok: true, body: parsed || txt };
+  }
+
+  async function refreshStatus() {
+    try {
+      const r = await fetch('/api/gui/addin_status');
+      const j = await r.json();
+      const pill = $('addin-pill');
+      if (j.sw_connected) {
+        pill.className = 'pill ok';
+        pill.textContent = `addin · ${j.doc || '(no doc)'}`;
+      } else {
+        pill.className = 'pill err';
+        pill.textContent = 'addin · down';
+      }
+    } catch {
+      $('addin-pill').className = 'pill err';
+      $('addin-pill').textContent = 'addin · unreachable';
+    }
+  }
+
+  async function cmdAddinStatus() {
+    const r = await api('/api/gui/addin_status');
+    log(JSON.stringify(r.body, null, 2), r.ok ? 'ok' : 'err');
+    refreshStatus();
+  }
+
+  async function cmdFullBuild() {
+    const goal = $('goal').value.trim();
+    const bundle = $('bundle-name').value.trim() || 'gui_run_' + Date.now();
+    if (!goal) return log('[!] goal is required', 'err');
+    log(`[full-build] ${bundle}`, 'info');
+    const r = await api('/api/system/full-build', 'POST', {
+      goal, bundle_name: bundle,
+    });
+    if (r.ok) {
+      log(`[ok] artifacts: ${(r.body.artifacts || []).length}`, 'ok');
+      log(JSON.stringify(r.body, null, 2).slice(0, 1500), 'dim');
+    }
+  }
+
+  async function cmdRedeploy() {
+    const r = await api('/api/gui/redeploy_addin', 'POST', {});
+    log(r.body.stdout || '', r.ok ? 'ok' : 'err');
+    if (r.body.stderr) log(r.body.stderr, 'warn');
+    refreshStatus();
+  }
+
+  async function cmdSmokeDriver() {
+    const bundle = $('bundle-name').value.trim() || 'drone_ukraine_v19';
+    const r = await api('/api/gui/run_smoke_driver', 'POST', { bundle_name: bundle });
+    log(r.body.stdout || '', r.ok ? 'ok' : 'err');
+    if (r.body.stderr) log(r.body.stderr, 'warn');
+  }
+
+  async function cmdEnrichDrawing() {
+    const r = await api('/api/gui/enrich_drawing', 'POST', {});
+    log(JSON.stringify(r.body, null, 2), r.ok ? 'ok' : 'err');
+  }
+
+  async function cmdListBundles() {
+    const r = await api('/api/gui/bundles');
+    if (!r.ok) return;
+    const out = $('bundle-list');
+    out.innerHTML = '';
+    (r.body.bundles || []).forEach(b => {
+      const a = document.createElement('a');
+      a.href = '#'; a.style.display = 'block'; a.style.color = 'var(--accent-bright)';
+      a.textContent = b.name + ' (' + b.artifact_count + ')';
+      a.onclick = (e) => { e.preventDefault(); $('bundle-name').value = b.name; cmdRenderActive(); };
+      out.appendChild(a);
+    });
+    log(`[bundles] ${(r.body.bundles || []).length} found`, 'ok');
+  }
+
+  async function cmdRenderActive() {
+    const bundle = $('bundle-name').value.trim();
+    if (!bundle) return log('[!] enter a bundle name first', 'err');
+    log(`[render] ${bundle}/assembly.step → PNG`, 'info');
+    const ts = Date.now();
+    logImage(`/api/gui/render_step?bundle=${encodeURIComponent(bundle)}&t=${ts}`);
+  }
+
+  async function cmdPhaseE() {
+    log('[phase-e] firing 5 varied prompts', 'info');
+    const r = await api('/api/gui/run_phase_e', 'POST', {});
+    log(r.body.stdout || '', r.ok ? 'ok' : 'err');
+    if (r.body.stderr) log(r.body.stderr, 'warn');
+  }
+
+  async function cmdGitStatus() {
+    const r = await api('/api/gui/git_status');
+    $('git-out').textContent = r.body.summary || '';
+    log(r.body.detail || '', 'dim');
+  }
+
+  async function cmdGitPush() {
+    const r = await api('/api/gui/git_push', 'POST', {});
+    log(r.body.stdout || '', r.ok ? 'ok' : 'err');
+    if (r.body.stderr) log(r.body.stderr, 'warn');
+    if (r.body.pr_url) {
+      const a = document.createElement('a');
+      a.href = r.body.pr_url; a.target = '_blank';
+      a.style.color = 'var(--accent-bright)';
+      a.textContent = 'open PR -> ' + r.body.pr_url;
+      consoleEl.appendChild(a);
+      consoleEl.appendChild(document.createElement('br'));
+    }
+  }
+
+  refreshStatus();
+  setInterval(refreshStatus, 8000);
+</script>
+</body>
+</html>

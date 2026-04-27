@@ -3534,6 +3534,254 @@ async def insights_ab_latest():
 
 
 # --------------------------------------------------------------------------- #
+# Phase F — single-page Console GUI (dashboard/gui/index.html)
+#
+# Mounts at GET / (root) and GET /gui. Buttons in the page POST to
+# /api/gui/* — each handler shells out to one of the scripts that
+# already exist in scripts/ so the GUI is a thin coordinator over the
+# CLI tools the user has been driving by hand.
+#
+# Endpoints:
+#   GET  /                       -> redirect to /gui
+#   GET  /gui                    -> dashboard/gui/index.html
+#   GET  /api/gui/addin_status   -> proxy to localhost:7501/status
+#   POST /api/gui/redeploy_addin -> shell scripts/sw_redeploy.py
+#   POST /api/gui/run_smoke_driver
+#   POST /api/gui/enrich_drawing -> POST localhost:7501/op enrichDrawing
+#   GET  /api/gui/bundles        -> list outputs/system_builds/*
+#   GET  /api/gui/render_step    -> render a bundle's STEP to PNG and
+#                                    return as image/png
+#   POST /api/gui/run_phase_e    -> shell scripts/phase_e_varied_prompts.py
+#   GET  /api/gui/git_status     -> git status -s
+#   POST /api/gui/git_push       -> git push current branch + return PR URL
+# --------------------------------------------------------------------------- #
+import sys as _gui_sys  # noqa: E402
+import subprocess as _gui_subprocess  # noqa: E402
+import urllib.request as _gui_urlreq  # noqa: E402
+import urllib.error   as _gui_urlerr  # noqa: E402
+from fastapi.responses import RedirectResponse, Response  # noqa: E402
+
+_GUI_DIR = Path(__file__).resolve().parent / "gui"
+_PYTHON_EXE = _os.environ.get("ARIA_PYTHON",
+                                "C:/Python313/python.exe"
+                                if _os.path.isfile("C:/Python313/python.exe")
+                                else _gui_sys.executable)
+
+
+def _shell(cmd: list[str], timeout: float = 1200.0) -> dict:
+    """Run cmd, return {ok, stdout, stderr, returncode}. Truncated to
+    avoid blowing the GUI console with multi-MB outputs."""
+    try:
+        r = _gui_subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=timeout, cwd=str(REPO_ROOT))
+        return {
+            "ok": r.returncode == 0,
+            "returncode": r.returncode,
+            "stdout": (r.stdout or "")[-12000:],
+            "stderr": (r.stderr or "")[-4000:],
+        }
+    except _gui_subprocess.TimeoutExpired as exc:
+        return {"ok": False, "returncode": -1,
+                "stdout": (exc.stdout or "")[-8000:] if exc.stdout else "",
+                "stderr": f"timeout after {timeout}s"}
+    except Exception as exc:
+        return {"ok": False, "returncode": -1,
+                "stdout": "", "stderr": f"{type(exc).__name__}: {exc}"}
+
+
+@app.get("/")
+async def gui_root_redirect():
+    return RedirectResponse(url="/gui", status_code=307)
+
+
+@app.get("/gui")
+async def gui_root():
+    p = _GUI_DIR / "index.html"
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="gui/index.html missing")
+    return FileResponse(str(p), media_type="text/html")
+
+
+@app.get("/api/gui/addin_status")
+async def gui_addin_status():
+    """Proxy to the SW addin's /status. Returns sw_connected:false on any
+    error so the UI can render a 'down' pill without fetch-level errors."""
+    try:
+        with _gui_urlreq.urlopen("http://localhost:7501/status",
+                                   timeout=2.0) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (_gui_urlerr.URLError, TimeoutError, ConnectionError) as exc:
+        return {"ok": False, "sw_connected": False,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+
+@app.post("/api/gui/redeploy_addin")
+async def gui_redeploy_addin():
+    return _shell(
+        [_PYTHON_EXE, str(REPO_ROOT / "scripts" / "sw_redeploy.py")],
+        timeout=600.0)
+
+
+@app.post("/api/gui/run_smoke_driver")
+async def gui_run_smoke_driver(payload: dict):
+    bundle = payload.get("bundle_name") or "drone_ukraine_v19"
+    bundle_dir = REPO_ROOT / "outputs" / "system_builds" / bundle
+    if not bundle_dir.is_dir():
+        return {"ok": False, "stderr": f"bundle dir not found: {bundle_dir}"}
+    return _shell(
+        [_PYTHON_EXE, str(REPO_ROOT / "scripts" / "sw_assemble_drone.py"),
+         "--bundle", str(bundle_dir)],
+        timeout=900.0)
+
+
+@app.post("/api/gui/enrich_drawing")
+async def gui_enrich_drawing():
+    """POST /op enrichDrawing to the addin — assumes a drawing is the
+    active doc in SW (typically right after createDrawing)."""
+    body = json.dumps({"kind": "enrichDrawing", "params": {
+        "gdt": True, "section_view": True, "exploded_view": True,
+    }}).encode("utf-8")
+    req = _gui_urlreq.Request(
+        "http://localhost:7501/op", data=body,
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with _gui_urlreq.urlopen(req, timeout=300.0) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=502,
+                              detail=f"addin unreachable: {exc}")
+
+
+@app.get("/api/gui/bundles")
+async def gui_list_bundles():
+    base = REPO_ROOT / "outputs" / "system_builds"
+    if not base.is_dir():
+        return {"bundles": []}
+    bundles = []
+    for d in sorted(base.iterdir(), reverse=True):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        try:
+            artifacts = [p.name for p in d.iterdir()
+                          if p.is_file() and not p.name.startswith("~$")]
+            bundles.append({
+                "name":           d.name,
+                "artifact_count": len(artifacts),
+                "has_step":       any(a.lower().endswith(".step") for a in artifacts),
+                "has_sldasm":     any(a.lower().endswith(".sldasm") for a in artifacts),
+                "has_slddrw":     any(a.lower().endswith(".slddrw") for a in artifacts),
+                "has_pcb":        any(a.endswith(".kicad_pcb") for a in artifacts),
+            })
+        except OSError:
+            continue
+    return {"bundles": bundles[:40]}  # cap so the UI doesn't render thousands
+
+
+@app.get("/api/gui/render_step")
+async def gui_render_step(bundle: str):
+    """Render <bundle>/assembly.step (or first .step) to PNG and return
+    as image/png. Caches into bundle/_verify/gui_render.png."""
+    bundle_dir = REPO_ROOT / "outputs" / "system_builds" / bundle
+    if not bundle_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"bundle: {bundle}")
+    candidates = [
+        bundle_dir / "assembly_mated.step",
+        bundle_dir / "assembly.step",
+    ]
+    candidates += sorted(bundle_dir.glob("*.step"))
+    step_path = next((p for p in candidates if p.is_file()), None)
+    if step_path is None:
+        raise HTTPException(status_code=404,
+                              detail=f"no .step in {bundle_dir}")
+    out_dir = bundle_dir / "_verify"
+    out_dir.mkdir(exist_ok=True)
+    out_png = out_dir / "gui_render.png"
+
+    # Render via the existing visual-verifier wireframe path (matplotlib,
+    # no GL needed). Best-effort — surface error to UI if anything fails.
+    try:
+        import cadquery as cq
+        import trimesh
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+        import tempfile
+        shp = cq.importers.importStep(str(step_path))
+        with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as t:
+            stl_path = t.name
+        cq.exporters.export(shp, stl_path, "STL")
+        m = trimesh.load(stl_path)
+        fig = plt.figure(figsize=(8, 8))
+        ax = fig.add_subplot(111, projection="3d")
+        verts = m.vertices
+        ax.plot_trisurf(verts[:, 0], verts[:, 1], verts[:, 2],
+                          triangles=m.faces, alpha=0.65,
+                          edgecolor="steelblue", linewidth=0.05)
+        ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)"); ax.set_zlabel("Z (mm)")
+        ax.set_title(f"{bundle} / {step_path.name}")
+        ax.view_init(elev=22, azim=42)
+        plt.tight_layout()
+        plt.savefig(str(out_png), dpi=120, bbox_inches="tight")
+        plt.close(fig)
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                              detail=f"render failed: {exc}")
+
+    return Response(content=out_png.read_bytes(),
+                      media_type="image/png",
+                      headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/gui/run_phase_e")
+async def gui_run_phase_e():
+    return _shell(
+        [_PYTHON_EXE, str(REPO_ROOT / "scripts" / "phase_e_varied_prompts.py")],
+        timeout=1800.0)
+
+
+@app.get("/api/gui/git_status")
+async def gui_git_status():
+    s = _shell(["git", "status", "-s"], timeout=15.0)
+    branch = _shell(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                      timeout=10.0)
+    ahead = _shell(["git", "rev-list", "--count", "@{u}..HEAD"],
+                      timeout=10.0)
+    return {
+        "ok":      s["ok"],
+        "branch":  (branch.get("stdout") or "").strip(),
+        "ahead":   (ahead.get("stdout") or "0").strip(),
+        "summary": f"branch={(branch.get('stdout') or '').strip()} "
+                    f"ahead={(ahead.get('stdout') or '0').strip()} "
+                    f"dirty={len((s.get('stdout') or '').splitlines())}",
+        "detail":  s.get("stdout") or "",
+    }
+
+
+@app.post("/api/gui/git_push")
+async def gui_git_push():
+    branch = _shell(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                      timeout=10.0)
+    br = (branch.get("stdout") or "").strip()
+    if not br:
+        return {"ok": False, "stderr": "could not resolve current branch"}
+    if br in ("main", "master"):
+        return {"ok": False,
+                "stderr": (f"refusing to push to default branch '{br}' — "
+                           "create a feature branch first")}
+    r = _shell(["git", "push", "origin", br], timeout=180.0)
+    pr_url = None
+    out = (r.get("stdout") or "") + (r.get("stderr") or "")
+    for line in out.splitlines():
+        if "https://github.com/" in line and "/pull/new/" in line:
+            pr_url = line.strip().split()[-1]
+            break
+    r["pr_url"] = pr_url
+    return r
+
+
+# --------------------------------------------------------------------------- #
 # Dev entrypoint
 # --------------------------------------------------------------------------- #
 
