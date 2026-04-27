@@ -179,6 +179,12 @@ export function NativeOpsPanel() {
         {busy === "setMaterial" ? "running…" : "↳ set ABS PC (PCB stand-in)"}
       </button>
 
+      {sectionTitle("Image / Scan → CAD")}
+      <ImageScanUploader run={run} busy={busy} kind="image" />
+      {statusLabel(results.imageToCad)}
+      <ImageScanUploader run={run} busy={busy} kind="scan" />
+      {statusLabel(results.scanToCad)}
+
       {sectionTitle("View")}
       <button style={BTN} disabled={busy !== null}
         onClick={() => run("setView", "setView", { view: "*Isometric" })}>
@@ -189,6 +195,46 @@ export function NativeOpsPanel() {
         {busy === "zoomToFit" ? "…" : "↳ Zoom to fit"}
       </button>
     </div>
+  );
+}
+
+// Local file picker → base64 → bridge.executeFeature dispatcher.
+// Same component handles both image (PNG/JPG) and scan (STL/PLY/OBJ).
+function ImageScanUploader({ run, busy, kind }) {
+  const isImage = kind === "image";
+  const accept = isImage ? "image/*" : ".stl,.ply,.obj,.3mf";
+  const opName = isImage ? "imageToCad" : "scanToCad";
+  const buttonLabel = isImage
+    ? "↳ Upload image → CAD"
+    : "↳ Upload scan (STL/PLY) → CAD";
+  const onPick = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      const base64 = dataUrl.split(",", 2)[1] || "";
+      const params = {
+        prompt: "",
+        file_name: file.name,
+        ...(isImage ? { image_base64: base64 } : { scan_base64: base64 }),
+      };
+      run(opName, opName, params);
+      e.target.value = "";  // allow re-pick of same file
+    };
+    reader.readAsDataURL(file);
+  };
+  return (
+    <label style={{ ...BTN, display: "block", textAlign: "left",
+                       cursor: busy === null ? "pointer" : "wait",
+                       opacity: busy === null ? 1 : 0.6 }}>
+      {busy === opName ? "running… (vision + planner can take 30–90s)"
+                          : buttonLabel}
+      <input type="file" accept={accept}
+              disabled={busy !== null}
+              style={{ display: "none" }}
+              onChange={onPick} />
+    </label>
   );
 }
 

@@ -1458,6 +1458,71 @@ _FEATURE_HANDLERS.update({
 })
 
 
+def _op_image_or_scan_to_cad(params: dict, *, is_image: bool) -> dict:
+    """Image / scan → Fusion. POSTs the local file path to the
+    orchestrator's sync endpoint, gets back STEP/STL, then routes
+    through Fusion's existing insertGeometry path which supports
+    both formats."""
+    import json as _json
+    import urllib.request as _ureq
+
+    server_base = params.get("server_base", "http://localhost:8000")
+    file_key = "image_path" if is_image else "scan_path"
+    b64_key = "image_base64" if is_image else "scan_base64"
+    file_path = params.get(file_key)
+    file_b64 = params.get(b64_key)
+    if not file_path and not file_b64:
+        raise ValueError(f"{'imageToCad' if is_image else 'scanToCad'}: "
+                          f"{file_key} or {b64_key} required")
+    body = {}
+    if file_path: body["file_path"] = file_path
+    else:
+        body["file_base64"] = file_b64
+        if params.get("file_name"): body["file_name"] = params["file_name"]
+    body["prompt"] = params.get("prompt", "")
+    endpoint = "/api/native/image_to_cad" if is_image \
+                else "/api/native/scan_to_cad"
+    req = _ureq.Request(
+        server_base + endpoint,
+        data=_json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST")
+    with _ureq.urlopen(req, timeout=600) as resp:
+        result = _json.loads(resp.read().decode("utf-8"))
+    step_path = result.get("step_path")
+    stl_path = result.get("stl_path")
+    to_import = step_path if step_path and Path(step_path).is_file() \
+                else stl_path
+    if not to_import or not Path(to_import).is_file():
+        return {"ok": False,
+                "error": f"orchestrator returned no usable file "
+                          f"(step='{step_path}', stl='{stl_path}')"}
+    # Route through the existing Fusion insertGeometry helper. file://
+    # URLs work because urllib.request.urlopen handles them natively.
+    try:
+        inserted = _insert_geometry(f"file:///{to_import.replace(chr(92), '/')}")
+    except Exception as exc:
+        return {"ok": False, "step_path": step_path, "stl_path": stl_path,
+                 "imported": to_import,
+                 "error": f"_insert_geometry: {exc}"}
+    return {"ok": True, "step_path": step_path, "stl_path": stl_path,
+             "imported": to_import, "inserted": inserted}
+
+
+def _op_image_to_cad_alias(params: dict) -> dict:
+    return _op_image_or_scan_to_cad(params, is_image=True)
+
+
+def _op_scan_to_cad_alias(params: dict) -> dict:
+    return _op_image_or_scan_to_cad(params, is_image=False)
+
+
+_FEATURE_HANDLERS.update({
+    "imageToCad": _op_image_to_cad_alias,
+    "scanToCad":  _op_scan_to_cad_alias,
+})
+
+
 # --------------------------------------------------------------------
 # Fusion Electronics (Eagle-derived) native ops.
 #

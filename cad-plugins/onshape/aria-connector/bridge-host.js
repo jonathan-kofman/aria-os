@@ -721,7 +721,54 @@ export const ariaFlange = defineFeature(function(context is Context, id is Id, d
     feaIterate:           _opRunFea,
     sheetMetalBaseFlange: _opSheetMetalBaseFlange,
     surfaceLoft:          _opSurfaceLoft,
+    // Image / scan → CAD: same contract as the SW/Rhino/Fusion ops.
+    // Onshape can't read a local file directly (sandboxed iframe), so
+    // the panel passes file_base64 + file_name; the orchestrator's
+    // sync endpoint handles base64 decode + STEP generation.
+    imageToCad: _opImageOrScanToCad.bind(null, true),
+    scanToCad:  _opImageOrScanToCad.bind(null, false),
   };
+
+  async function _opImageOrScanToCad(isImage, params) {
+    const serverBase = params.server_base || "http://localhost:8000";
+    const endpoint = isImage
+      ? "/api/native/image_to_cad"
+      : "/api/native/scan_to_cad";
+    const body = {prompt: params.prompt || ""};
+    if (params.file_path) body.file_path = params.file_path;
+    else if (isImage && params.image_base64) {
+      body.file_base64 = params.image_base64;
+      if (params.file_name) body.file_name = params.file_name;
+    } else if (!isImage && params.scan_base64) {
+      body.file_base64 = params.scan_base64;
+      if (params.file_name) body.file_name = params.file_name;
+    } else {
+      throw new Error(
+        `${isImage ? "imageToCad" : "scanToCad"}: file_path or base64 required`);
+    }
+    const resp = await fetch(serverBase + endpoint, {
+      method:  "POST",
+      headers: {"Content-Type": "application/json"},
+      body:    JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error(
+      `orchestrator ${endpoint} returned ${resp.status}`);
+    const result = await resp.json();
+    const url = result.step_path || result.stl_path;
+    if (!url) return {ok: false, error: "no STEP/STL returned",
+                       step_path: result.step_path,
+                       stl_path: result.stl_path};
+    // Onshape can't import a local path directly — caller must upload
+    // via Onshape's REST API. We surface the path so the React panel
+    // can fetch it and route through Onshape's import flow.
+    return {
+      ok:        true,
+      step_path: result.step_path,
+      stl_path:  result.stl_path,
+      to_import: url,
+      note:      "Onshape import requires REST upload — handled by panel.",
+    };
+  }
 
   async function executeFeature(kind, params) {
     const handler = _OP_HANDLERS[kind];

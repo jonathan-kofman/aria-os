@@ -2910,6 +2910,164 @@ async def image_to_cad(image: UploadFile = File(...),
              "image_features": features, "mode": mode}
 
 
+# --------------------------------------------------------------------------- #
+# Sync image/scan → CAD endpoints (per-native-CAD wrappers call these).
+#
+# The async /api/image_to_cad and /api/scan_to_cad above kick the legacy
+# event-bus pipeline (good for the dashboard streaming UI). The sync
+# variants block until a STEP/STL is on disk and return its path so a
+# CAD plugin can immediately call its own insertGeometry / Open command.
+# --------------------------------------------------------------------------- #
+
+class NativeImageRequest(BaseModel):
+    """Local-path or base64-image variant of the sync endpoint. The CAD
+    plugins call this from inside the host process, so a local path is
+    almost always available; base64 is the fallback for sandboxed
+    Onshape/WebView2 contexts."""
+    file_path:        str | None = None
+    file_base64:      str | None = None
+    file_name:        str | None = None     # used to pick suffix when base64
+    prompt:           str = ""
+    quality_tier:     str = "balanced"
+
+
+@app.post("/api/native/image_to_cad")
+def native_image_to_cad(req: NativeImageRequest):
+    """Sync: image → STEP path. Blocks until the planner produces a STEP."""
+    import base64 as _b64, os as _os, tempfile
+
+    # Resolve to a local path the analyzer + pipeline can read.
+    src: Path
+    if req.file_path:
+        src = Path(req.file_path).resolve()
+        if not src.is_file():
+            raise HTTPException(400, f"file_path not found: {src}")
+    elif req.file_base64:
+        suffix = _os.path.splitext(req.file_name or "image.png")[1] or ".png"
+        tmp_dir = REPO_ROOT / "outputs" / "uploads"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp = tmp_dir / f"img_sync_{_os.getpid()}_{abs(hash(req.file_base64)) & 0xffffff}{suffix}"
+        try:
+            tmp.write_bytes(_b64.b64decode(req.file_base64))
+        except Exception as exc:
+            raise HTTPException(400, f"base64 decode failed: {exc}")
+        src = tmp
+    else:
+        raise HTTPException(400, "file_path or file_base64 required")
+
+    # 1. Vision analysis → goal text
+    try:
+        from aria_os.llm_client import analyze_image_for_cad
+        features = analyze_image_for_cad(
+            str(src), user_prompt=req.prompt, repo_root=REPO_ROOT)
+    except Exception as exc:
+        raise HTTPException(500, f"vision analysis failed: {exc}")
+    goal = features.get("description") or req.prompt or "imported part"
+
+    # 2. Run the standard text-to-part pipeline IN-PROCESS (mode=native)
+    #    and pull the resulting STEP path from the run manifest. We do
+    #    NOT use _run_pipeline (async, event-bus) — we want the path back.
+    try:
+        from aria_os.orchestrator import run as _orch_run
+        artifact = _orch_run(goal=goal, max_attempts=2,
+                              mode="native",
+                              quality_tier=req.quality_tier)
+    except Exception as exc:
+        raise HTTPException(500, f"pipeline failed: {exc}")
+
+    step_path = None
+    stl_path = None
+    if isinstance(artifact, dict):
+        step_path = artifact.get("step_path") or artifact.get("step")
+        stl_path = artifact.get("stl_path") or artifact.get("stl")
+    if not step_path:
+        # Fallback: scan latest run dir for part.step
+        runs = REPO_ROOT / "outputs" / "runs"
+        if runs.is_dir():
+            latest = max((d for d in runs.iterdir() if d.is_dir()),
+                          key=lambda d: d.stat().st_mtime, default=None)
+            if latest and (latest / "part.step").is_file():
+                step_path = str(latest / "part.step")
+            if latest and (latest / "part.stl").is_file():
+                stl_path = str(latest / "part.stl")
+    if not step_path:
+        raise HTTPException(500, "pipeline returned no STEP path")
+
+    return {
+        "ok":         True,
+        "goal":       goal,
+        "step_path":  step_path,
+        "stl_path":   stl_path,
+        "features":   features,
+        "source":     "native_image_to_cad",
+    }
+
+
+class NativeScanRequest(BaseModel):
+    file_path:        str | None = None
+    file_base64:      str | None = None
+    file_name:        str | None = None
+    prompt:           str = ""
+    material:         str = "unknown"
+
+
+@app.post("/api/native/scan_to_cad")
+def native_scan_to_cad(req: NativeScanRequest):
+    """Sync: STL/PLY/OBJ → STEP path. Cleans the mesh, runs feature
+    extraction, returns the cleaned STL plus a STEP if the reconstructor
+    could fit primitives."""
+    import base64 as _b64, os as _os
+
+    if req.file_path:
+        src = Path(req.file_path).resolve()
+        if not src.is_file():
+            raise HTTPException(400, f"file_path not found: {src}")
+    elif req.file_base64:
+        suffix = _os.path.splitext(req.file_name or "scan.stl")[1] or ".stl"
+        tmp_dir = REPO_ROOT / "outputs" / "uploads"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp = tmp_dir / f"scan_sync_{_os.getpid()}_{abs(hash(req.file_base64)) & 0xffffff}{suffix}"
+        try:
+            tmp.write_bytes(_b64.b64decode(req.file_base64))
+        except Exception as exc:
+            raise HTTPException(400, f"base64 decode failed: {exc}")
+        src = tmp
+    else:
+        raise HTTPException(400, "file_path or file_base64 required")
+
+    try:
+        from aria_os.scan_pipeline import run_scan_pipeline
+        entry = run_scan_pipeline(src, material=req.material)
+    except Exception as exc:
+        raise HTTPException(500, f"scan pipeline failed: {exc}")
+
+    # The scan pipeline always produces a cleaned STL; STEP is best-effort
+    # via the optional reconstructor if the topology fits primitives.
+    stl_path = getattr(entry, "stl_path", None) or str(src)
+    step_path = getattr(entry, "step_path", None)
+    # If no STEP, attempt a quick conversion via cadquery (mesh→solid is
+    # only meaningful if primitives were detected; fall back to STL-only).
+    if not step_path:
+        try:
+            from pathlib import Path as _P
+            stl = _P(stl_path)
+            cand = stl.with_suffix(".step")
+            if cand.is_file():
+                step_path = str(cand)
+        except Exception:
+            pass
+
+    return {
+        "ok":         True,
+        "stl_path":   stl_path,
+        "step_path":  step_path,    # may be null — caller imports STL
+        "topology":   getattr(entry, "topology", None),
+        "bbox":       getattr(entry, "bounding_box", None),
+        "confidence": getattr(entry, "confidence", 0.0),
+        "source":     "native_scan_to_cad",
+    }
+
+
 @app.post("/api/scan_to_cad")
 async def scan_to_cad(scan: UploadFile = File(...),
                        prompt: str = "",

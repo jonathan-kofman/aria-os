@@ -20,6 +20,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
@@ -247,6 +248,10 @@ namespace AriaSW
                     // Drawing → PDF for downstream visual verification by
                     // the orchestrator's auto-loop verify gate.
                     "exportDrawingPdf"=> OpExportDrawingPdf(p),
+                    // Image → CAD: post to orchestrator's vision pipeline,
+                    // get back STEP, import into the active doc.
+                    "imageToCad"      => OpImageToCad(p),
+                    "scanToCad"       => OpScanToCad(p),
                     // Native SW Simulation FEA — parametric iterations
                     "runFea"          => OpRunFEA(p),
                     "feaIterate"      => OpRunFEA(p),
@@ -2415,6 +2420,205 @@ namespace AriaSW
             FileLog($"  exportDrawingPdf '{outPdf}' ok={ok} size={size} errs={errs} warns={warns}");
             return new { ok = ok && size > 0, path = outPdf,
                           size, errs, warns };
+        }
+
+        // -----------------------------------------------------------------
+        // Image → CAD. Wrapper that POSTs the image to the orchestrator's
+        // sync /api/native/image_to_cad endpoint, receives a STEP path,
+        // and chains into OpInsertComponent for native import. Lets the
+        // user drop a photo of a real part into SW and have ARIA generate
+        // a STEP it can import directly.
+        //
+        // params:
+        //   image_path:    str (local path on the host machine), OR
+        //   image_base64:  str + optional file_name
+        //   prompt:        optional user hint ("M6 bracket, 50mm wide")
+        //   server_base:   default http://localhost:8000
+        //   alias:         optional component alias (default 'imported')
+        // returns:
+        //   { ok, step_path, goal, alias, name }
+        // -----------------------------------------------------------------
+        private object OpImageToCad(Dictionary<string, object> p)
+        {
+            string serverBase = p.ContainsKey("server_base")
+                ? p["server_base"]?.ToString()
+                : "http://localhost:8000";
+            string imagePath = p.ContainsKey("image_path")
+                ? p["image_path"]?.ToString() : null;
+            string imageB64 = p.ContainsKey("image_base64")
+                ? p["image_base64"]?.ToString() : null;
+            string fileName = p.ContainsKey("file_name")
+                ? p["file_name"]?.ToString() : null;
+            string prompt = p.ContainsKey("prompt")
+                ? p["prompt"]?.ToString() : "";
+            string alias = p.ContainsKey("alias")
+                ? p["alias"]?.ToString() : "imported";
+
+            if (string.IsNullOrEmpty(imagePath) && string.IsNullOrEmpty(imageB64))
+                return new { ok = false,
+                              error = "imageToCad: image_path or image_base64 required" };
+            // Build the JSON payload for the sync endpoint.
+            var bodyMap = new Dictionary<string, object>();
+            if (!string.IsNullOrEmpty(imagePath))
+                bodyMap["file_path"] = imagePath;
+            else
+            {
+                bodyMap["file_base64"] = imageB64;
+                if (!string.IsNullOrEmpty(fileName))
+                    bodyMap["file_name"] = fileName;
+            }
+            bodyMap["prompt"] = prompt ?? "";
+
+            string respBody;
+            try
+            {
+                respBody = HttpPostJson(
+                    $"{serverBase}/api/native/image_to_cad",
+                    JsonConvert.SerializeObject(bodyMap),
+                    timeoutMs: 600000);  // up to 10 min
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  imageToCad POST threw: {ex.Message}");
+                return new { ok = false,
+                              error = $"image_to_cad endpoint: {ex.Message}" };
+            }
+            JObject resp;
+            try { resp = JObject.Parse(respBody); }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"unparseable response: {ex.Message}",
+                              raw = respBody?.Substring(0, Math.Min(400, respBody.Length)) };
+            }
+            string stepPath = (string)resp["step_path"];
+            string goal = (string)resp["goal"] ?? "";
+            if (string.IsNullOrEmpty(stepPath) || !File.Exists(stepPath))
+                return new { ok = false,
+                              error = $"orchestrator returned no usable STEP (path='{stepPath}')",
+                              goal };
+
+            // Now route through the existing import flow.
+            FileLog($"  imageToCad got STEP {stepPath} (goal: '{goal}'), inserting into SW");
+            var insertParams = new Dictionary<string, object> {
+                {"file", stepPath},
+                {"alias", alias},
+                {"x_mm", 0.0}, {"y_mm", 0.0}, {"z_mm", 0.0},
+            };
+            var insertResult = OpInsertComponent(insertParams);
+            return new {
+                ok        = true,
+                step_path = stepPath,
+                goal,
+                alias,
+                inserted  = insertResult,
+            };
+        }
+
+        // -----------------------------------------------------------------
+        // Scan → CAD. Same pattern as imageToCad but for STL/PLY/OBJ
+        // mesh inputs. Server runs the scan_pipeline (mesh repair +
+        // feature extraction); returns cleaned STL plus a STEP if the
+        // reconstructor could fit primitives. We import whichever was
+        // produced — STEP for solid bodies, STL for graphics-body fallback.
+        // -----------------------------------------------------------------
+        private object OpScanToCad(Dictionary<string, object> p)
+        {
+            string serverBase = p.ContainsKey("server_base")
+                ? p["server_base"]?.ToString()
+                : "http://localhost:8000";
+            string meshPath = p.ContainsKey("scan_path")
+                ? p["scan_path"]?.ToString() : null;
+            string meshB64 = p.ContainsKey("scan_base64")
+                ? p["scan_base64"]?.ToString() : null;
+            string fileName = p.ContainsKey("file_name")
+                ? p["file_name"]?.ToString() : null;
+            string prompt = p.ContainsKey("prompt")
+                ? p["prompt"]?.ToString() : "";
+            string alias = p.ContainsKey("alias")
+                ? p["alias"]?.ToString() : "scanned";
+
+            if (string.IsNullOrEmpty(meshPath) && string.IsNullOrEmpty(meshB64))
+                return new { ok = false,
+                              error = "scanToCad: scan_path or scan_base64 required" };
+            var bodyMap = new Dictionary<string, object>();
+            if (!string.IsNullOrEmpty(meshPath)) bodyMap["file_path"] = meshPath;
+            else
+            {
+                bodyMap["file_base64"] = meshB64;
+                if (!string.IsNullOrEmpty(fileName))
+                    bodyMap["file_name"] = fileName;
+            }
+            bodyMap["prompt"] = prompt ?? "";
+
+            string respBody;
+            try
+            {
+                respBody = HttpPostJson(
+                    $"{serverBase}/api/native/scan_to_cad",
+                    JsonConvert.SerializeObject(bodyMap),
+                    timeoutMs: 600000);
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  scanToCad POST threw: {ex.Message}");
+                return new { ok = false,
+                              error = $"scan_to_cad endpoint: {ex.Message}" };
+            }
+            JObject resp;
+            try { resp = JObject.Parse(respBody); }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"unparseable response: {ex.Message}",
+                              raw = respBody?.Substring(0, Math.Min(400, respBody.Length)) };
+            }
+            string stepPath = (string)resp["step_path"];
+            string stlPath = (string)resp["stl_path"];
+            // Prefer STEP (solid body) over STL (graphics body); fall back
+            // to STL when no primitive fit was possible.
+            string toImport = !string.IsNullOrEmpty(stepPath)
+                                  && File.Exists(stepPath)
+                                ? stepPath : stlPath;
+            if (string.IsNullOrEmpty(toImport) || !File.Exists(toImport))
+                return new { ok = false,
+                              error = $"scan pipeline returned no usable file (step='{stepPath}', stl='{stlPath}')" };
+
+            FileLog($"  scanToCad importing {toImport} (kind={(toImport == stepPath ? "STEP" : "STL")})");
+            var insertParams = new Dictionary<string, object> {
+                {"file", toImport},
+                {"alias", alias},
+                {"x_mm", 0.0}, {"y_mm", 0.0}, {"z_mm", 0.0},
+            };
+            var insertResult = OpInsertComponent(insertParams);
+            return new {
+                ok        = true,
+                step_path = stepPath,
+                stl_path  = stlPath,
+                imported  = toImport,
+                alias,
+                inserted  = insertResult,
+            };
+        }
+
+        // -----------------------------------------------------------------
+        // Synchronous JSON HTTP POST helper. Used by image/scan-to-CAD
+        // forwarders to call the orchestrator's sync endpoints. Reuses
+        // the same .NET 4.8 HttpClient pattern as the LLM-args path.
+        // -----------------------------------------------------------------
+        private static string HttpPostJson(string url, string jsonBody,
+                                              int timeoutMs = 60000)
+        {
+            using (var client = new System.Net.Http.HttpClient {
+                Timeout = TimeSpan.FromMilliseconds(timeoutMs)
+            })
+            {
+                var content = new System.Net.Http.StringContent(
+                    jsonBody, System.Text.Encoding.UTF8, "application/json");
+                var resp = client.PostAsync(url, content).Result;
+                resp.EnsureSuccessStatusCode();
+                return resp.Content.ReadAsStringAsync().Result;
+            }
         }
 
         // -----------------------------------------------------------------

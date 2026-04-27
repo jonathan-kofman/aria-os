@@ -357,6 +357,11 @@ namespace AriaPanel
                 "feaIterate"      => OpRunFeaAnalytic(doc, p),
                 "sheetMetalBaseFlange" => OpSheetMetalStub(doc, p),
                 "surfaceLoft"     => OpSurfaceLoftRhino(doc, p),
+                // Image / scan → CAD: post to orchestrator's sync endpoint,
+                // import the returned STEP/STL via Rhino's File3dm.ReadFile
+                // (the existing insertComponent path handles both formats).
+                "imageToCad"      => OpImageToCadRhino(doc, p),
+                "scanToCad"       => OpScanToCadRhino(doc, p),
                 _ => throw new ArgumentException($"Unknown feature kind: {kind}"),
             };
         }
@@ -521,6 +526,96 @@ namespace AriaPanel
                 ok = true,
                 todo = "Rhino: dispatch _-Loft after resolving profile_sketches[] to named curves",
                 profile_count = count,
+            };
+        }
+
+        // ---- Image / scan → CAD ------------------------------------------
+        // Same contract as SW's OpImageToCad / OpScanToCad. POSTs the
+        // local image/mesh path to the orchestrator's sync endpoint,
+        // gets back a STEP path, dispatches Rhino's existing insertComponent
+        // import flow.
+        private static object OpImageToCadRhino(RhinoDoc doc, JObject p) =>
+            _imageOrScanToCadRhino(doc, p, isImage: true);
+
+        private static object OpScanToCadRhino(RhinoDoc doc, JObject p) =>
+            _imageOrScanToCadRhino(doc, p, isImage: false);
+
+        private static object _imageOrScanToCadRhino(RhinoDoc doc, JObject p,
+                                                        bool isImage)
+        {
+            string serverBase = p["server_base"]?.ToString()
+                                  ?? "http://localhost:8000";
+            string filePath = (isImage ? p["image_path"] : p["scan_path"])
+                                ?.ToString();
+            string fileB64 = (isImage ? p["image_base64"] : p["scan_base64"])
+                                ?.ToString();
+            string fileName = p["file_name"]?.ToString();
+            string prompt = p["prompt"]?.ToString() ?? "";
+            string alias = p["alias"]?.ToString()
+                            ?? (isImage ? "imported" : "scanned");
+            if (string.IsNullOrEmpty(filePath) && string.IsNullOrEmpty(fileB64))
+                return new { ok = false,
+                              error = $"{(isImage ? "imageToCad" : "scanToCad")}: path or base64 required" };
+            var body = new JObject();
+            if (!string.IsNullOrEmpty(filePath)) body["file_path"] = filePath;
+            else
+            {
+                body["file_base64"] = fileB64;
+                if (!string.IsNullOrEmpty(fileName))
+                    body["file_name"] = fileName;
+            }
+            body["prompt"] = prompt;
+            string endpoint = isImage
+                ? "/api/native/image_to_cad"
+                : "/api/native/scan_to_cad";
+            string respBody;
+            try
+            {
+                using (var client = new System.Net.Http.HttpClient {
+                    Timeout = TimeSpan.FromMinutes(10)
+                })
+                {
+                    var content = new System.Net.Http.StringContent(
+                        body.ToString(), System.Text.Encoding.UTF8,
+                        "application/json");
+                    var resp = client.PostAsync(serverBase + endpoint, content).Result;
+                    resp.EnsureSuccessStatusCode();
+                    respBody = resp.Content.ReadAsStringAsync().Result;
+                }
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"orchestrator endpoint: {ex.Message}" };
+            }
+            JObject resp2;
+            try { resp2 = JObject.Parse(respBody); }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"unparseable response: {ex.Message}" };
+            }
+            string stepPath = (string)resp2["step_path"];
+            string stlPath = (string)resp2["stl_path"];
+            string toImport = !string.IsNullOrEmpty(stepPath)
+                                  && File.Exists(stepPath)
+                                ? stepPath : stlPath;
+            if (string.IsNullOrEmpty(toImport) || !File.Exists(toImport))
+                return new { ok = false,
+                              error = $"orchestrator returned no usable file (step='{stepPath}', stl='{stlPath}')" };
+            // Reuse existing import flow — chain through OpInsertComponentRhino
+            var insertParams = new JObject {
+                ["file"] = toImport, ["alias"] = alias,
+                ["x_mm"] = 0.0, ["y_mm"] = 0.0, ["z_mm"] = 0.0,
+            };
+            var inserted = OpInsertComponentRhino(doc, insertParams);
+            return new {
+                ok        = true,
+                step_path = stepPath,
+                stl_path  = stlPath,
+                imported  = toImport,
+                alias,
+                inserted,
             };
         }
 
