@@ -31,44 +31,59 @@ from ..llm_client import call_llm
 
 _CLARIFY_SYSTEM = r"""
 You are a senior engineer reviewing a part-design prompt. Your job is
-to decide whether the prompt is already specific enough to design OR
-has a GENUINELY AMBIGUOUS critical field that must be clarified.
+to ask the SMALLEST useful set of questions (0–6) that would let a
+mechanical or electrical engineer fully constrain the design.
 
-DEFAULT BIAS: enough_info=true. Only ask when the prompt is genuinely
-under-specified in a way that would change the geometry or material.
+ALWAYS COVER (when not already explicit in the prompt):
+  - Indoor vs outdoor / operating environment. Outdoor implies UV,
+    rain, temperature swings, IP rating, corrosion — material + finish
+    decisions hinge on this. NEVER skip this question if the prompt
+    doesn't say "indoor", "outdoor", "subsea", "in-space", or similar.
+  - Load case / payload / weight the part must carry, when structural.
+  - Material constraint, if the prompt names neither material nor a
+    process that implies one (e.g. "machined-from-billet" → metal).
+  - Quantity (one-off vs production) when the answer would change the
+    fab method (3D-print → CNC → mold).
+  - Lead-time or deadline when the answer would change the fab method.
+  - Regulatory / safety scope when the part touches food, medical,
+    aerospace, automotive crash, pressure-vessel, or load-bearing
+    structural service (call it out explicitly).
 
 NEVER ask about:
   - Pressure class (unless prompt mentions pipe, pump, pressure, psi,
-    bar, vacuum, or a service like "steam/gas/oil flange")
-  - Hub type / face type / gasket (unless it's a pipeline flange)
+    bar, vacuum, or a service like "steam/gas/oil flange").
+  - Hub type / face type / gasket (unless it's a pipeline flange).
   - PCB impedance control (unless prompt mentions RF, high-speed,
-    controlled impedance, diff pair, USB3+, HDMI, DDR)
-  - Component sourcing / fab house (unless prompt requests it)
+    controlled impedance, diff pair, USB3+, HDMI, DDR).
+  - Component sourcing / fab house (unless prompt requests it).
+  - Color, brand, finish-only aesthetics — those are downstream of
+    material + environment.
 
-OK to ask when genuinely missing:
-  - Material if the prompt doesn't name one AND the part type cares
-    (e.g. a bracket with no material given)
-  - Thread type/clearance when ambiguous (M6 is clear — clearance hole)
-  - Thickness if not specified and strongly affects design
-  - Mounting/orientation for brackets without a clear direction
-  - Layer count for a PCB without any hint
+Set enough_info=true ONLY when the prompt carries enough explicit
+constraints that asking would just be friction:
+  - 3+ numeric dimensions AND one of (material, environment, regulatory).
+  - The prompt names a hardcoded planner family with all required
+    fields explicit.
 
-Examples of prompts that need NO clarification (enough_info=true):
-  - "flange 100mm OD, 4 M6 holes on 80mm PCD, 6mm thick, 6061 aluminum"
-    → structural flange, every dim + material named, go.
-  - "impeller 120mm OD, 6 backward-curved blades, 20mm bore"
-    → blade count, sweep, OD, bore all given, go.
-  - "PCB for ESP32 with USB-C and 2 status LEDs, 30x40mm"
-    → board size, MCU, connectors given, go.
-  - "L-bracket 80mm wide, 60mm tall, 40mm deep, 5mm thick, 4 M6 mounting holes"
-    → all dims + hole pattern + fastener size given, go.
+Examples that need NO clarification (enough_info=true):
+  - "flange 100mm OD, 4 M6 holes on 80mm PCD, 6mm thick, 6061 aluminum,
+    indoor industrial use"
+  - "impeller 120mm OD, 6 backward-curved blades, 20mm bore, ABS, indoor"
+  - "PCB for ESP32 with USB-C and 2 status LEDs, 30x40mm, indoor"
+  - "L-bracket 80mm wide, 60mm tall, 40mm deep, 5mm thick, 4 M6 mounting
+    holes, stainless steel, outdoor marine"
 
-Examples that genuinely need clarification:
-  - "make me a flange for my pump" → needs OD, bolt pattern, material
-  - "breakout board for STM32" → needs board size, connectors, layer count
-  - "motor mount" → needs motor frame size, orientation, mounting hole pattern
+Examples that genuinely need clarification (enough_info=false):
+  - "make me a flange for my pump" → asks: indoor vs outdoor, OD, bolt
+    pattern, material, pressure class.
+  - "breakout board for STM32" → asks: indoor vs outdoor, board size,
+    connectors, layer count, regulatory scope.
+  - "motor mount" → asks: indoor/outdoor, motor frame size, orientation,
+    payload, material.
+  - "drone frame" → asks: indoor (FPV race) vs outdoor, payload weight,
+    propeller size, material (carbon fibre vs printed nylon).
 
-Return JSON:
+Return JSON only — no prose, no markdown fences:
   {
     "enough_info": bool,
     "part_family": str,
@@ -78,8 +93,6 @@ Return JSON:
        "default": str, "rationale": str}
     ]
   }
-
-Output JSON ONLY — no prose, no markdown fences.
 """.strip()
 
 
@@ -121,6 +134,40 @@ def _extract_json_object(text: str) -> dict | None:
     return None
 
 
+def _baseline_must_haves(goal: str) -> list[dict]:
+    """Deterministic must-have questions used when the LLM bails out
+    OR returns a list missing the always-cover items. Lifts logic from
+    aria_os.clarify.clarify._baseline_questions but in the
+    {field, question, options, default, rationale} shape this module
+    contracts to."""
+    try:
+        from aria_os.clarify.clarify import _baseline_questions
+    except Exception:
+        return []
+    out = []
+    for q in _baseline_questions(goal):
+        out.append({
+            "field":     q["id"],
+            "question":  q["label"],
+            "options":   list(q.get("options") or []),
+            "default":   "",
+            "rationale": q.get("hint", ""),
+        })
+    return out
+
+
+def _has_environment_question(items: list[dict]) -> bool:
+    for c in items:
+        f = (c.get("field") or "").lower()
+        q = (c.get("question") or "").lower()
+        if f in ("environment", "indoor_outdoor", "operating_environment",
+                  "use_environment", "in_outdoor"):
+            return True
+        if "indoor" in q and "outdoor" in q: return True
+        if "operating environment" in q: return True
+    return False
+
+
 def clarify(goal: str, spec: dict | None = None,
              *, quality: str = "fast",
              repo_root: Path | None = None) -> dict:
@@ -132,8 +179,11 @@ def clarify(goal: str, spec: dict | None = None,
         summary: str
         clarifications: list[dict]
 
-    On LLM failure, returns enough_info=True (proceed as-is) so we
-    never block on clarifier errors.
+    Self-healing: if the LLM bails out OR returns a list missing the
+    "always cover" axes (chiefly indoor/outdoor), we merge in the
+    deterministic baseline so the user is never silently shipped a
+    half-defined prompt. Per the autonomy-first rule the recovery is
+    invisible to the caller.
     """
     prompt = (
         f"## User's part description\n{goal.strip()}\n\n"
@@ -145,22 +195,26 @@ def clarify(goal: str, spec: dict | None = None,
         raw = call_llm(prompt, _CLARIFY_SYSTEM,
                         quality=quality, repo_root=repo_root)
     except Exception as exc:
-        return {"enough_info": True,
+        # LLM failed — fall back to the deterministic baseline.
+        baseline = _baseline_must_haves(goal)
+        return {"enough_info": len(baseline) == 0,
                 "part_family": "unknown",
                 "summary": goal,
-                "clarifications": [],
+                "clarifications": baseline,
                 "error": f"clarify LLM failed: {exc}"}
     if not raw:
-        return {"enough_info": True,
+        baseline = _baseline_must_haves(goal)
+        return {"enough_info": len(baseline) == 0,
                 "part_family": "unknown",
                 "summary": goal,
-                "clarifications": []}
+                "clarifications": baseline}
     data = _extract_json_object(raw)
     if not data:
-        return {"enough_info": True,
+        baseline = _baseline_must_haves(goal)
+        return {"enough_info": len(baseline) == 0,
                 "part_family": "unknown",
                 "summary": goal,
-                "clarifications": [],
+                "clarifications": baseline,
                 "error": f"unparseable clarify output: {raw[:200]!r}"}
     # Normalize
     data.setdefault("enough_info", False)
@@ -169,8 +223,8 @@ def clarify(goal: str, spec: dict | None = None,
     data.setdefault("clarifications", [])
     if not isinstance(data["clarifications"], list):
         data["clarifications"] = []
-    # Cap at 5 questions
-    data["clarifications"] = data["clarifications"][:5]
+    # Cap at 6 questions (was 5 — bumped to make room for env + load).
+    data["clarifications"] = data["clarifications"][:6]
     # Ensure each clarification has minimum shape
     cleaned = []
     for c in data["clarifications"]:
@@ -185,6 +239,28 @@ def clarify(goal: str, spec: dict | None = None,
             "default":   c.get("default", ""),
             "rationale": str(c.get("rationale", "")),
         })
+    # Self-healing: if the LLM didn't ask about indoor/outdoor and the
+    # prompt doesn't already specify it, splice the env question to the
+    # front. This is the single most-often-missed clarification.
+    pl = goal.lower()
+    try:
+        from aria_os.clarify.clarify import _ENV_WORDS
+    except Exception:
+        _ENV_WORDS = {"indoor", "outdoor", "subsea", "underwater"}
+    env_in_prompt = any(w in pl for w in _ENV_WORDS)
+    if not data.get("enough_info") and not env_in_prompt \
+            and not _has_environment_question(cleaned):
+        cleaned.insert(0, {
+            "field":     "environment",
+            "question":  "Will this be used indoors, outdoors, or both?",
+            "options":   ["indoor", "outdoor", "both",
+                            "subsea / marine", "in-space / vacuum"],
+            "default":   "",
+            "rationale": "Drives material, finish, IP rating, and "
+                          "tolerance bracket. Always asked when not "
+                          "specified.",
+        })
+        cleaned = cleaned[:6]
     data["clarifications"] = cleaned
     if not cleaned:
         data["enough_info"] = True

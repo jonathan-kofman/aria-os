@@ -201,10 +201,111 @@
     refreshStatus();
   }
 
+  // Clarifying-questions gate: before /api/system/full-build runs, hit
+  // /api/clarify so the user explicitly answers indoor/outdoor + load
+  // case + material + any other axis the LLM thinks is missing. Skipped
+  // when the prompt already carries enough constraints (enough_info=true).
+  async function _runClarifyAndCollect(rawGoal) {
+    log(`[clarify] checking goal completeness…`, 'dim');
+    const cl = await api('/api/clarify', 'POST', { goal: rawGoal });
+    if (!cl.ok) {
+      log('[clarify] endpoint failed — proceeding with raw goal', 'warn');
+      return rawGoal;
+    }
+    const cls = (cl.body && cl.body.clarifications) || [];
+    if (cl.body.enough_info || cls.length === 0) {
+      log('[clarify] prompt is specific enough — no questions', 'ok');
+      return rawGoal;
+    }
+    // Render an inline form right inside the console.
+    const wrap = document.createElement('div');
+    wrap.className = 'log-line';
+    wrap.style.background = 'rgba(74,143,168,0.08)';
+    wrap.style.border = '1px solid rgba(74,143,168,0.3)';
+    wrap.style.padding = '12px';
+    wrap.style.borderRadius = '6px';
+    wrap.style.margin = '6px 0';
+    wrap.innerHTML = `<div style="color:var(--accent-bright);font-weight:700;margin-bottom:8px">
+        ${cls.length} clarifying question${cls.length>1?'s':''} before we start
+      </div>`;
+    const fields = [];
+    for (const c of cls) {
+      const row = document.createElement('div');
+      row.style.marginBottom = '8px';
+      const label = document.createElement('div');
+      label.textContent = c.question;
+      label.style.fontSize = '12px';
+      label.style.marginBottom = '3px';
+      row.appendChild(label);
+      let input;
+      if ((c.options || []).length > 0) {
+        input = document.createElement('select');
+        input.style.width = '100%';
+        const blank = document.createElement('option');
+        blank.value = ''; blank.textContent = '— pick one —';
+        input.appendChild(blank);
+        for (const o of c.options) {
+          const opt = document.createElement('option');
+          opt.value = o; opt.textContent = o;
+          input.appendChild(opt);
+        }
+      } else {
+        input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = c.default || '';
+        input.style.width = '100%';
+      }
+      input.dataset.field = c.field;
+      row.appendChild(input);
+      if (c.rationale) {
+        const r = document.createElement('div');
+        r.textContent = c.rationale;
+        r.style.fontSize = '10px'; r.style.color = 'var(--muted)';
+        r.style.marginTop = '2px';
+        row.appendChild(r);
+      }
+      wrap.appendChild(row);
+      fields.push(input);
+    }
+    const submitBtn = document.createElement('button');
+    submitBtn.textContent = '↳ Continue with these answers';
+    submitBtn.style.marginTop = '6px';
+    const skipBtn = document.createElement('button');
+    skipBtn.textContent = 'Skip — use defaults';
+    skipBtn.style.marginLeft = '6px';
+    skipBtn.style.background = 'transparent';
+    skipBtn.style.border = '1px solid var(--border)';
+    wrap.appendChild(submitBtn); wrap.appendChild(skipBtn);
+    consoleEl.appendChild(wrap);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+    return await new Promise((resolve) => {
+      const finish = (answers) => {
+        submitBtn.disabled = true; skipBtn.disabled = true;
+        // Assemble final goal text by appending answers as a phrase.
+        const parts = [];
+        for (const [k, v] of Object.entries(answers)) {
+          if (v) parts.push(`${k}=${v}`);
+        }
+        const finalGoal = parts.length
+          ? `${rawGoal}. (${parts.join('; ')})`
+          : rawGoal;
+        log(`[clarify] final goal: ${finalGoal}`, 'ok');
+        resolve(finalGoal);
+      };
+      submitBtn.onclick = () => {
+        const ans = {};
+        for (const f of fields) ans[f.dataset.field] = f.value;
+        finish(ans);
+      };
+      skipBtn.onclick = () => finish({});
+    });
+  }
+
   async function cmdFullBuild() {
-    const goal = $('goal').value.trim();
+    const rawGoal = $('goal').value.trim();
     const bundle = $('bundle-name').value.trim() || 'gui_run_' + Date.now();
-    if (!goal) return log('[!] goal is required', 'err');
+    if (!rawGoal) return log('[!] goal is required', 'err');
+    const goal = await _runClarifyAndCollect(rawGoal);
     log(`[full-build] ${bundle}`, 'info');
     const r = await api('/api/system/full-build', 'POST', {
       goal, bundle_name: bundle,
