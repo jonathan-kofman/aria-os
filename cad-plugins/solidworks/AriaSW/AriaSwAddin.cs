@@ -2019,8 +2019,13 @@ namespace AriaSW
                                     {
                                         var fcfAnn = fcf.GetAnnotation() as IAnnotation;
                                         if (fcfAnn != null)
-                                            fcfAnn.SetPosition2(cx - 0.04,
-                                                                cy + 0.02, 0);
+                                            // Top-left corner of the sheet —
+                                            // never collides with views or
+                                            // other corner notes. A3 sheet is
+                                            // 0.420 x 0.297 m so 0.020/0.270
+                                            // sits cleanly inside the margin.
+                                            fcfAnn.SetPosition2(0.020,
+                                                                0.270, 0);
                                         notesAdded++;
                                     }
                                 }
@@ -2119,19 +2124,38 @@ namespace AriaSW
                             object secView = null;
                             string winner = "CreateSectionViewAt5";
                             string lastErr = null;
-                            try
+                            // Make the section label unique per call so we
+                            // never collide with an existing "A" label on
+                            // the same drawing — that's one of the silent
+                            // failure modes for CreateSectionViewAt5.
+                            string sectionLabel = "S"
+                                + DateTime.Now.ToString("HHmmss");
+                            // Try Options=1 (vertical cutting line through
+                            // the centre point) first. Options=0 is "manual"
+                            // and silently returns null because no line geometry
+                            // gets generated. Cycle through 1,2,4 if first
+                            // returns null — cheap enough on a single call.
+                            int[] optionTries = { 1, 2, 4, 0 };
+                            foreach (int opt in optionTries)
                             {
-                                secView = drw.CreateSectionViewAt5(
-                                    cx, cy, 0.0,
-                                    "A",     // SectionLabel
-                                    0,       // Options bitfield (aligned)
-                                    null,    // ExcludedComponents
-                                    0.0);    // SectionDepth = full
-                            }
-                            catch (Exception exSec)
-                            {
-                                lastErr = exSec.Message;
-                                FileLog($"  enrichDrawing.section CreateSectionViewAt5 threw: {exSec.Message}");
+                                try
+                                {
+                                    secView = drw.CreateSectionViewAt5(
+                                        cx, cy, 0.0,
+                                        sectionLabel,  // unique label
+                                        opt,           // 1=vertical, 2=horiz
+                                        null,          // ExcludedComponents
+                                        0.0);          // SectionDepth = full
+                                    if (secView != null) {
+                                        winner = $"CreateSectionViewAt5(opt={opt})";
+                                        break;
+                                    }
+                                }
+                                catch (Exception exSec)
+                                {
+                                    lastErr = $"opt={opt}: {exSec.Message}";
+                                    FileLog($"  enrichDrawing.section CreateSectionViewAt5(opt={opt}) threw: {exSec.Message}");
+                                }
                             }
                             // Older-SW fallback path retained for graceful
                             // degradation on installations where the SW
@@ -2162,7 +2186,11 @@ namespace AriaSW
                                     {
                                         var snAnn = sn.GetAnnotation() as IAnnotation;
                                         if (snAnn != null)
-                                            snAnn.SetPosition2(cx, cy + 0.02, 0);
+                                            // Top-center of sheet — sits
+                                            // between FCF (top-left) and
+                                            // exploded-view note (top-right).
+                                            snAnn.SetPosition2(0.180,
+                                                                0.275, 0);
                                     }
                                 }
                                 catch { }
@@ -2298,7 +2326,11 @@ namespace AriaSW
                                 {
                                     var ea = en.GetAnnotation() as IAnnotation;
                                     if (ea != null)
-                                        ea.SetPosition2(0.20, 0.07, 0);
+                                        // Top-right of sheet — predictable
+                                        // location, never collides with FCF
+                                        // (top-left) or section note
+                                        // (top-center).
+                                        ea.SetPosition2(0.310, 0.275, 0);
                                 }
                             }
                             catch { }
