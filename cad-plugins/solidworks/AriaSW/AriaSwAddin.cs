@@ -1906,6 +1906,36 @@ namespace AriaSW
             //     primary datum reference) at the view centre.
             // This guarantees visible GD&T on the .slddrw without depending
             // on SW Simulation, DimXpert, or Add-in licensing state.
+            // Per-part tolerance values — caller can override every
+            // number; defaults match the previous boilerplate so old
+            // callers see no behavioural change. The dashboard
+            // orchestrator computes these from each part's STEP via
+            // aria_os/gdt/derive_tolerances.py before posting the op.
+            double posTol = p.ContainsKey("position_tolerance_mm")
+                              ? Convert.ToDouble(p["position_tolerance_mm"]) : 0.20;
+            double flatTol = p.ContainsKey("flatness_mm")
+                              ? Convert.ToDouble(p["flatness_mm"]) : 0.05;
+            double perpTol = p.ContainsKey("perpendicularity_mm")
+                              ? Convert.ToDouble(p["perpendicularity_mm"]) : 0.10;
+            double genLin  = p.ContainsKey("general_linear_mm")
+                              ? Convert.ToDouble(p["general_linear_mm"]) : 0.5;
+            double genAng  = p.ContainsKey("general_angular_deg")
+                              ? Convert.ToDouble(p["general_angular_deg"]) : 0.5;
+            string standard = p.ContainsKey("standard")
+                                ? p["standard"]?.ToString() : "ASME Y14.5-2018";
+            string isoCls   = p.ContainsKey("iso_class")
+                                ? p["iso_class"]?.ToString() : "ISO 2768-mK";
+            string matLabel = p.ContainsKey("material_label")
+                                ? p["material_label"]?.ToString() : "AS NOTED";
+            string finLabel = p.ContainsKey("finish_label")
+                                ? p["finish_label"]?.ToString() : "AS NOTED";
+            string primary  = p.ContainsKey("primary_datum")
+                                ? p["primary_datum"]?.ToString() : "A";
+            string secondary= p.ContainsKey("secondary_datum")
+                                ? p["secondary_datum"]?.ToString() : "B";
+            string tertiary = p.ContainsKey("tertiary_datum")
+                                ? p["tertiary_datum"]?.ToString() : "C";
+
             if (wantGdt)
             {
                 try
@@ -1968,12 +1998,20 @@ namespace AriaSW
                                                             y0 - 0.01, 0);
                                     notesAdded++;
                                 }
-                                // FCF on the first view only — position
-                                // tolerance referencing primary datum.
+                                // FCF on the first view only — uses
+                                // the per-part tolerance values (overrides
+                                // injected via params), so each part's
+                                // FCF scales to its own bbox + smallest
+                                // hole rather than a fixed boilerplate.
                                 if (viewIdx == 0)
                                 {
-                                    var fcf = (INote)drwDoc.InsertNote(
-                                        "⌖ ⌀ 0.20 Ⓜ A B C\nFLATNESS 0.05  PERPENDICULARITY 0.10 A");
+                                    string fcfText = string.Format(
+                                        "⌖ ⌀ {0:0.###} Ⓜ {1} {2} {3}\n" +
+                                        "FLATNESS {4:0.###}  " +
+                                        "PERPENDICULARITY {5:0.###} {1}",
+                                        posTol, primary, secondary, tertiary,
+                                        flatTol, perpTol);
+                                    var fcf = (INote)drwDoc.InsertNote(fcfText);
                                     if (fcf != null)
                                     {
                                         var fcfAnn = fcf.GetAnnotation() as IAnnotation;
@@ -1993,13 +2031,18 @@ namespace AriaSW
                         view = view.GetNextView() as IView;
                     }
                     // Title-block style general-tolerance note at the
-                    // bottom-left of the sheet — universal applicability.
+                    // bottom-left of the sheet. Values come from the
+                    // per-part GdtSpec the orchestrator injected; falls
+                    // back to ISO-2768-mK / ASME-Y14.5 boilerplate when
+                    // the caller didn't compute spec.
                     try
                     {
-                        var gen = (INote)drwDoc.InsertNote(
-                            "GENERAL TOL: ±0.5 mm  ANGULAR ±0.5°\n" +
-                            "GD&T PER ASME Y14.5-2018  RFS UNLESS NOTED\n" +
-                            "MATERIAL: AS NOTED  FINISH: AS NOTED");
+                        string genText = string.Format(
+                            "GENERAL TOL: ±{0:0.##} mm  ANGULAR ±{1:0.##}°  ({2})\n" +
+                            "GD&T PER {3}  RFS UNLESS NOTED\n" +
+                            "MATERIAL: {4}  FINISH: {5}",
+                            genLin, genAng, isoCls, standard, matLabel, finLabel);
+                        var gen = (INote)drwDoc.InsertNote(genText);
                         if (gen != null)
                         {
                             var ga = gen.GetAnnotation() as IAnnotation;
