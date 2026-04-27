@@ -1348,12 +1348,41 @@ namespace AriaSW
                                   error = $"STEP import failed for '{file}' (LoadFile4 + OpenDoc6 both returned null)" };
 
                 partPath = Path.ChangeExtension(file, ".sldprt");
+                // Apply material BEFORE saving so the .sldprt persists with
+                // it. SW's SetMaterialPropertyName2 requires the doc be a
+                // part (which `imported` is, post-LoadFile4 STEP import).
+                // Falls back gracefully if the named material isn't in the
+                // SOLIDWORKS Materials library — caller can check the
+                // returned `material_applied` field.
+                string materialName = p.ContainsKey("material")
+                                        ? p["material"]?.ToString() : null;
+                string materialDb   = p.ContainsKey("material_db")
+                                        ? p["material_db"]?.ToString()
+                                        : "SOLIDWORKS Materials";
+                bool materialApplied = false;
+                if (!string.IsNullOrEmpty(materialName))
+                {
+                    try
+                    {
+                        if (imported is IPartDoc impPart)
+                        {
+                            impPart.SetMaterialPropertyName2("",
+                                materialDb, materialName);
+                            materialApplied = true;
+                            FileLog($"  insertComponent: material '{materialName}' (db='{materialDb}') applied to imported part");
+                        }
+                    }
+                    catch (Exception exMat)
+                    {
+                        FileLog($"  insertComponent: SetMaterialPropertyName2 threw: {exMat.Message}");
+                    }
+                }
                 int saveErr = 0, saveWarn = 0;
                 bool savedOk = imported.Extension.SaveAs(partPath,
                     (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
                     (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
                     null, ref saveErr, ref saveWarn);
-                FileLog($"  insertComponent: STEP -> SLDPRT '{partPath}' savedOk={savedOk} errs={saveErr}");
+                FileLog($"  insertComponent: STEP -> SLDPRT '{partPath}' savedOk={savedOk} errs={saveErr} material={(materialApplied ? materialName : "none")}");
                 // Close the imported (STEP) part — its on-disk SLDPRT
                 // version is what AddComponent will reference. Closing
                 // here avoids SW's "doc with same name open" conflict

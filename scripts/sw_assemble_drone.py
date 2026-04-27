@@ -53,8 +53,12 @@ def _op(base: str, kind: str, params: dict, transcript: list,
     last_err: str = ""
     for attempt in range(retries + 1):
         try:
+            # 300s — STEP -> SLDPRT conversion of trace-rich PCBs takes
+            # SW ~2-3 min on first import (LoadFile4 builds the BREP from
+            # the STEP body tree). Cached SLDPRTs are sub-5s, but we
+            # don't want to fail when the cache is cold.
             r = _post(base, "/op", {"kind": kind, "params": params},
-                       timeout=120.0)
+                       timeout=300.0)
         except (urllib.error.URLError, TimeoutError) as exc:
             last_err = f"{type(exc).__name__}: {exc}"
             if attempt < retries:
@@ -110,48 +114,73 @@ def main() -> int:
     print("[op    ] beginAssembly")
     _op(base, "beginAssembly", {}, transcript)
 
-    # 2. Frame component first (becomes the fixed base by SW convention)
-    print(f"[op    ] insertComponent <frame> {frame_step}")
+    # 2. Frame component — aluminium 6061 (light + strong + easy to
+    #    machine; stock drone-frame material). SW addin assigns the
+    #    material to the imported .sldprt before AddComponent so the
+    #    BOM, mass, and FEA pull from a real material spec instead of
+    #    the default "no material assigned" placeholder.
+    print(f"[op    ] insertComponent <frame> {frame_step}  material=6061 Alloy")
     r_frame = _op(base, "insertComponent", {
         "file":  str(frame_step),
         "alias": "frame",
         "x_mm": 0.0, "y_mm": 0.0, "z_mm": 0.0,
+        "material": "6061 Alloy",  # SOLIDWORKS Materials std library
     }, transcript)
     frame_name = (r_frame.get("result") or {}).get("name", "frame-1")
 
-    # 3. PCB component, offset above the frame so initial render is sane
-    print(f"[op    ] insertComponent <pcb>   {pcb_step}")
+    # 3. PCB component — FR-4 substrate. SW's standard library doesn't
+    #    have a perfect FR-4 entry, so we fall back to "ABS PC" as a
+    #    rough approximation (similar density). The .kicad_pcb encodes
+    #    the precise FR-4 stackup; this is just for SW BOM/mass.
+    print(f"[op    ] insertComponent <pcb>   {pcb_step}  material=ABS PC")
     r_pcb = _op(base, "insertComponent", {
         "file":  str(pcb_step),
         "alias": "pcb",
         "x_mm": 0.0, "y_mm": 0.0, "z_mm": 20.0,
+        "material": "ABS PC",  # closest analogue to FR-4 in std library
     }, transcript)
     pcb_name = (r_pcb.get("result") or {}).get("name", "fc_pcb-1")
 
-    # 4. Mates — let the addin resolve SelectByID2 reference strings
-    #    server-side from aliases + plane shorthand. This shields the
-    #    driver from SW's naming conventions (component instance suffix,
-    #    "Top Plane" vs "Top", asm title with/without .SLDASM, etc.).
-    #    Two mates lock the canonical "stack PCB on frame" pose:
-    #      a. Top planes parallel  (rotation about Z aligned)
-    #      b. Front planes parallel (no twist)
-    print("[op    ] addMate parallel  pcb.Top || frame.Top")
+    # 4. Mates — fully constrain PCB position on frame (was under-
+    #    constrained with parallel-only; PCB floated free along plane
+    #    normals, producing visible drift in the SW viewport).
+    #
+    #    Three mates fully position the PCB:
+    #      a. Distance(pcb.Top, frame.Top, 30 mm) — locks Z (vertical)
+    #         AND parallelism. Replaces the old parallel-only mate.
+    #      b. Coincident(pcb.Front, frame.Front)  — locks Y centerline
+    #      c. Coincident(pcb.Right, frame.Right)  — locks X centerline
+    #
+    #    Coincident-on-planes overlaps the planes exactly, so PCB sits
+    #    centered on the frame footprint with a 30 mm vertical stand-off.
+    print("[op    ] addMate distance pcb.Top - frame.Top = 30mm")
     r_mate1 = _op(base, "addMate", {
-        "type": "parallel",
+        "type": "distance",
         "alias1": "pcb",   "plane1": "Top",
         "alias2": "frame", "plane2": "Top",
+        "distance_mm": 30.0,
+        "align": "aligned",  # PCB above frame (not below)
     }, transcript)
     if not (r_mate1.get("result") or {}).get("ok"):
         print(f"  WARN: mate1 failed: {r_mate1.get('result')}")
 
-    print("[op    ] addMate parallel  pcb.Front || frame.Front")
+    print("[op    ] addMate coincident pcb.Front = frame.Front")
     r_mate2 = _op(base, "addMate", {
-        "type": "parallel",
+        "type": "coincident",
         "alias1": "pcb",   "plane1": "Front",
         "alias2": "frame", "plane2": "Front",
     }, transcript)
     if not (r_mate2.get("result") or {}).get("ok"):
         print(f"  WARN: mate2 failed: {r_mate2.get('result')}")
+
+    print("[op    ] addMate coincident pcb.Right = frame.Right")
+    r_mate3 = _op(base, "addMate", {
+        "type": "coincident",
+        "alias1": "pcb",   "plane1": "Right",
+        "alias2": "frame", "plane2": "Right",
+    }, transcript)
+    if not (r_mate3.get("result") or {}).get("ok"):
+        print(f"  WARN: mate3 failed: {r_mate3.get('result')}")
 
     # 5. Save assembly
     print(f"[op    ] saveAs {out_asm}")
