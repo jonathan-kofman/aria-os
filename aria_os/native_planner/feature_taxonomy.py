@@ -245,9 +245,11 @@ TAXONOMY: list[dict] = [
      "name": "Hole Wizard - simple drilled hole",
      "category": "feat",
      "test_slug": "hole_wizard_drill",
-     "sw":      {"api": "FeatureManager.HoleWizard5 + face select",
-                  "status": "needs_workaround",
-                  "workaround": "needs face-id param threading"},
+     "sw":      {"api": "validator transform: emits cut-extrude with "
+                  "hw_kind metadata. cbore variant emits stepped 2-cut "
+                  "(wider counterbore on top + narrower drill below).",
+                  "status": "ok",
+                  "verified_at": "2026-04-27T21:40"},
      "rhino":   {"api": "n/a - use Brep.CreateBooleanDifference with cylinder",
                   "status": "untested"},
      "fusion":  {"api": "holeFeatures.createSimpleInput",

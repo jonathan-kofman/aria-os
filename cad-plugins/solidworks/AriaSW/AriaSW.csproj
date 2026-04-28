@@ -30,6 +30,10 @@
     <!-- HttpClient for insertGeometry STEP/STL download. Not auto-
          referenced under net48 SDK-style. -->
     <Reference Include="System.Net.Http" />
+    <!-- Required for `dynamic` keyword (DLR → IDispatch path used to
+         work around SW2024 wizard APIs that silent-null over standard
+         reflection). -->
+    <Reference Include="Microsoft.CSharp" />
   </ItemGroup>
 
   <!-- SolidWorks COM interop assemblies. They live in the SW install

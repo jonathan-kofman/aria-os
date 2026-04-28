@@ -181,16 +181,73 @@ def _calculix_available() -> bool:
 
 def _run_calculix(spec: dict, stl_path: str | None,
                     loads: dict) -> list[Issue]:
-    """Stub: invoke CalculiX on the part. For v1, we just report
-    that it was requested; real solver wiring is W7.4-stretch."""
+    """Invoke CalculiX via aria_os.fea.calculix_stage on a STEP file
+    derived from the artifact. Fully wired now (was stub in W7.4).
+    Closes Gap #5 from FEA_PIPELINE_AUDIT.md."""
     if not _calculix_available():
         return [Issue(
             "info", "fea_calculix_unavailable",
             "CalculiX (ccx) requested but not on PATH; falling back "
             "to closed-form. Install CalculiX for non-trivial FEA.")]
-    return [Issue(
-        "info", "fea_calculix_stub",
-        "CalculiX wrapper not yet implemented; closed-form only.")]
+
+    # Derive a STEP path from the STL artifact (calculix_stage takes STEP).
+    # If we're given an STL, see if there's a matching .step next to it.
+    if stl_path is None:
+        return [Issue(
+            "warning", "fea_calculix_no_geometry",
+            "CalculiX requested but no STL path supplied — "
+            "cannot mesh without a geometry artifact.")]
+
+    from pathlib import Path as _P
+    p = _P(stl_path)
+    step_candidates = [
+        p.with_suffix(".step"),
+        p.with_suffix(".STEP"),
+        p.with_suffix(".stp"),
+    ]
+    step_path = next((c for c in step_candidates if c.is_file()), None)
+    if step_path is None:
+        return [Issue(
+            "warning", "fea_calculix_no_step",
+            f"No STEP file found alongside {p.name}; CalculiX needs "
+            f"OCC-readable geometry. Tried: {[str(c) for c in step_candidates]}.")]
+
+    material = spec.get("material", "aluminum_6061")
+    load_n = float(loads.get("point_n", loads.get("force_n", 1000.0)))
+    out_dir = _P(spec.get("fea_out_dir", "outputs/fea") + "/" +
+                  p.stem)
+
+    try:
+        from aria_os.fea.calculix_stage import run_static_fea
+    except Exception as ex:
+        return [Issue("warning", "fea_calculix_import_fail",
+                       f"could not import calculix_stage: {ex}")]
+
+    try:
+        report = run_static_fea(step_path, material=material,
+                                 load_n=load_n, out_dir=out_dir,
+                                 mesh_size_mm=float(spec.get(
+                                    "mesh_size_mm", 5.0)),
+                                 target_safety_factor=float(spec.get(
+                                    "target_safety_factor", 2.0)))
+    except Exception as ex:
+        return [Issue("warning", "fea_calculix_run_threw",
+                       f"calculix_stage.run_static_fea threw: {ex}")]
+
+    if not report.get("available"):
+        return [Issue("info", "fea_calculix_unavailable",
+                       report.get("error", "ccx unavailable"))]
+
+    if report.get("passed"):
+        return [Issue("info", "fea_calculix_passed",
+                       f"CalculiX FEA PASS: σ={report['max_stress_mpa']}MPa, "
+                       f"SF={report['safety_factor']} ≥ {report['target_safety_factor']}. "
+                       f"Report: {report['report_path']}")]
+    else:
+        return [Issue("error", "fea_calculix_failed",
+                       f"CalculiX FEA FAIL: σ={report.get('max_stress_mpa')}MPa, "
+                       f"SF={report.get('safety_factor')} < target. "
+                       f"Error: {report.get('error', 'see report')}")]
 
 
 # --- Top-level entry point --------------------------------------------

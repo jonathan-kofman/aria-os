@@ -47,9 +47,12 @@ def submit(machine, job) -> str:
     """Hand the artifact off to the machine. Returns a driver-side job id
     (which may differ from the bridge's job_id)."""
     drv_id = job.job_id  # stub: use the same id
+    # Honor the caller's expected_runtime_s. Floor at 2s so demo jobs
+    # (YC pitch flow with ~8s artifacts) can actually complete inside
+    # the verify-polling window. The 60s legacy floor blocked that.
     _stub_jobs[drv_id] = {
         "started": time.time(),
-        "expected_runtime_s": max(60.0, job.expected_runtime_s or 300.0),
+        "expected_runtime_s": max(2.0, job.expected_runtime_s or 30.0),
         "progress": 0.0,
     }
     _log.info("stub: submitted job %s to %s (%s)", drv_id,

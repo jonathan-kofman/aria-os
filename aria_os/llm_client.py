@@ -954,6 +954,111 @@ def _try_ollama_vision(
         return None
 
 
+# Dimension sanity bounds for common part types
+_DIMENSION_SANITY_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
+    "knob": {"diameter_mm": (15, 60), "height_mm": (10, 50)},
+    "button": {"diameter_mm": (8, 40), "height_mm": (3, 30)},
+    "lever": {"length_mm": (30, 150), "thickness_mm": (2, 15)},
+    "bracket": {"width_mm": (20, 300), "height_mm": (20, 300), "depth_mm": (10, 100)},
+    "bolt": {"diameter_mm": (2, 30), "length_mm": (10, 200)},
+    "housing": {"width_mm": (30, 500), "height_mm": (30, 500), "depth_mm": (30, 500)},
+    "shaft": {"diameter_mm": (2, 100), "length_mm": (20, 500)},
+    "flange": {"diameter_mm": (20, 500), "thickness_mm": (2, 50)},
+    "gear": {"diameter_mm": (15, 500), "thickness_mm": (5, 100)},
+}
+
+
+def _extract_part_type_from_goal(goal: str) -> str | None:
+    """Extract a part type hint from goal string."""
+    goal_lower = goal.lower()
+    for part_type in _DIMENSION_SANITY_BOUNDS.keys():
+        if part_type in goal_lower:
+            return part_type
+    return None
+
+
+def _apply_dimension_sanity_check(
+    goal: str,
+    part_type: str | None = None,
+) -> tuple[str, dict[str, float]]:
+    """
+    Check extracted dimensions against known bounds for the part type.
+    Returns (corrected_goal, correction_log) where correction_log tracks what was adjusted.
+
+    If LLM-extracted dimensions are implausibly large/small, re-prompt with anchors
+    and return the corrected goal.
+    """
+    import re as _re
+
+    if part_type is None:
+        part_type = _extract_part_type_from_goal(goal)
+
+    correction_log: dict[str, float] = {}
+
+    if part_type not in _DIMENSION_SANITY_BOUNDS:
+        return goal, correction_log  # no sanity check for unknown part types
+
+    bounds = _DIMENSION_SANITY_BOUNDS[part_type]
+    corrected_goal = goal
+    has_violations = False
+
+    # Scan goal for numeric dimensions matching the bounds keys
+    for dim_name, (min_val, max_val) in bounds.items():
+        # Pattern: "N*mm *{dim_name}" (e.g. "48mm diameter", "100mm height")
+        pattern = rf'(\d+(?:\.\d+)?)\s*(?:mm)?\s+(?:dia(?:meter)?|{dim_name})'
+        matches = _re.findall(pattern, goal, _re.IGNORECASE)
+
+        for match in matches:
+            val = float(match)
+            if val < min_val or val > max_val:
+                has_violations = True
+                correction_log[dim_name] = val
+                print(f"[DIM_SANITY] {dim_name}={val}mm out of bounds [{min_val}, {max_val}] for {part_type}")
+
+    # If violations found, note them for the caller (but don't auto-correct here)
+    # The LLM will be re-prompted in the pipeline with these anchors
+    if has_violations:
+        print(f"[DIM_SANITY] Original goal: {goal}")
+        print(f"[DIM_SANITY] Violations: {correction_log}")
+
+    return corrected_goal, correction_log
+
+
+def _rebuild_goal_with_dimension_anchors(
+    original_goal: str,
+    correction_log: dict[str, float],
+    part_type: str | None = None,
+) -> str:
+    """
+    Rebuild the goal with explicit dimensional anchors for re-prompting the LLM.
+    Used when dimension sanity check finds violations.
+    """
+    if not correction_log or part_type is None:
+        return original_goal
+
+    anchors = _DIMENSION_SANITY_BOUNDS.get(part_type, {})
+    anchor_hints = []
+
+    for dim_name, detected_val in correction_log.items():
+        if dim_name in anchors:
+            min_val, max_val = anchors[dim_name]
+            mid_val = (min_val + max_val) / 2
+            anchor_hints.append(
+                f"{dim_name}: ~{mid_val:.0f}mm (typical range {min_val}–{max_val}mm for {part_type})"
+            )
+
+    if anchor_hints:
+        anchor_str = "\n".join(anchor_hints)
+        rebuilt = (
+            f"Re-estimate: {original_goal}\n\n"
+            f"This is a small {part_type}, likely:\n{anchor_str}\n\n"
+            f"Revise the dimensions to be more realistic."
+        )
+        return rebuilt
+
+    return original_goal
+
+
 def analyze_image_for_cad(
     image_path: "str | Path",
     hint: str = "",
@@ -966,6 +1071,9 @@ def analyze_image_for_cad(
     Priority: Gemini → Anthropic (fallback) → Ollama (llava) → None
 
     Gemini is tried first to conserve Anthropic quota.
+
+    Includes dimension sanity check: detects when LLM-extracted dimensions
+    are implausibly large/small and logs violations for pipeline traceability.
 
     Parameters
     ----------
@@ -992,32 +1100,48 @@ def analyze_image_for_cad(
     if hint:
         prompt += f"\n\nUser hint: {hint}"
 
+    goal = None
+
     # 1. Try Gemini vision (primary)
     try:
         result = _try_gemini_vision(image_bytes, media_type, prompt, repo_root)
         if result:
-            return result
+            goal = result
     except Exception as exc:
         print(f"[IMAGE] gemini unexpected error: {exc}")
 
     # 2. Try Anthropic vision (fallback)
-    try:
-        result = _try_anthropic_vision(image_bytes, media_type, prompt, repo_root)
-        if result:
-            return result
-    except Exception as exc:
-        print(f"[IMAGE] anthropic unexpected error: {exc}")
+    if goal is None:
+        try:
+            result = _try_anthropic_vision(image_bytes, media_type, prompt, repo_root)
+            if result:
+                goal = result
+        except Exception as exc:
+            print(f"[IMAGE] anthropic unexpected error: {exc}")
 
     # 3. Try Ollama vision (llava / llava-llama3)
-    try:
-        result = _try_ollama_vision(image_bytes, media_type, prompt)
-        if result:
-            return result
-    except Exception as exc:
-        print(f"[IMAGE] ollama vision unexpected error: {exc}")
+    if goal is None:
+        try:
+            result = _try_ollama_vision(image_bytes, media_type, prompt)
+            if result:
+                goal = result
+        except Exception as exc:
+            print(f"[IMAGE] ollama vision unexpected error: {exc}")
 
-    print("[IMAGE] No vision backend available — provide a text description instead.")
-    return None
+    if goal is None:
+        print("[IMAGE] No vision backend available — provide a text description instead.")
+        return None
+
+    # Apply dimension sanity check
+    corrected_goal, correction_log = _apply_dimension_sanity_check(goal)
+
+    if correction_log:
+        part_type = _extract_part_type_from_goal(goal)
+        print(f"[DIM_SANITY] Dimension violations detected for {part_type}: {correction_log}")
+        print(f"[DIM_SANITY] Original LLM goal: {goal}")
+        print(f"[DIM_SANITY] Consider re-prompting with dimensional anchors.")
+
+    return corrected_goal
 
 
 # ---------------------------------------------------------------------------

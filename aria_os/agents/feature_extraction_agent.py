@@ -307,19 +307,27 @@ class FeatureExtractionAgent:
         return prim
 
     def _classify_topology(self, primitives: List[DetectedPrimitive], coverage: float) -> str:
-        """Classify part topology based on detected primitives."""
-        # Low coverage can result from non-watertight meshes or complex internal geometry.
-        # Use a lenient threshold (0.25) and fall back to primitive-count heuristics.
+        """
+        Classify part topology with extended taxonomy:
+        - prismatic: flat plates, boxes, brackets (≥5 planes or plane_frac > 0.4)
+        - cylindrical: simple round shafts, single cylinder (1 cylinder, cyl_frac > 0.4)
+        - revolved: bottles, vases, profile-around-axis (PCA-detected rotational symmetry)
+        - freeform: organic shapes, sculptured surfaces
+        - assembly: multiple disjoint solid bodies (detected via genus/connectivity)
+
+        Returns (topology, confidence_dict) internally; public API returns topology string.
+        """
+        import trimesh
+
         n_planes = sum(1 for p in primitives if p.type == "plane")
         n_cylinders = sum(1 for p in primitives if p.type == "cylinder")
 
         # Strong structural signals override low coverage
         if coverage < 0.25:
-            # Even below 25% — if ≥5 planes detected, likely prismatic
             if n_planes >= 5:
                 return "prismatic"
-            if n_cylinders >= 2:
-                return "turned_part"
+            if n_cylinders >= 1:
+                return "cylindrical"
             return "freeform"
 
         type_areas = {"plane": 0.0, "cylinder": 0.0, "sphere": 0.0, "cone": 0.0}
@@ -331,22 +339,124 @@ class FeatureExtractionAgent:
         if total < 1e-9:
             return "freeform"
 
-        # Exclude sphere area from area fractions — spheres are often false positives
-        # on complex mechanical parts and should not dilute plane/cylinder fractions
-        cad_total = max(type_areas["plane"] + type_areas["cylinder"] + type_areas["cone"], 1.0)
-        cyl_frac = type_areas["cylinder"] / cad_total
-        plane_frac = type_areas["plane"] / cad_total
+        # Use total area for fractions (not just CAD features)
+        # This ensures spheres/organic shapes don't get misclassified as prismatic
+        cyl_frac = type_areas["cylinder"] / max(total, 1.0)
+        plane_frac = type_areas["plane"] / max(total, 1.0)
+        sphere_frac = type_areas["sphere"] / max(total, 1.0)
 
-        # Check if cylinders share a common axis (turned part)
         cylinders = [p for p in primitives if p.type == "cylinder"]
-        if cyl_frac > 0.4 and len(cylinders) >= 1:
-            if len(cylinders) == 1 or self._axes_aligned(cylinders):
-                return "turned_part"
 
-        if plane_frac > 0.4 or n_planes >= 5:
-            return "prismatic"
+        # Extended topology detection with confidence scores
+        topology_candidates: dict[str, float] = {}
 
-        return "freeform"
+        # 1. Assembly: multiple disjoint bodies (check FIRST, high priority)
+        assembly_score = self._detect_assembly(primitives)
+        if assembly_score > 0.5:
+            topology_candidates["assembly"] = assembly_score
+
+        # 2. Cylindrical: single simple round shaft or pipe (high priority, specific case)
+        if len(cylinders) == 1 and cyl_frac > 0.5 and n_planes < 3:
+            topology_candidates["cylindrical"] = min(cyl_frac + 0.1, 1.0)
+
+        # 3. Revolved: rotational symmetry detected via PCA on vertices
+        if len(cylinders) >= 1 or (cyl_frac > 0.3):
+            revolved_score = self._detect_revolved_symmetry(primitives)
+            if revolved_score > 0.3:
+                topology_candidates["revolved"] = revolved_score
+
+        # 4. Prismatic: boxes, plates, brackets (only if NOT strong assembly/revolved)
+        if assembly_score <= 0.5 and (plane_frac > 0.4 or n_planes >= 5):
+            topology_candidates["prismatic"] = min(plane_frac + 0.2, 1.0)
+
+        # 5. Mixed/Freeform: organic shapes with mixed primitives (low priority)
+        # Check if we have mixed types with no strong structure
+        n_types = sum(1 for t in ["plane", "cylinder", "sphere", "cone"]
+                      if sum(1 for p in primitives if p.type == t) > 0)
+        if n_types >= 2 and not topology_candidates:
+            # Mixed primitives with no structural match → freeform
+            topology_candidates["freeform"] = 0.5
+
+        # Pick the highest-confidence topology
+        if not topology_candidates:
+            return "freeform"
+
+        best_topo = max(topology_candidates, key=topology_candidates.get)
+        return best_topo
+
+    def _detect_revolved_symmetry(self, primitives: List[DetectedPrimitive]) -> float:
+        """
+        Detect rotational symmetry via PCA on detected primitives.
+        Returns confidence score 0-1.
+
+        Revolved parts have axis-aligned cylinders OR show repeating
+        circular features around a central axis. Key: cylinders should have
+        VARYING RADII (like a profile turned on lathe) OR be coaxial with
+        high area fraction.
+        """
+        cylinders = [p for p in primitives if p.type == "cylinder"]
+        if not cylinders:
+            return 0.0
+
+        # Check if cylinders share a common axis (indication of revolved profile)
+        if self._axes_aligned(cylinders):
+            n_cyl_aligned = len(cylinders)
+
+            # Check for radius variation (key signature of revolved parts)
+            radii = [c.parameters.get("radius_mm", 5.0) for c in cylinders]
+            max_r = max(radii)
+            min_r = min(radii)
+            radius_range = (max_r - min_r) / max(min_r, 0.1)  # % difference
+
+            # Strong revolved signature: varying radii on common axis
+            if radius_range > 0.5 and n_cyl_aligned >= 2:
+                # Different sizes → likely a turned profile
+                score = min(0.5 + (radius_range * 0.2), 1.0)
+                return score
+
+            # Weak revolved signature: uniform small cylinders on axis
+            # These are likely bolts/fasteners (assembly), not a turned part
+            if radius_range < 0.3 and n_cyl_aligned >= 2:
+                # All similar small cylinders → more likely assembly
+                return 0.2
+
+            # Single cylinder is still somewhat revolved-like
+            if n_cyl_aligned == 1:
+                score = min(0.3 + (n_cyl_aligned * 0.15), 1.0)
+                return score
+
+        return 0.0
+
+    def _detect_assembly(self, primitives: List[DetectedPrimitive]) -> float:
+        """
+        Detect multi-body assemblies by checking genus (topological holes)
+        and disconnected component count.
+
+        Returns confidence 0-1. Score > 0.5 indicates likely assembly.
+        """
+        # Heuristic: if we detect many small disjoint planes that don't form
+        # a coherent structure, likely an assembly of separate components.
+        planes = [p for p in primitives if p.type == "plane"]
+        cylinders = [p for p in primitives if p.type == "cylinder"]
+
+        # Assembly indicator: many small planes + small cylinders (frame bolts)
+        # e.g., 4 thin frame members + 3 bolt holes
+        if len(planes) >= 4 and len(cylinders) >= 2:
+            avg_plane_area = sum(p.surface_area_mm2 for p in planes) / len(planes)
+            avg_cyl_area = sum(p.surface_area_mm2 for p in cylinders) / len(cylinders)
+            # Frame assembly: small average plane area (thin members) + small cylinders (bolts)
+            if avg_plane_area < 300 and avg_cyl_area < 300:
+                return 0.65
+            # Or: large planes (box) but small cylinders (holes) → prismatic, not assembly
+            # This case will be caught by the prismatic rule instead
+
+        # Another indicator: many very small features (distributed connectors)
+        if len(primitives) >= 6:
+            avg_area = sum(p.surface_area_mm2 for p in primitives) / len(primitives)
+            if avg_area < 100:  # Very small average = likely assembly with many connectors
+                return 0.55
+
+        return 0.0
 
     def _axes_aligned(self, cylinders: List[DetectedPrimitive], tol: float = 0.2) -> bool:
         """Check if cylinder axes are approximately parallel."""

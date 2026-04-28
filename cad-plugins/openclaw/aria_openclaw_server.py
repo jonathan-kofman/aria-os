@@ -336,6 +336,68 @@ def _op_list_machines(_p: dict) -> dict:
         return {"ok": True, "machines": [asdict(m) for m in _machines.values()]}
 
 
+def _op_camera_frame(p: dict) -> dict:
+    """Return a single frame from the machine's camera as base64 JPEG.
+
+    Source priority:
+        1. Real camera via cv2 if installed AND ARIA_OPENCLAW_CAMERA_INDEX set.
+        2. Canned-frames directory: ARIA_OPENCLAW_CAMERA_DIR — picks the
+           next file in alphabetical order (good for demo loops).
+        3. Falls back to a 1x1 black PNG with note="no camera".
+
+    Used by closed_loop_demo.py to attach a per-phase frame to the
+    timeline for the YC video.
+    """
+    import base64
+    import os
+    job_id = p.get("job_id")
+    machine_id = p.get("machine_id", "printer-1")
+    # Path 1: real cv2 capture
+    cam_idx = os.environ.get("ARIA_OPENCLAW_CAMERA_INDEX")
+    if cam_idx is not None:
+        try:
+            import cv2  # type: ignore
+            cap = cv2.VideoCapture(int(cam_idx))
+            ok, frame = cap.read()
+            cap.release()
+            if ok and frame is not None:
+                _, buf = cv2.imencode(".jpg", frame)
+                return {"ok": True, "kind": "cameraFrame",
+                        "machine_id": machine_id, "job_id": job_id,
+                        "source": "cv2",
+                        "frame_b64": base64.b64encode(
+                            buf.tobytes()).decode("ascii"),
+                        "fmt": "image/jpeg"}
+        except Exception as ex:
+            return {"ok": False, "error": f"cv2 capture failed: {ex}"}
+    # Path 2: canned frames directory
+    cam_dir = os.environ.get("ARIA_OPENCLAW_CAMERA_DIR")
+    if cam_dir and Path(cam_dir).is_dir():
+        frames = sorted(Path(cam_dir).glob("*.jpg")) + \
+                  sorted(Path(cam_dir).glob("*.png"))
+        if frames:
+            # Round-robin via job-id hash so successive calls in a job
+            # see different frames.
+            idx_seed = (hash(job_id or machine_id) % len(frames))
+            picked = frames[idx_seed]
+            data = picked.read_bytes()
+            mime = "image/jpeg" if picked.suffix.lower() == ".jpg" else "image/png"
+            return {"ok": True, "kind": "cameraFrame",
+                    "machine_id": machine_id, "job_id": job_id,
+                    "source": f"canned:{picked.name}",
+                    "frame_b64": base64.b64encode(data).decode("ascii"),
+                    "fmt": mime}
+    # Path 3: 1x1 PNG fallback (so the dashboard always has SOMETHING).
+    BLACK_1x1_PNG_B64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNg"
+        "+M9QDwAEhgGAhKmMIQAAAABJRU5ErkJggg==")
+    return {"ok": True, "kind": "cameraFrame",
+            "machine_id": machine_id, "job_id": job_id,
+            "source": "none", "note": "no camera configured",
+            "frame_b64": BLACK_1x1_PNG_B64,
+            "fmt": "image/png"}
+
+
 _OP_ALIASES = {
     "submit":         "submitJob",
     "submitPrint":    "submitJob",
@@ -347,6 +409,9 @@ _OP_ALIASES = {
     "home":           "homeAxes",
     "verify":         "runVisualCheck",
     "machines":       "listMachines",
+    "camera":         "cameraFrame",
+    "frame":          "cameraFrame",
+    "snapshot":       "cameraFrame",
 }
 
 _OPS = {
@@ -357,6 +422,7 @@ _OPS = {
     "homeAxes":        _op_home_axes,
     "runVisualCheck":  _op_run_visual_check,
     "listMachines":    _op_list_machines,
+    "cameraFrame":     _op_camera_frame,
 }
 
 

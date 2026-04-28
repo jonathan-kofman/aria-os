@@ -1254,7 +1254,7 @@ def main():
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "--cam":
         if len(sys.argv) < 3:
-            print("Usage: python run_aria_os.py --cam <step_file> [--material aluminium_6061] [--machine generic_vmc]")
+            print("Usage: python run_aria_os.py --cam <step_file> [--material aluminium_6061] [--machine generic_vmc] [--synthetic-only]")
             sys.exit(1)
         step_arg = sys.argv[2]
         mat = "aluminium_6061"
@@ -1263,8 +1263,53 @@ def main():
         machine = "generic_vmc"
         if "--machine" in sys.argv:
             machine = sys.argv[sys.argv.index("--machine") + 1]
-        from aria_os.agents.cam_agent import run_cam_agent
-        run_cam_agent(step_arg, material=mat, machine=machine, repo_root=ROOT)
+        synthetic_only = "--synthetic-only" in sys.argv
+
+        # New: Try autonomous CAM pipeline with synthetic fallback
+        from aria_os.cam.autonomous_cam_contract import dispatch_autonomous_cam, GenerateToolpathOp
+        from pathlib import Path
+
+        step_path = Path(step_arg)
+        if not step_path.exists():
+            print(f"[CAM] ERROR: STEP file not found: {step_path}")
+            sys.exit(1)
+
+        out_dir = ROOT / "outputs" / "cam" / step_path.stem
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        op = GenerateToolpathOp(
+            step_path=step_path,
+            stock_oversize_mm=5.0,
+            tool_diameter_mm=6.0,
+            feed_mm_min=200.0,
+            spindle_rpm=3000,
+            operation="facing",
+            post_processor="fanuc",
+            output_path=out_dir,
+        )
+
+        print(f"[CAM] Autonomous CAM pipeline starting...")
+        print(f"[CAM] Part: {step_path.stem}")
+        print(f"[CAM] Material: {mat}")
+        print(f"[CAM] Machine: {machine}")
+        print(f"[CAM] Output: {out_dir}")
+
+        import asyncio
+        result = asyncio.run(dispatch_autonomous_cam(op))
+
+        if result.ok:
+            print(f"[CAM] ✓ CAM generation complete")
+            print(f"[CAM] G-code: {result.gcode_path}")
+            print(f"[CAM] Operations: {result.operations_count}")
+            print(f"[CAM] Estimated time: {result.estimated_time_min:.1f} min")
+            print(f"[CAM] Tools: {len(result.tool_list)}")
+            print(f"[CAM] Renders:")
+            for view_type, img_path in result.rendered_images.items():
+                print(f"[CAM]   {view_type}: {img_path}")
+            print(f"[CAM] Method: {result.method} ({result.cad_name})")
+        else:
+            print(f"[CAM] ✗ CAM generation failed: {result.error}")
+            sys.exit(1)
         return
 
     if len(sys.argv) >= 2 and sys.argv[1] == "--setup":

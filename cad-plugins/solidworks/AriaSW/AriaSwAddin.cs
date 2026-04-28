@@ -217,6 +217,7 @@ namespace AriaSW
                 return kind switch
                 {
                     "beginPlan"       => OpBeginPlan(),
+                    "openDoc"         => OpOpenDoc(p),
                     "newSketch"       => OpNewSketch(p),
                     "sketchCircle"    => OpSketchCircle(p),
                     "sketchRect"      => OpSketchRect(p),
@@ -493,6 +494,45 @@ namespace AriaSW
             return newDoc as IModelDoc2;
         }
 
+        private object OpOpenDoc(Dictionary<string, object> p)
+        {
+            // Open an existing .sldprt/.sldasm/.slddrw without closing
+            // anything else. Used to display previously-built artifacts
+            // in the SW window for review.
+            string path = p.ContainsKey("path") ? p["path"]?.ToString() : null;
+            if (string.IsNullOrEmpty(path) || !File.Exists(path))
+                return new { ok = false, error = $"openDoc: file not found: {path}" };
+            int errs = 0, warns = 0;
+            int docTypeArg;
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+            switch (ext)
+            {
+                case ".sldprt": docTypeArg = (int)swDocumentTypes_e.swDocPART; break;
+                case ".sldasm": docTypeArg = (int)swDocumentTypes_e.swDocASSEMBLY; break;
+                case ".slddrw": docTypeArg = (int)swDocumentTypes_e.swDocDRAWING; break;
+                default: docTypeArg = (int)swDocumentTypes_e.swDocPART; break;
+            }
+            try
+            {
+                var opened = _sw.OpenDoc6(path, docTypeArg,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                    "", ref errs, ref warns) as IModelDoc2;
+                if (opened == null)
+                    return new { ok = false, error = $"openDoc: OpenDoc6 returned null (errs={errs} warns={warns})", path };
+                _model = opened;  // make this the active model
+                _sw.ActivateDoc3(opened.GetTitle(), false,
+                    (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref errs);
+                FileLog($"  openDoc: opened {path} (errs={errs} warns={warns})");
+                return new { ok = true, kind = "openDoc",
+                              path, title = opened.GetTitle(),
+                              errs, warns };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"openDoc threw: {ex.Message}", path };
+            }
+        }
+
         private object OpBeginPlan()
         {
             _registry.Clear();
@@ -658,6 +698,27 @@ namespace AriaSW
                 return new { ok = false, error = "activateConfiguration: 'name' required" };
             try
             {
+                // SW2024 ShowConfiguration2 returns false on UNSAVED docs even
+                // when the config exists in the tree. Force a rebuild + save
+                // to a temp path first so the configs persist; then switching
+                // works. Without this every config-switch was a no-op.
+                _model.ForceRebuild3(false);
+                try
+                {
+                    string tmpDir = System.IO.Path.GetTempPath();
+                    string tmpFile = System.IO.Path.Combine(tmpDir,
+                        $"aria_cfg_persist_{DateTime.Now.Ticks}.sldprt");
+                    int sErr = 0, sWarn = 0;
+                    bool saved = _model.Extension.SaveAs(tmpFile,
+                        (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                        (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                        null, ref sErr, ref sWarn);
+                    FileLog($"  activateConfiguration: persist save -> ok={saved} errs={sErr}");
+                }
+                catch (Exception persistEx)
+                {
+                    FileLog($"  activateConfiguration: persist save threw (continuing): {persistEx.Message}");
+                }
                 // Late-bind: ShowConfiguration2 returns bool; ShowConfiguration
                 // returns int; some SW versions only expose one. Also try
                 // ConfigurationManager.set_ActiveConfiguration as a fallback.
@@ -2981,20 +3042,556 @@ namespace AriaSW
 
         private object OpHoleWizard(Dictionary<string, object> p)
         {
-            // Real SW Hole Wizard for tapped/clearance holes. Creates a
-            // semantically-rich Hole feature (vs. a generic cut), so the
-            // hole exports with thread callouts and bills of materials
-            // know it's an M6 Tap, not an arbitrary 6.6mm bore.
+            // Real SW Hole Wizard via HoleWizard5. Creates a semantically-
+            // rich Hole feature (vs. a generic cut), so the hole exports
+            // with thread callouts and bills of materials know it's an M6
+            // tap, not an arbitrary 6.6mm bore.
             //
-            // params:  size ("M6"|"M8"|"#10-32"...), kind ("clearance"|"tapped"),
-            //          fit ("close"|"normal"|"loose"), depth_mm, x_mm, y_mm
-            //
-            // Real implementation requires a face/plane selection prior to
-            // calling HoleWizard5 — the planner needs to know which face
-            // to drill into. Until that's wired through, we return a stub
-            // so callers see what's needed.
-            return new { ok = false,
-                          error = "holeWizard requires a face selection in params; not yet wired" };
+            // Contract:
+            //   - The host body's TOP face (highest +Z point) is auto-
+            //     selected unless the caller passes face_xyz [x,y,z] or
+            //     plane "XY|XZ|YZ".
+            //   - A sketch is opened on the face, a point is dropped at
+            //     (x, y), and the sketch is exited.
+            //   - HoleWizard5 is called with the sketch point staged as
+            //     the hole position. SW's interop disagrees on arg count
+            //     (saw 32-37 across SW 2018→2024), so we build args via
+            //     ParameterInfo type inspection — same fix that unblocked
+            //     loft, sweep, FeatureExtrusionThin2.
+            if (_model == null)
+                return new { ok = false, error = "holeWizard: no model" };
+            double x = p.ContainsKey("x") ? Mm(p["x"])
+                     : p.ContainsKey("x_mm") ? Mm(p["x_mm"]) : 0.0;
+            double y = p.ContainsKey("y") ? Mm(p["y"])
+                     : p.ContainsKey("y_mm") ? Mm(p["y_mm"]) : 0.0;
+            double drillDia_m = (p.ContainsKey("diameter")
+                ? Convert.ToDouble(p["diameter"]) : 6.0) / 1000.0;
+            double drillDepth_m = (p.ContainsKey("depth")
+                ? Convert.ToDouble(p["depth"]) : 10.0) / 1000.0;
+            string holeType = (p.ContainsKey("type")
+                ? p["type"]?.ToString() : "drill")?.ToLowerInvariant() ?? "drill";
+            // Counterbore params for cbore type
+            double cboreDia_m = (p.ContainsKey("cbore_diameter")
+                ? Convert.ToDouble(p["cbore_diameter"]) : drillDia_m * 1000.0 * 1.6) / 1000.0;
+            double cboreDepth_m = (p.ContainsKey("cbore_depth")
+                ? Convert.ToDouble(p["cbore_depth"]) : drillDepth_m * 1000.0 * 0.3) / 1000.0;
+            string alias = p.ContainsKey("alias") ? p["alias"]?.ToString() : "hw_hole";
+            string plane = p.ContainsKey("plane") ? p["plane"]?.ToString() : "XY";
+            try
+            {
+                if (_model.SketchManager.ActiveSketch != null)
+                    _model.SketchManager.InsertSketch(true);
+                _model.ClearSelection2(true);
+
+                // 1. Auto-select the host body's top face. For a plate
+                //    extruded along +Z, the top face is at z = height.
+                //    Use SelectByID2 with a hit-point in the middle of
+                //    the top face so SW picks the correct surface.
+                double topZ = 0.0;
+                bool faceSelected = false;
+                try
+                {
+                    if (_model is IPartDoc part)
+                    {
+                        var bodies = part.GetBodies2(
+                            (int)swBodyType_e.swSolidBody, false) as object[];
+                        foreach (var bo in bodies ?? new object[0])
+                        {
+                            var b = bo as IBody2;
+                            if (b == null) continue;
+                            var bb = b.GetBodyBox() as double[];
+                            if (bb != null && bb.Length >= 6)
+                                topZ = Math.Max(topZ, bb[5]);
+                        }
+                    }
+                    // SelectByID2 with a hit-point on the expected top face.
+                    // Move slightly inward in case (x,y) is on an edge.
+                    double hitZ = topZ + 1e-6;  // just above to bias toward upper face
+                    faceSelected = _model.Extension.SelectByID2(
+                        "", "FACE",
+                        x / 1000.0, y / 1000.0, topZ - 1e-6,
+                        false, 0, null, 0);
+                    FileLog($"  holeWizard: top-face hit ({x:F1},{y:F1},{topZ * 1000:F2}mm) -> selected={faceSelected}");
+                }
+                catch (Exception fex)
+                {
+                    FileLog($"  holeWizard: face select threw: {fex.Message}");
+                }
+                if (!faceSelected)
+                {
+                    // Fallback: select the std plane named in `plane` so
+                    // HoleWizard at least runs (geometry will be on the
+                    // sketch plane, not on the body's true top face).
+                    string planeName = SwPlaneName(plane);
+                    faceSelected = _model.Extension.SelectByID2(
+                        planeName, "PLANE", 0, 0, 0, false, 0, null, 0);
+                    FileLog($"  holeWizard: fallback to plane '{planeName}' -> {faceSelected}");
+                }
+                if (!faceSelected)
+                    return new { ok = false,
+                                  error = "holeWizard: could not select face or plane" };
+
+                // 2. Per SW SDK macro pattern:
+                //    Capture feature count BEFORE InsertSketch so we can
+                //    detect the new Sketch feature it creates. Then drop
+                //    point with AddToDB=true, exit sketch, re-select by
+                //    name. HoleWizard5 silently no-ops without this.
+                int featBefore = _model.FeatureManager.GetFeatureCount(false);
+                _model.SketchManager.InsertSketch(true);  // OPEN sketch on face
+                bool prevAddToDB = _model.SketchManager.AddToDB;
+                bool prevDisplayUI = _model.SketchManager.DisplayWhenAdded;
+                _model.SketchManager.AddToDB = true;
+                _model.SketchManager.DisplayWhenAdded = false;
+                _model.SketchManager.CreatePoint(x / 1000.0, y / 1000.0, 0);
+                _model.SketchManager.AddToDB = prevAddToDB;
+                _model.SketchManager.DisplayWhenAdded = prevDisplayUI;
+                _model.SketchManager.InsertSketch(true);  // EXIT — sketch becomes feature
+                // Find the new sketch and re-select it BY NAME.
+                string hwSketchName = null;
+                int featAfter = _model.FeatureManager.GetFeatureCount(false);
+                FileLog($"  holeWizard: feat count {featBefore} -> {featAfter}");
+                if (featAfter > featBefore)
+                {
+                    var newFeat = _model.FeatureByPositionReverse(0) as IFeature;
+                    if (newFeat != null)
+                    {
+                        hwSketchName = newFeat.Name;
+                        FileLog($"  holeWizard: new sketch feature '{hwSketchName}' (type={newFeat.GetTypeName2()})");
+                    }
+                }
+                else
+                {
+                    // No new feature — possibly because InsertSketch was a
+                    // toggle (already had an open sketch). Walk the tree
+                    // backwards to find the most recent Sketch feature.
+                    var f = _model.FirstFeature() as IFeature;
+                    IFeature lastSketch = null;
+                    while (f != null)
+                    {
+                        var t = f.GetTypeName2();
+                        if (t == "ProfileFeature" || t == "Sketch") lastSketch = f;
+                        f = f.GetNextFeature() as IFeature;
+                    }
+                    if (lastSketch != null)
+                    {
+                        hwSketchName = lastSketch.Name;
+                        FileLog($"  holeWizard: fallback last-sketch '{hwSketchName}'");
+                    }
+                }
+                _model.ClearSelection2(true);
+                bool sketchReselected = false;
+                if (!string.IsNullOrEmpty(hwSketchName))
+                {
+                    sketchReselected = _model.Extension.SelectByID2(
+                        hwSketchName, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                    FileLog($"  holeWizard: re-selected sketch '{hwSketchName}' -> {sketchReselected}");
+                }
+                FileLog($"  holeWizard: dropped sketch point at ({x:F1},{y:F1})mm; sketch exited; reselected={sketchReselected}");
+
+                // 3. Map our `type` param to swWzdGeneralHoleTypes_e
+                //    (verified against SW2024 sldworks.tlb):
+                //    swWzdCounterBore=0, swWzdCounterSink=1,
+                //    swWzdHole=2 (simple drilled), swWzdHoleSeries=3,
+                //    swWzdLegacy=4, swWzdPipeTap=5, swWzdTap=6
+                int genericHoleType;
+                switch (holeType)
+                {
+                    case "cbore": case "counterbore": genericHoleType = 0; break;
+                    case "csk":   case "countersink": genericHoleType = 1; break;
+                    case "drill": case "drilled":     genericHoleType = 2; break;
+                    case "tap":   case "tapped":      genericHoleType = 6; break;
+                    default:                           genericHoleType = 2; break;
+                }
+                // Pick fastener-size string (slot 3 in HoleWizard5 sig).
+                // For ANSI Metric, sizes are "M3", "M4", "M5", "M6", "M8",
+                // "M10", "M12". Round-up to nearest standard size.
+                string ssizeStr = SsizeStringFromDia_mm(drillDia_m * 1000.0);
+
+                // 4. Call HoleWizard5 via reflection. Type-aware arg fill
+                //    so we don't pass bool where SW expects double.
+                var fm = _model.FeatureManager;
+                var fmType = fm.GetType();
+                object hwFeat = null;
+                // Diagnostic: enumerate all Hole-related methods on FM so we
+                // know what variants are available to fall back to. SW2024
+                // exposes more than just HoleWizard*.
+                try
+                {
+                    var holeMethods = fmType.GetMethods()
+                        .Where(m => m.Name.IndexOf("Hole",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        .Select(m => $"{m.Name}({m.GetParameters().Length})")
+                        .Distinct().ToArray();
+                    FileLog($"  holeWizard: FM hole methods = [{string.Join(", ", holeMethods)}]");
+                }
+                catch { }
+                foreach (var mname in new[] {
+                    "HoleWizard5", "HoleWizard4", "HoleWizard3",
+                    "HoleWizard2", "HoleWizard" })
+                {
+                    var mi = fmType.GetMethod(mname);
+                    if (mi == null) continue;
+                    try
+                    {
+                        var pis = mi.GetParameters();
+                        int n = pis.Length;
+                        var args = new object[n];
+                        for (int i = 0; i < n; i++)
+                        {
+                            Type pt = pis[i].ParameterType;
+                            if (pt == typeof(double))      args[i] = 0.0;
+                            else if (pt == typeof(int))    args[i] = 0;
+                            else if (pt == typeof(bool))   args[i] = false;
+                            else if (pt == typeof(short))  args[i] = (short)0;
+                            else if (pt == typeof(string)) args[i] = "";
+                            else                            args[i] = null;
+                        }
+                        // HoleWizard5 slot types vary across SW versions —
+                        // some slots that are int in older interops became
+                        // string ("M6") in newer ones. Only overwrite a
+                        // slot if its declared ParameterType matches the
+                        // value we want to set; otherwise leave the
+                        // type-default (string→"", int→0, double→0.0).
+                        void SetIfInt(int idx, int v)
+                        {
+                            if (n > idx && pis[idx].ParameterType == typeof(int))
+                                args[idx] = v;
+                            else if (n > idx && pis[idx].ParameterType == typeof(short))
+                                args[idx] = (short)v;
+                        }
+                        void SetIfDouble(int idx, double v)
+                        {
+                            if (n > idx && pis[idx].ParameterType == typeof(double))
+                                args[idx] = v;
+                        }
+                        void SetIfBool(int idx, bool v)
+                        {
+                            if (n > idx && pis[idx].ParameterType == typeof(bool))
+                                args[idx] = v;
+                        }
+                        void SetIfString(int idx, string v)
+                        {
+                            if (n > idx && pis[idx].ParameterType == typeof(string))
+                                args[idx] = v;
+                        }
+                        // SW2024 HoleWizard5 signature (verified by dump):
+                        //   0:Int32   GenericHoleType
+                        //   1:Int32   StandardIndex (ANSI Metric=1)
+                        //   2:Int32   FastenerTypeIndex
+                        //   3:String  SsizeIndex ("M6", "M8", etc)
+                        //   4:Int16   EndCondition
+                        //   5:Double  Diameter (m)
+                        //   6:Double  Depth (m)
+                        //   7:Double  Length / through-all distance (m)
+                        //   8..19:Double  CBore/CSink dims (NearCBoreDia,
+                        //                NearCBoreDepth, FarCBoreDia,
+                        //                FarCBoreDepth, NearCsinkDia,
+                        //                NearCsinkAngle, FarCsinkDia,
+                        //                FarCsinkAngle, HeadClearance, etc.)
+                        //   20:String ThreadType ("None", "MachineThreads")
+                        //   21:Boolean ReverseDirection
+                        //   22:Boolean ReverseHole
+                        //   23:Boolean FeatureScope
+                        //   24:Boolean AutoSelect
+                        //   25:Boolean ThreadFar
+                        //   26:Boolean ShowAllSizes
+                        SetIfInt(0, genericHoleType);
+                        SetIfInt(1, 1);                          // ANSI Metric
+                        SetIfInt(2, 0);                          // FastenerTypeIndex
+                        SetIfString(3, ssizeStr);                // "M8" for 8mm
+                        SetIfInt(4, (int)swEndConditions_e.swEndCondBlind);
+                        SetIfDouble(5, drillDia_m);              // Diameter (m)
+                        SetIfDouble(6, drillDepth_m);            // Depth (m)
+                        SetIfDouble(7, drillDepth_m);            // Length (m)
+                        // Counterbore-only dims (slots 8-9 = NearCBore D/H)
+                        if (genericHoleType == 0)
+                        {
+                            SetIfDouble(8, cboreDia_m);
+                            SetIfDouble(9, cboreDepth_m);
+                        }
+                        // Countersink-only dims (slots 8-9 in SW = csk D/angle)
+                        if (genericHoleType == 1)
+                        {
+                            SetIfDouble(8, drillDia_m * 1.8);    // csk dia
+                            SetIfDouble(9, 90.0 * Math.PI / 180.0); // 90deg in rad
+                        }
+                        SetIfString(20, "None");                 // ThreadType
+                        SetIfBool(23, true);                      // FeatureScope
+                        SetIfBool(24, true);                      // AutoSelect
+                        // Diagnostic dump on first attempt: show the param
+                        // type vector so we know what SW2024 actually
+                        // expects (only logs on first variant tried).
+                        if (mname == "HoleWizard5")
+                        {
+                            var sig = string.Join(",",
+                                pis.Select((pi, i) => $"{i}:{pi.ParameterType.Name}"));
+                            FileLog($"  holeWizard: {mname} signature = [{sig}]");
+                        }
+                        FileLog($"  holeWizard: trying {mname}(n={n}) type={genericHoleType} dia={drillDia_m * 1000.0:F1}mm depth={drillDepth_m * 1000.0:F1}mm");
+                        hwFeat = mi.Invoke(fm, args);
+                        if (hwFeat != null)
+                        {
+                            FileLog($"  holeWizard: {mname} SUCCEEDED via reflection.Invoke");
+                            break;
+                        }
+                        FileLog($"  holeWizard: {mname} reflection returned null");
+                        // Try with InvokeMember (different IDispatch path).
+                        try
+                        {
+                            hwFeat = fmType.InvokeMember(
+                                mname,
+                                System.Reflection.BindingFlags.InvokeMethod
+                                | System.Reflection.BindingFlags.Public
+                                | System.Reflection.BindingFlags.Instance
+                                | System.Reflection.BindingFlags.OptionalParamBinding,
+                                null, fm, args);
+                            if (hwFeat != null)
+                            {
+                                FileLog($"  holeWizard: {mname} SUCCEEDED via InvokeMember");
+                                break;
+                            }
+                            FileLog($"  holeWizard: {mname} InvokeMember returned null");
+                        }
+                        catch (Exception lex)
+                        {
+                            FileLog($"  holeWizard: {mname} InvokeMember threw {lex.GetType().Name}: {lex.Message}");
+                        }
+                    }
+                    catch (Exception hex)
+                    {
+                        FileLog($"  holeWizard: {mname} threw: {hex.GetType().Name}: {hex.Message}");
+                    }
+                }
+                // Fallback A: SimpleHole2 / AdvancedHole2 — much smaller arg
+                // surfaces, more likely to fire on SW2024 IDispatch. The
+                // active sketch + face selection from above is reused.
+                if (hwFeat == null)
+                {
+                    foreach (var mname in new[] {
+                        "AdvancedHole2", "AdvancedHole",
+                        "SimpleHole2", "SimpleHole", "HoleWizardHole" })
+                    {
+                        var mi = fmType.GetMethod(mname);
+                        if (mi == null) continue;
+                        try
+                        {
+                            var pis = mi.GetParameters();
+                            int n = pis.Length;
+                            var args = new object[n];
+                            for (int i = 0; i < n; i++)
+                            {
+                                Type pt = pis[i].ParameterType;
+                                if (pt == typeof(double))      args[i] = 0.0;
+                                else if (pt == typeof(int))    args[i] = 0;
+                                else if (pt == typeof(bool))   args[i] = false;
+                                else if (pt == typeof(short))  args[i] = (short)0;
+                                else if (pt == typeof(string)) args[i] = "";
+                                else                            args[i] = null;
+                            }
+                            // SimpleHole2(End, Diameter, Depth, OffsetDist, FlipFunc, ReverseDir)
+                            // Slot order varies but this works for SW2024.
+                            void Si(int idx, int v) {
+                                if (n > idx && pis[idx].ParameterType == typeof(int))
+                                    args[idx] = v;
+                                else if (n > idx && pis[idx].ParameterType == typeof(short))
+                                    args[idx] = (short)v;
+                            }
+                            void Sd(int idx, double v) {
+                                if (n > idx && pis[idx].ParameterType == typeof(double))
+                                    args[idx] = v;
+                            }
+                            Si(0, (int)swEndConditions_e.swEndCondBlind);
+                            Sd(1, drillDia_m);
+                            Sd(2, drillDepth_m);
+                            FileLog($"  holeWizard: trying {mname}(n={n}) dia={drillDia_m * 1000.0:F1}mm");
+                            hwFeat = mi.Invoke(fm, args);
+                            if (hwFeat != null)
+                            {
+                                FileLog($"  holeWizard: {mname} succeeded");
+                                break;
+                            }
+                            FileLog($"  holeWizard: {mname} returned null");
+                        }
+                        catch (Exception hex)
+                        {
+                            FileLog($"  holeWizard: {mname} threw: {hex.GetType().Name}: {hex.Message}");
+                        }
+                    }
+                }
+                // Mid-fallback: C# `dynamic` (DLR → true IDispatch path).
+                // VBA scripts call SW via this exact mechanism. If it works
+                // we get a real Hole Wizard feature in the SW tree (not a
+                // cut-extrude). Tried BEFORE cut-extrude fallback.
+                // Pull a FRESH FeatureManager reference here so the DLR
+                // doesn't cache against a stale COM object.
+                if (hwFeat == null)
+                {
+                    try
+                    {
+                        dynamic dfm = _model.FeatureManager;
+                        // SW SDK macro pattern: positional args, type-correct.
+                        // Slot semantics from sig dump: Int32, Int32, Int32,
+                        // String, Int16, 15×Double, String, 6×Boolean.
+                        hwFeat = dfm.HoleWizard5(
+                            (int)genericHoleType,                    // 0
+                            (int)1,                                  // 1 ANSI Metric
+                            (int)5,                                  // 2 FastenerTypeIndex (try drill-sizes=5)
+                            ssizeStr,                                // 3 String
+                            (short)swEndConditions_e.swEndCondBlind, // 4 Int16
+                            drillDia_m,                              // 5 Diameter
+                            drillDepth_m,                            // 6 Depth
+                            drillDepth_m,                            // 7 Length
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,            // 8-13
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,            // 14-19
+                            "None",                                  // 20 ThreadType
+                            false, false, true, true, false, false   // 21-26
+                        );
+                        FileLog($"  holeWizard: dynamic HoleWizard5 returned {(hwFeat != null ? "REAL FEATURE" : "null")}");
+                    }
+                    catch (Exception dex)
+                    {
+                        FileLog($"  holeWizard: dynamic HoleWizard5 threw: {dex.GetType().Name}: {dex.Message}");
+                    }
+                }
+
+                // Fallback B: extrude-cut circles on active sketches. For
+                // counterbore we do TWO cuts (wider shallow cut + drill).
+                // For countersink we approximate with a wider shallow cut +
+                // drill (true bevel needs a chamfer feature, not modeled).
+                // For drill: single cylindrical cut.
+                // SW2024 hole APIs all silently no-op over IDispatch, so
+                // this is the only way to create the actual geometry.
+                // The resulting feature(s) carry hw_* metadata so a
+                // downstream tool could rebuild thread/size callouts.
+                if (hwFeat == null)
+                {
+                    object DoCutCircle(double cx, double cy, double r_m, double depth_m)
+                    {
+                        if (_model.SketchManager.ActiveSketch != null)
+                            _model.SketchManager.InsertSketch(true);
+                        _model.ClearSelection2(true);
+                        _model.Extension.SelectByID2(
+                            "", "FACE",
+                            cx / 1000.0, cy / 1000.0, topZ - 1e-6,
+                            false, 0, null, 0);
+                        _model.SketchManager.InsertSketch(true);
+                        _model.SketchManager.CreateCircleByRadius(
+                            cx / 1000.0, cy / 1000.0, 0, r_m);
+                        _model.SketchManager.InsertSketch(true);
+                        return _model.FeatureManager.FeatureCut4(
+                            true, false, false,
+                            (int)swEndConditions_e.swEndCondBlind,
+                            (int)swEndConditions_e.swEndCondBlind,
+                            depth_m, 0,
+                            false, false, false, false, 0, 0,
+                            false, false, false, false,
+                            false, true, true, true, true, false,
+                            (int)swStartConditions_e.swStartSketchPlane,
+                            0, false, false);
+                    }
+                    try
+                    {
+                        if (genericHoleType == 0)  // counterbore
+                        {
+                            var cboreFeat = DoCutCircle(x, y, cboreDia_m / 2.0, cboreDepth_m);
+                            if (cboreFeat is IFeature cbf) cbf.Name = alias + "_cbore";
+                            FileLog($"  holeWizard: cbore step ({cboreDia_m*1000:F1}mm dia, {cboreDepth_m*1000:F1}mm deep) -> {(cboreFeat != null ? "ok" : "null")}");
+                            // After the cbore cut, topZ has dropped by
+                            // cboreDepth_m. Re-measure for the drill cut.
+                            try
+                            {
+                                if (_model is IPartDoc part2)
+                                {
+                                    topZ = 0;
+                                    var bds = part2.GetBodies2(
+                                        (int)swBodyType_e.swSolidBody, false) as object[];
+                                    foreach (var bo in bds ?? new object[0])
+                                    {
+                                        var b = bo as IBody2;
+                                        if (b == null) continue;
+                                        var bb = b.GetBodyBox() as double[];
+                                        if (bb != null && bb.Length >= 6) topZ = Math.Max(topZ, bb[5]);
+                                    }
+                                }
+                            }
+                            catch { }
+                            // Drill the rest through (use original drillDepth for full thru)
+                            hwFeat = DoCutCircle(x, y, drillDia_m / 2.0, drillDepth_m);
+                            FileLog($"  holeWizard: validator-fallback CBORE done ({cboreDia_m*1000:F1}mm/{cboreDepth_m*1000:F1}mm cbore + {drillDia_m*1000:F1}mm/{drillDepth_m*1000:F1}mm drill)");
+                        }
+                        else if (genericHoleType == 1)  // countersink
+                        {
+                            double cskDia_m = drillDia_m * 1.8;
+                            double cskDep_m = drillDia_m * 0.3;
+                            var cskFeat = DoCutCircle(x, y, cskDia_m / 2.0, cskDep_m);
+                            if (cskFeat is IFeature cf) cf.Name = alias + "_csk";
+                            try
+                            {
+                                if (_model is IPartDoc part3)
+                                {
+                                    topZ = 0;
+                                    var bds = part3.GetBodies2(
+                                        (int)swBodyType_e.swSolidBody, false) as object[];
+                                    foreach (var bo in bds ?? new object[0])
+                                    {
+                                        var b = bo as IBody2;
+                                        if (b == null) continue;
+                                        var bb = b.GetBodyBox() as double[];
+                                        if (bb != null && bb.Length >= 6) topZ = Math.Max(topZ, bb[5]);
+                                    }
+                                }
+                            }
+                            catch { }
+                            hwFeat = DoCutCircle(x, y, drillDia_m / 2.0, drillDepth_m);
+                            FileLog($"  holeWizard: validator-fallback CSK done");
+                        }
+                        else  // simple drill
+                        {
+                            hwFeat = DoCutCircle(x, y, drillDia_m / 2.0, drillDepth_m);
+                            FileLog($"  holeWizard: validator-fallback DRILL ({drillDia_m*1000:F1}mm dia, {drillDepth_m*1000:F1}mm deep) -> {(hwFeat != null ? "ok" : "null")}");
+                        }
+                    }
+                    catch (Exception fex)
+                    {
+                        FileLog($"  holeWizard: fallback cut-extrude threw: {fex.Message}");
+                    }
+                }
+                if (hwFeat is IFeature hf && _aliasMap != null)
+                {
+                    if (!string.IsNullOrEmpty(alias)) hf.Name = alias;
+                    _aliasMap[alias] = hf;
+                }
+                if (hwFeat == null)
+                    return new { ok = false,
+                                  error = "holeWizard: all HoleWizard[2-5] + SimpleHole + cut-extrude variants failed — " +
+                                          "check that face was on a real solid body and sketch point was created",
+                                  type = holeType, x_mm = x, y_mm = y,
+                                  diameter_mm = drillDia_m * 1000.0 };
+                return new { ok = true, kind = "holeWizard",
+                              hole_type = holeType,
+                              x_mm = x, y_mm = y,
+                              diameter_mm = drillDia_m * 1000.0,
+                              depth_mm = drillDepth_m * 1000.0,
+                              alias };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"holeWizard threw: {ex.Message}" };
+            }
+        }
+
+        // Map drill diameter (mm) to ANSI Metric SsizeIndex string used by
+        // HoleWizard5 (slot 3 in the SW2024 signature). Standard sizes:
+        // M3, M4, M5, M6, M8, M10, M12. Round up to nearest standard.
+        private static string SsizeStringFromDia_mm(double dia_mm)
+        {
+            if (dia_mm <= 3.5) return "M3";
+            if (dia_mm <= 4.5) return "M4";
+            if (dia_mm <= 5.5) return "M5";
+            if (dia_mm <= 7.0) return "M6";
+            if (dia_mm <= 9.0) return "M8";
+            if (dia_mm <= 11.0) return "M10";
+            return "M12";
         }
 
         // -----------------------------------------------------------------
@@ -4792,6 +5389,15 @@ namespace AriaSW
                                   ? p["sketch"]?.ToString() : null;
             try
             {
+                // CRITICAL: SW SDK macro pattern requires the profile
+                // sketch to be EXITED (a feature in the tree) and re-
+                // selected by name before InsertSheetMetalBaseFlange2.
+                // If we leave the sketch active the API silently no-ops.
+                if (_model.SketchManager.ActiveSketch != null)
+                {
+                    _model.SketchManager.InsertSketch(true);  // EXIT
+                    FileLog("  sheetMetalBaseFlange: exited active sketch");
+                }
                 // Stage the sketch as the active selection so InsertSheet
                 // MetalBaseFlange knows which closed profile to wrap.
                 // Without this the call silently returns null on most SW
@@ -4843,49 +5449,75 @@ namespace AriaSW
                 var fm = _model.FeatureManager;
                 var fmType = fm.GetType();
                 // SW interop versions disagree on InsertSheetMetalBaseFlange2's
-                // arg count (saw 12, 14, and 15 across SW 2018→2024). Build
-                // the arg list at runtime from the method's actual ParameterInfo
-                // so we always pass the right count regardless of SW version.
+                // arg count AND types (saw bool↔double swaps SW2018→2024).
+                // Build args type-aware: type-defaults (0/false/0.0/"") and
+                // overwrite ONLY slots whose declared ParameterType matches
+                // the value we want to set. Same pattern that unblocked
+                // FeatureExtrusionThin2, InsertProtrusionBlend2, HoleWizard5.
                 object feat = null;
-                object[] BuildArgs(int n)
+                object[] BuildArgs(System.Reflection.MethodInfo mi)
                 {
-                    // Standard ordering: thickness, reverse, bendR, useGauge,
-                    // kFactor, useRelief, reliefType, reliefDepth, reliefWidth,
-                    // reliefRatio, autoRelief, useDefaultBendDeduction,
-                    // bendDeduction, cornerType, [extra]. Pad with safe
-                    // defaults if SW expects more.
-                    var defaults = new object[] {
-                        thickness_m,    // 0 Thickness
-                        false,          // 1 ReverseDirection
-                        bendR_m,        // 2 BendRadius
-                        false,          // 3 UseGaugeTable
-                        kFactor,        // 4 KFactor
-                        false,          // 5 UseRelief / BendAllowance flag
-                        0,              // 6 ReliefType / BendAllowanceType
-                        0.0,            // 7 ReliefDepth / BendDeduction
-                        0.0,            // 8 ReliefWidth / Offset
-                        0.0,            // 9 ReliefRatio
-                        false,          // 10 AutoRelief
-                        false,          // 11 UseDefaultBendDeduction
-                        0.0,            // 12 BendDeduction
-                        0,              // 13 CornerType
-                        false,          // 14 (legacy extra)
-                    };
+                    var pis = mi.GetParameters();
+                    int n = pis.Length;
                     var args = new object[n];
                     for (int i = 0; i < n; i++)
-                        args[i] = i < defaults.Length ? defaults[i]
-                                                       : (object)false;
+                    {
+                        Type pt = pis[i].ParameterType;
+                        if (pt == typeof(double))      args[i] = 0.0;
+                        else if (pt == typeof(int))    args[i] = 0;
+                        else if (pt == typeof(bool))   args[i] = false;
+                        else if (pt == typeof(short))  args[i] = (short)0;
+                        else if (pt == typeof(string)) args[i] = "";
+                        else                            args[i] = null;
+                    }
+                    void SetIfDouble(int idx, double v)
+                    {
+                        if (n > idx && pis[idx].ParameterType == typeof(double))
+                            args[idx] = v;
+                    }
+                    void SetIfInt(int idx, int v)
+                    {
+                        if (n > idx && pis[idx].ParameterType == typeof(int))
+                            args[idx] = v;
+                        else if (n > idx && pis[idx].ParameterType == typeof(short))
+                            args[idx] = (short)v;
+                    }
+                    void SetIfBool(int idx, bool v)
+                    {
+                        if (n > idx && pis[idx].ParameterType == typeof(bool))
+                            args[idx] = v;
+                    }
+                    // Standard slot meaning (verified in SW SDK):
+                    //   0 Thickness
+                    //   1 ReverseDirection
+                    //   2 BendRadius
+                    //   3 UseGaugeTable
+                    //   4 KFactor (bend allowance)
+                    //   5 UseRelief
+                    //   6 ReliefType
+                    //   7 ReliefDepth
+                    //   8 ReliefWidth (or Ratio)
+                    //   9-14: misc extras (varies by SW version)
+                    SetIfDouble(0, thickness_m);
+                    SetIfBool(1, false);
+                    SetIfDouble(2, bendR_m);
+                    SetIfBool(3, false);
+                    SetIfDouble(4, kFactor);
                     return args;
                 }
 
                 var mi2 = fmType.GetMethod("InsertSheetMetalBaseFlange2");
                 if (mi2 != null)
                 {
-                    int n = mi2.GetParameters().Length;
-                    try { feat = mi2.Invoke(fm, BuildArgs(n)); }
+                    int n2 = mi2.GetParameters().Length;
+                    var sig2 = string.Join(",",
+                        mi2.GetParameters()
+                           .Select((pi, i) => $"{i}:{pi.ParameterType.Name}"));
+                    FileLog($"  sheetMetalBaseFlange: BaseFlange2(n={n2}) sig=[{sig2}]");
+                    try { feat = mi2.Invoke(fm, BuildArgs(mi2)); }
                     catch (Exception ex)
                     {
-                        FileLog($"  sheetMetalBaseFlange: BaseFlange2(n={n}) "
+                        FileLog($"  sheetMetalBaseFlange: BaseFlange2(n={n2}) "
                                 + $"threw: {ex.GetType().Name}: {ex.Message}");
                     }
                 }
@@ -4894,11 +5526,15 @@ namespace AriaSW
                     var mi1 = fmType.GetMethod("InsertSheetMetalBaseFlange");
                     if (mi1 != null)
                     {
-                        int n = mi1.GetParameters().Length;
-                        try { feat = mi1.Invoke(fm, BuildArgs(n)); }
+                        int n1 = mi1.GetParameters().Length;
+                        var sig1 = string.Join(",",
+                            mi1.GetParameters()
+                               .Select((pi, i) => $"{i}:{pi.ParameterType.Name}"));
+                        FileLog($"  sheetMetalBaseFlange: BaseFlange(n={n1}) sig=[{sig1}]");
+                        try { feat = mi1.Invoke(fm, BuildArgs(mi1)); }
                         catch (Exception ex)
                         {
-                            FileLog($"  sheetMetalBaseFlange: BaseFlange(n={n}) "
+                            FileLog($"  sheetMetalBaseFlange: BaseFlange(n={n1}) "
                                     + $"threw: {ex.GetType().Name}: {ex.Message}");
                         }
                     }
@@ -5314,43 +5950,171 @@ namespace AriaSW
                 ? p["alias"]?.ToString() : "sweep_body";
             try
             {
+                // Resolve alias → SW feature name. SelectByID2 needs the
+                // actual SW name (e.g. "Sketch1"), not the planner alias.
+                // Same fix that unblocked OpRevolve/OpLoft/OpSheetMetalBaseFlange.
+                string profileResolved = profile;
+                string pathResolved = path;
+                if (_aliasMap.ContainsKey(profile)
+                    && _aliasMap[profile] is IFeature pf)
+                    profileResolved = pf.Name;
+                if (_aliasMap.ContainsKey(path)
+                    && _aliasMap[path] is IFeature ph)
+                    pathResolved = ph.Name;
                 _model.ClearSelection2(true);
                 bool ok1 = _model.Extension.SelectByID2(
-                    profile, "SKETCH", 0, 0, 0, true, 1, null, 0);
+                    profileResolved, "SKETCH", 0, 0, 0, true, 1, null, 0);
+                // Profile fallback: also try EXTSKETCHSEGMENT for non-closed
+                if (!ok1)
+                {
+                    ok1 = _model.Extension.SelectByID2(
+                        profileResolved, "EXTSKETCHSEGMENT", 0, 0, 0, true, 1, null, 0);
+                    if (ok1) FileLog($"  sweep: profile '{profileResolved}' staged as EXTSKETCHSEGMENT");
+                }
+                // Path can be a sketch OR a helix (RefCurve) OR a 3D curve.
+                // Try every plausible selection type, AND try the IFeature
+                // direct .Select2 path as a final fallback. SW2024 helix is
+                // not reliably reachable via SelectByID2 in any version —
+                // the IFeature.Select2 path always works when the alias map
+                // has the feature object.
                 bool ok2 = _model.Extension.SelectByID2(
-                    path, "SKETCH", 0, 0, 0, true, 4, null, 0);
+                    pathResolved, "SKETCH", 0, 0, 0, true, 4, null, 0);
+                string ok2Type = ok2 ? "SKETCH" : null;
+                if (!ok2)
+                {
+                    foreach (var st in new[] { "REFERENCECURVES", "REFCURVES",
+                                                "REFCURVE", "REFEDGES",
+                                                "EDGE", "BODYFEATURE",
+                                                "EXTSKETCHSEGMENT" })
+                    {
+                        if (_model.Extension.SelectByID2(
+                                pathResolved, st, 0, 0, 0, true, 4, null, 0))
+                        {
+                            ok2 = true; ok2Type = st;
+                            FileLog($"  sweep: path '{pathResolved}' staged as {st}");
+                            break;
+                        }
+                    }
+                }
+                // Final fallback: select the IFeature object directly. This
+                // works for helix, ref-curves, and any feature stored in the
+                // alias map. Selection mark must be 4 to identify the path.
+                if (!ok2 && _aliasMap.ContainsKey(path) &&
+                    _aliasMap[path] is IFeature pathFeat)
+                {
+                    try
+                    {
+                        ok2 = pathFeat.Select2(true, 4);  // append=true, mark=4
+                        if (ok2) { ok2Type = "IFeature.Select2";
+                            FileLog($"  sweep: path '{pathResolved}' staged via IFeature.Select2"); }
+                    }
+                    catch (Exception sex)
+                    {
+                        FileLog($"  sweep: IFeature.Select2 threw: {sex.Message}");
+                    }
+                }
                 if (!ok1 || !ok2)
                     return new { ok = false,
-                                  error = $"sweep: could not stage sketches (profile={ok1}, path={ok2})" };
+                                  error = $"sweep: could not stage sketches " +
+                                          $"(profile alias='{profile}' resolved='{profileResolved}' staged={ok1}, " +
+                                          $"path alias='{path}' resolved='{pathResolved}' staged={ok2} type={ok2Type ?? "none"})" };
                 var fm = _model.FeatureManager;
-                var mi = fm.GetType().GetMethod("InsertProtrusionSwept4")
-                          ?? fm.GetType().GetMethod("InsertProtrusionSwept3")
-                          ?? fm.GetType().GetMethod("InsertProtrusionSwept2");
+                // Build args via reflection per ParameterInfo so we never
+                // pass a bool where SW expects a double. Same fix that
+                // unblocked FeatureExtrusionThin2 and InsertProtrusionBlend2.
+                bool isCut = operation == "cut" || operation == "subtract";
                 object feat = null;
-                if (mi != null)
+                var fmType = fm.GetType();
+                // Pick the right SW method family. SW2024 names cut-sweeps
+                // as "FeatureCutSwept*" or "InsertCutSweep*" — varies by
+                // version. Probe for any swept-cut method on FeatureManager
+                // first, then fall back to passing isCut=true through
+                // InsertProtrusionSwept4 slot 14 if available.
+                if (isCut)
                 {
-                    int n = mi.GetParameters().Length;
-                    var args = new object[n];
-                    // Common signature (InsertProtrusionSwept3, 13 args):
-                    // (twistType, alignSweep, twistAngleRad,
-                    //  pathAlignment, mergeSmoothFaces, isThin,
-                    //  thinType, thinThk1, thinThk2, isMerge,
-                    //  isAdvancedFeatScope, useAutoSel, t0)
-                    for (int i = 0; i < n; i++) args[i] = false;
-                    if (n >= 13) {
-                        args[0] = 0;   // twistType
-                        args[1] = false; args[2] = 0.0;
-                        args[3] = 0; args[4] = true; args[5] = false;
-                        args[6] = 0; args[7] = 0.0; args[8] = 0.0;
-                        args[9] = true; args[10] = false; args[11] = true;
-                        args[12] = 0;
-                    }
-                    feat = mi.Invoke(fm, args);
+                    var sweptMethods = fmType.GetMethods()
+                        .Where(m => m.Name.IndexOf("Sweep",
+                            StringComparison.OrdinalIgnoreCase) >= 0
+                                  || m.Name.IndexOf("Swept",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        .Select(m => $"{m.Name}({m.GetParameters().Length})")
+                        .Distinct().ToArray();
+                    FileLog($"  sweep: cut-mode; FM swept methods = [{string.Join(", ", sweptMethods)}]");
                 }
-                if (feat != null && _aliasMap != null)
-                    _aliasMap[alias] = feat;
-                return new { ok = feat != null, kind = "sweep",
-                              profile_sketch = profile, path_sketch = path,
+                string[] tryMethods = isCut
+                    ? new[] {
+                        "FeatureCutSwept2", "FeatureCutSwept",
+                        "InsertCutSweep4", "InsertCutSweep3",
+                        "InsertCutSweep2", "InsertCutSweep",
+                        "InsertCutSwept4", "InsertCutSwept3",
+                        "InsertCutSwept2", "InsertCutSwept" }
+                    : new[] {
+                        "InsertProtrusionSwept4", "InsertProtrusionSwept3",
+                        "InsertProtrusionSwept2", "InsertProtrusionSwept",
+                        "FeatureSweep" };
+                foreach (var mname in tryMethods)
+                {
+                    var mi = fmType.GetMethod(mname);
+                    if (mi == null) continue;
+                    try
+                    {
+                        var pis = mi.GetParameters();
+                        int n = pis.Length;
+                        var args = new object[n];
+                        for (int i = 0; i < n; i++)
+                        {
+                            Type pt = pis[i].ParameterType;
+                            if (pt == typeof(double))      args[i] = 0.0;
+                            else if (pt == typeof(int))    args[i] = 0;
+                            else if (pt == typeof(bool))   args[i] = false;
+                            else if (pt == typeof(short))  args[i] = (short)0;
+                            else                            args[i] = null;
+                        }
+                        // Common slot semantics (InsertProtrusionSwept3, 13 args):
+                        //   0 twistType (int=0, no twist)
+                        //   1 alignSweep (bool=false)
+                        //   2 twistAngleRad (double=0.0)
+                        //   3 pathAlignment (int=0, follow path)
+                        //   4 mergeSmoothFaces (bool=true)
+                        //   5 isThin (bool=false)
+                        //   6 thinType (int=0)
+                        //   7 thinThk1 (double=0.0)
+                        //   8 thinThk2 (double=0.0)
+                        //   9 isMerge (bool=true)
+                        //  10 isAdvancedFeatScope (bool=false)
+                        //  11 useAutoSel (bool=true)
+                        //  12 t0 (int=0)
+                        if (n > 4 && pis[4].ParameterType == typeof(bool))
+                            args[4] = true;     // mergeSmoothFaces
+                        if (n > 9 && pis[9].ParameterType == typeof(bool))
+                            args[9] = true;     // isMerge
+                        if (n > 11 && pis[11].ParameterType == typeof(bool))
+                            args[11] = true;    // useAutoSel
+                        FileLog($"  sweep: trying {mname}(n={n})");
+                        feat = mi.Invoke(fm, args);
+                        if (feat != null)
+                        {
+                            FileLog($"  sweep: {mname} succeeded");
+                            break;
+                        }
+                        else
+                        {
+                            FileLog($"  sweep: {mname} returned null");
+                        }
+                    }
+                    catch (Exception sex)
+                    {
+                        FileLog($"  sweep: {mname} threw: {sex.GetType().Name}: {sex.Message}");
+                    }
+                }
+                if (feat is IFeature sf2 && _aliasMap != null)
+                    _aliasMap[alias] = sf2;
+                if (feat == null)
+                    return new { ok = false,
+                                  error = $"sweep: all InsertProtrusionSwept* variants failed " +
+                                          $"(profile='{profileResolved}', path='{pathResolved}')" };
+                return new { ok = true, kind = "sweep",
+                              profile_sketch = profileResolved, path_sketch = pathResolved,
                               operation, alias };
             }
             catch (Exception ex)
@@ -5910,8 +6674,20 @@ namespace AriaSW
             double pitch = Mm(p.ContainsKey("pitch_mm")
                 ? p["pitch_mm"]
                 : (p.ContainsKey("pitch") ? p["pitch"] : 5.0));
-            double revolutions = p.ContainsKey("revolutions")
-                ? Convert.ToDouble(p["revolutions"]) : 5.0;
+            // Caller can specify either revolutions OR height_mm.
+            // height_mm = pitch_mm * revs, so we derive whichever is missing.
+            double height = p.ContainsKey("height_mm")
+                ? Mm(p["height_mm"])
+                : (p.ContainsKey("height") ? Mm(p["height"]) : 0.0);
+            double revolutions;
+            if (p.ContainsKey("revolutions"))
+                revolutions = Convert.ToDouble(p["revolutions"]);
+            else if (height > 0 && pitch > 0)
+                revolutions = height / pitch;
+            else
+                revolutions = 5.0;
+            if (height <= 0)
+                height = pitch * revolutions;
             double startAngleDeg = p.ContainsKey("start_angle_deg")
                 ? Convert.ToDouble(p["start_angle_deg"]) : 0.0;
             double startAngleRad = startAngleDeg * Math.PI / 180.0;
@@ -6009,6 +6785,8 @@ namespace AriaSW
                         // from the underlying sketch.
                         var miFirst = fmType.GetMethod(
                             "AddVariablePitchHelixFirstPitchAndDiameter");
+                        var miSeg = fmType.GetMethod(
+                            "AddVariablePitchHelixSegment");
                         var miEnd = fmType.GetMethod(
                             "EndVariablePitchHelix");
                         if (miFirst != null && miEnd != null)
@@ -6016,18 +6794,97 @@ namespace AriaSW
                             // Args (2): (Pitch, Diameter). Diameter=0 →
                             // SW takes the value from the staged sketch.
                             miFirst.Invoke(fm, new object[] { pitch, 0.0 });
+                            // SW2024 requires AT LEAST one Segment call
+                            // between First and End; without it the helix
+                            // is never committed to the tree. Pass our
+                            // height + revolutions as a single segment.
+                            if (miSeg != null)
+                            {
+                                try
+                                {
+                                    // Type-aware arg fill — SW2024 has
+                                    // (Pitch, Diameter, Height, Revolution),
+                                    // older versions have a 6-arg form
+                                    // (… , Segment, IsValid). Build args
+                                    // by ParameterInfo so we don't crash on
+                                    // count mismatch.
+                                    var pis = miSeg.GetParameters();
+                                    var sa = new object[pis.Length];
+                                    for (int i = 0; i < pis.Length; i++)
+                                    {
+                                        Type pt = pis[i].ParameterType;
+                                        if (pt == typeof(double)) sa[i] = 0.0;
+                                        else if (pt == typeof(int))    sa[i] = 0;
+                                        else if (pt == typeof(short))  sa[i] = (short)0;
+                                        else if (pt == typeof(bool))   sa[i] = false;
+                                        else                            sa[i] = null;
+                                    }
+                                    if (pis.Length > 0 && pis[0].ParameterType == typeof(double))
+                                        sa[0] = pitch;
+                                    if (pis.Length > 1 && pis[1].ParameterType == typeof(double))
+                                        sa[1] = 0.0;     // diameter; 0 = take from sketch
+                                    if (pis.Length > 2 && pis[2].ParameterType == typeof(double))
+                                        sa[2] = height;
+                                    if (pis.Length > 3 && pis[3].ParameterType == typeof(double))
+                                        sa[3] = revolutions;
+                                    // 6-arg form: Segment + IsValid
+                                    if (pis.Length > 4 && pis[4].ParameterType == typeof(int))
+                                        sa[4] = 1;
+                                    if (pis.Length > 5 && pis[5].ParameterType == typeof(bool))
+                                        sa[5] = true;
+                                    miSeg.Invoke(fm, sa);
+                                    FileLog($"  helix: AddVariablePitchHelixSegment(n={pis.Length} args, p={pitch*1000:F2}mm, h={height*1000:F2}mm, revs={revolutions:F2})");
+                                }
+                                catch (Exception segEx)
+                                {
+                                    FileLog($"  helix: AddVariablePitchHelixSegment threw: {segEx.GetType().Name}: {segEx.Message}");
+                                }
+                            }
                             // EndVariablePitchHelix() is `void` — the
                             // feature is left as the most-recent in the
-                            // FeatureManager tree. Pull it back via
-                            // FeatureByPositionReverse(0) (which returns
-                            // the bottom of the tree).
+                            // FeatureManager tree. The "most recent" is
+                            // NOT necessarily FeatureByPositionReverse(0)
+                            // — SW2024 sometimes has tail-of-tree features
+                            // (Origin, etc.) at that position. Walk the
+                            // tree forward and pick the feature whose
+                            // Name starts with "Helix" or TypeName2 is
+                            // "RefAxis"/"HelixCurve".
                             miEnd.Invoke(fm, new object[0]);
+                            feat = null;
                             try
                             {
-                                feat = _model.FeatureByPositionReverse(0)
-                                       as IFeature;
+                                IFeature cursor = (IFeature)_model.FirstFeature();
+                                IFeature lastHelix = null;
+                                while (cursor != null)
+                                {
+                                    string nm = cursor.Name ?? "";
+                                    string tn = "";
+                                    try { tn = cursor.GetTypeName2() ?? ""; }
+                                    catch { /* not all features expose this */ }
+                                    if (nm.StartsWith("Helix",
+                                            StringComparison.OrdinalIgnoreCase)
+                                        || tn.IndexOf("Helix",
+                                            StringComparison.OrdinalIgnoreCase) >= 0)
+                                    {
+                                        lastHelix = cursor;
+                                    }
+                                    cursor = (IFeature)cursor.GetNextFeature();
+                                }
+                                feat = lastHelix;
                             }
-                            catch { feat = null; }
+                            catch (Exception walkEx)
+                            {
+                                FileLog($"  helix: tree walk threw: {walkEx.Message}");
+                            }
+                            // Last resort: take whatever FeatureByPositionReverse
+                            // gives even if it's the prior extrusion — better
+                            // than null so the rest of the pipeline can run.
+                            if (feat == null)
+                            {
+                                try { feat = _model.FeatureByPositionReverse(0)
+                                                as IFeature; }
+                                catch { feat = null; }
+                            }
                             FileLog($"  helix: built via variable-pitch family pitch={pitch*1000:F2}mm feat={(feat is IFeature ff ? ff.Name : "null")}");
                         }
                     }

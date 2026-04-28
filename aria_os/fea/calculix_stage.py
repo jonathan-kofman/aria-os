@@ -114,17 +114,107 @@ def mesh_step(step_path: str | Path, out_msh: str | Path,
         gmsh.finalize()
 
 
+def _axis_index(axis: str) -> int:
+    """'x'|'y'|'z' → 0|1|2 (1-based for CCX is index+1)."""
+    a = (axis or "z").lower()
+    return {"x": 0, "y": 1, "z": 2}.get(a, 2)
+
+
+def _build_combined_loads(pts, loaded_ids: list[int],
+                           loads: list[dict]) -> list[tuple[int, int, float]]:
+    """Translate a structured loads list into a list of (node_id, dof, value)
+    tuples for CCX *CLOAD.
+
+    Each load is one of:
+        {"type": "force",  "axis": "x|y|z", "magnitude_n": float}
+        {"type": "moment", "axis": "x|y|z", "magnitude_nmm": float}
+
+    Force is distributed evenly. Moment is applied as a couple over the top
+    nodes about the load-face centroid (linear stress distribution =
+    Σr × F where F = M·r/Σr²). Torsion is applied as tangential forces
+    around the axis (T = Σr × F, with F tangential to the centroidal radius).
+    """
+    import numpy as np
+    if not loads:
+        return []
+    # Centroid of the loaded patch in 3D — used for moment + torsion arms.
+    pts_arr = np.asarray(pts)
+    loaded_xyz = pts_arr[[i - 1 for i in loaded_ids]]
+    cx, cy, cz = loaded_xyz.mean(axis=0)
+    cloads: list[tuple[int, int, float]] = []
+    for ld in loads:
+        ltype = (ld.get("type") or "force").lower()
+        axis = (ld.get("axis") or "z").lower()
+        ax_i = _axis_index(axis)
+        if ltype == "force":
+            mag = float(ld.get("magnitude_n", ld.get("magnitude", 0.0)))
+            if mag == 0.0:
+                continue
+            per_node = mag / len(loaded_ids)
+            for nid in loaded_ids:
+                cloads.append((nid, ax_i + 1, per_node))
+        elif ltype == "moment":
+            mag = float(ld.get("magnitude_nmm",
+                               ld.get("magnitude_n_mm",
+                                      ld.get("magnitude", 0.0))))
+            if mag == 0.0:
+                continue
+            # Bending: linear stress about an axis through the centroid.
+            # For axis=x (moment vector along +x), force is in +z direction
+            # proportional to (y - cy). For axis=y, force in z proportional
+            # to (x - cx). For axis=z (torsion), force is tangential in xy.
+            if ax_i == 0:  # M about x → bending, force in z, arm = (y - cy)
+                arms = loaded_xyz[:, 1] - cy
+                denom = float((arms ** 2).sum())
+                if denom <= 0:
+                    continue
+                for k, nid in enumerate(loaded_ids):
+                    f = mag * arms[k] / denom
+                    cloads.append((nid, 3, float(f)))
+            elif ax_i == 1:  # M about y → bending, force in z, arm = (x - cx)
+                arms = loaded_xyz[:, 0] - cx
+                denom = float((arms ** 2).sum())
+                if denom <= 0:
+                    continue
+                for k, nid in enumerate(loaded_ids):
+                    # +M_y means rotation from +z → +x: f_z = +M·x/Σx²
+                    # but sign convention for bending: tension on +x side
+                    # → compressive on -x side. Use f_z = -M·x/Σx².
+                    f = -mag * arms[k] / denom
+                    cloads.append((nid, 3, float(f)))
+            else:  # ax_i == 2: torsion about z, tangential force in xy plane
+                rx = loaded_xyz[:, 0] - cx
+                ry = loaded_xyz[:, 1] - cy
+                r2 = rx ** 2 + ry ** 2
+                denom = float(r2.sum())
+                if denom <= 0:
+                    continue
+                for k, nid in enumerate(loaded_ids):
+                    # Torque T = Σ (r × F). For a tangential F = T·r̂_⊥/Σr²,
+                    # f_x = -T·y/Σr², f_y = +T·x/Σr².
+                    fx = -mag * ry[k] / denom
+                    fy = +mag * rx[k] / denom
+                    cloads.append((nid, 1, float(fx)))
+                    cloads.append((nid, 2, float(fy)))
+    return cloads
+
+
 def msh_to_inp(msh_path: str | Path,
                inp_path: str | Path,
                *,
                material: str,
-               load_n: float,
+               load_n: float = 0.0,
+               loads: list[dict] | None = None,
                fixed_z_below_mm: float = 2.0) -> dict:
-    """Convert gmsh .msh → CalculiX .inp with a minimal load case:
-      - bottom-most nodes (within fixed_z_below_mm of min Z) are fixed
-      - top-most 10% of nodes receive a distributed force of load_n newtons
-        in -Z.
-    Returns {ok, inp_path, n_fixed, n_loaded}.
+    """Convert gmsh .msh → CalculiX .inp.
+
+    Two modes:
+      - simple: pass `load_n` only → distributed -Z force on top nodes
+      - combined: pass `loads=[...]` → list of force/moment dicts
+        (see `_build_combined_loads`)
+
+    Bottom-most nodes (within fixed_z_below_mm of min Z) are fixed in all
+    DOFs. Returns {ok, inp_path, n_fixed, n_loaded, n_cloads}.
     """
     import meshio
     if material not in MATERIAL_PROPS:
@@ -158,7 +248,18 @@ def msh_to_inp(msh_path: str | Path,
     if not loaded_ids:
         return {"ok": False, "error": "no loaded nodes"}
 
-    per_node_force = -float(load_n) / len(loaded_ids)
+    # Build the CLOAD entries:
+    #   - if loads=[...] passed, use combined force + bending + torsion
+    #   - else, fall back to single -Z force of magnitude load_n
+    cload_tuples: list[tuple[int, int, float]] = []
+    if loads:
+        cload_tuples = _build_combined_loads(pts, loaded_ids, loads)
+        if not cload_tuples:
+            return {"ok": False,
+                    "error": "loads list yielded no CLOAD entries"}
+    else:
+        per_node_force = -float(load_n) / len(loaded_ids)
+        cload_tuples = [(nid, 3, per_node_force) for nid in loaded_ids]
 
     inp_path = Path(inp_path)
     inp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -188,7 +289,11 @@ def msh_to_inp(msh_path: str | Path,
         "*BOUNDARY",
         "FIXED,1,3",
         "*CLOAD",
-        f"LOADED,3,{per_node_force:.6f}",
+    ]
+    # Per-node CLOAD lines: NODE_ID, DOF, FORCE
+    for nid, dof, val in cload_tuples:
+        lines.append(f"{nid},{dof},{val:.6e}")
+    lines += [
         "*NODE FILE",
         "U",
         "*EL FILE",
@@ -197,7 +302,8 @@ def msh_to_inp(msh_path: str | Path,
     ]
     inp_path.write_text("\n".join(lines), encoding="utf-8")
     return {"ok": True, "inp_path": str(inp_path),
-            "n_fixed": len(fixed_ids), "n_loaded": len(loaded_ids)}
+            "n_fixed": len(fixed_ids), "n_loaded": len(loaded_ids),
+            "n_cloads": len(cload_tuples)}
 
 
 def run_ccx(inp_path: str | Path, *, timeout: int = 300) -> dict:
@@ -259,10 +365,12 @@ def parse_max_von_mises(frd_path: str | Path) -> float | None:
 def run_static_fea(step_path: str | Path,
                    *,
                    material: str,
-                   load_n: float,
+                   load_n: float = 0.0,
+                   loads: list[dict] | None = None,
                    out_dir: str | Path,
                    mesh_size_mm: float = 5.0,
-                   target_safety_factor: float = 2.0) -> dict:
+                   target_safety_factor: float = 2.0,
+                   export_vtk: bool = True) -> dict:
     """End-to-end static-linear FEA on a single STEP part.
 
     Returns
@@ -308,7 +416,8 @@ def run_static_fea(step_path: str | Path,
                 "error": f"meshing failed: {mesh_r.get('error')}",
                 "mesh": mesh_r}
 
-    inp_r = msh_to_inp(msh_path, inp_path, material=material, load_n=load_n)
+    inp_r = msh_to_inp(msh_path, inp_path, material=material,
+                        load_n=load_n, loads=loads)
     if not inp_r.get("ok"):
         return {"available": True, "passed": False,
                 "error": f"inp gen failed: {inp_r.get('error')}",
@@ -329,6 +438,22 @@ def run_static_fea(step_path: str | Path,
     sf = mp["yield_mpa"] / max_vm if max_vm > 0 else float("inf")
     passed = sf >= target_safety_factor
 
+    # VTU export — StructSight reads .vtu directly with vtk.js. Best-effort:
+    # if it fails, we still return a valid FEA report (just no VTU path).
+    vtu_path: str | None = None
+    if export_vtk:
+        try:
+            from aria_os.fea.vtk_export import frd_to_vtu
+            vtu_path = frd_to_vtu(ccx_r["frd_path"], out_dir / "result.vtu")
+        except Exception as ex:
+            # Non-fatal: log via the report and move on
+            vtu_path = None
+            _vtu_err = f"{type(ex).__name__}: {ex}"
+        else:
+            _vtu_err = None
+    else:
+        _vtu_err = None
+
     report = {
         "available": True,
         "passed": passed,
@@ -338,6 +463,10 @@ def run_static_fea(step_path: str | Path,
         "target_safety_factor": target_safety_factor,
         "material": material,
         "load_n": load_n,
+        "loads": loads,
+        "n_cloads": inp_r.get("n_cloads"),
+        "vtu_path": vtu_path,
+        "vtu_error": _vtu_err,
         "mesh": {"n_nodes": mesh_r["n_nodes"],
                  "n_elements": mesh_r["n_elements"]},
         "frd_path": ccx_r["frd_path"],

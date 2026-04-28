@@ -164,7 +164,7 @@ def _op_sketch_circle(p: dict) -> dict:
     """Draw a CIRCLE in modelspace. params: x_mm, y_mm, radius_mm, layer?"""
     x = float(p.get("x_mm", 0.0))
     y = float(p.get("y_mm", 0.0))
-    r = float(p.get("radius_mm", p.get("radius", 10.0)))
+    r = float(p.get("radius_mm", p.get("radius", p.get("r", 10.0))))
     layer = str(p.get("layer", "0"))
 
     entity = {
@@ -760,6 +760,27 @@ def _op_circular_pattern_crosscad(p: dict) -> dict:
         "count": count,
     }
 
+def _op_save_as(p: dict) -> dict:
+    """saveAs (cross-CAD) — save drawing to file.
+    params: path (required), format inferred from extension
+    """
+    path = str(p.get("path", ""))
+    if not path:
+        return {"ok": False, "error": "saveAs requires 'path' parameter"}
+
+    out_path = Path(path)
+    suffix = out_path.suffix.lower()
+
+    # Only allow DXF export
+    if suffix not in (".dxf", ".dwg"):
+        return {
+            "ok": False,
+            "error": f"AutoCAD bridge only supports .dxf/.dwg export (got {suffix})",
+        }
+
+    return _save_as(out_path)
+
+
 _OP_HANDLERS = {
     "beginPlan":          _op_begin_plan,
     "newPlan":            _op_begin_plan,
@@ -778,6 +799,7 @@ _OP_HANDLERS = {
     "loft":               _op_loft_crosscad,
     "holeWizard":         _op_hole_wizard_crosscad,
     "circularPattern":    _op_circular_pattern_crosscad,
+    "saveAs":             _op_save_as,
     "addParameter":       _op_add_parameter,
     "linearDimension":    _op_linear_dimension,
     "diameterDimension":  _op_diameter_dimension,

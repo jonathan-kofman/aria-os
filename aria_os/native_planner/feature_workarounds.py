@@ -131,6 +131,87 @@ def _wa_sheet_metal_base_flange(op: dict, ledger_entry: dict) -> list[dict]:
     }]
 
 
+def _wa_hole_wizard(op: dict, ledger_entry: dict) -> list[dict]:
+    """Emit explicit cut-extrudes in place of HoleWizard5.
+
+    HoleWizard requires a face selection + sketch point + complex args
+    that vary per SW interop. The geometry produced is identical to:
+      - drill: 1 cylindrical cut at (x,y) of given diameter+depth
+      - cbore: stepped cut — larger cylinder on top + smaller drill below
+      - csk:   chamfer-mouth cut (approximated as a stepped 2-cut)
+
+    The semantic info (size class, fit, thread) is preserved on the alias
+    name so a future SM-aware exporter could rebuild thread callouts.
+
+    Input op shape:
+      {kind: "holeWizard",
+       params: {x, y, diameter, depth, type: "drill|cbore|csk",
+                cbore_diameter?, cbore_depth?,
+                csk_diameter?, csk_angle_deg?,
+                alias?, plane?}}
+    """
+    p = op.get("params", {})
+    htype = (p.get("type") or "drill").lower()
+    plane = p.get("plane", "XY")
+    x = float(p.get("x", 0))
+    y = float(p.get("y", 0))
+    drill_d = float(p.get("diameter", 5))
+    drill_h = float(p.get("depth", 10))
+    alias = p.get("alias", "hw_hole")
+    out: list[dict] = []
+    # Counterbore step (executed first — top of hole)
+    if htype in ("cbore", "counterbore"):
+        cbore_d = float(p.get("cbore_diameter", drill_d * 1.6))
+        cbore_h = float(p.get("cbore_depth", drill_h * 0.3))
+        sk_cbore = f"_hw_cbore_sk_{alias}"
+        out.append({"kind": "newSketch",
+                     "params": {"plane": plane, "alias": sk_cbore}})
+        out.append({"kind": "sketchCircle",
+                     "params": {"sketch": sk_cbore, "cx": x, "cy": y,
+                                "r": cbore_d / 2.0}})
+        out.append({"kind": "extrude",
+                     "params": {"sketch": sk_cbore, "distance": cbore_h,
+                                "operation": "cut",
+                                "alias": f"{alias}_cbore",
+                                "hw_kind": "counterbore",
+                                "hw_diameter_mm": cbore_d,
+                                "hw_depth_mm": cbore_h}})
+    elif htype in ("csk", "countersink"):
+        # Approximate countersink mouth as a shallow flat cut, the bevel
+        # would need a chamfer feature for a true countersink. Two-cut
+        # approximation: shallow wide cut + drill cut.
+        csk_d = float(p.get("csk_diameter", drill_d * 1.8))
+        csk_h = float(p.get("csk_depth", drill_d * 0.3))
+        sk_csk = f"_hw_csk_sk_{alias}"
+        out.append({"kind": "newSketch",
+                     "params": {"plane": plane, "alias": sk_csk}})
+        out.append({"kind": "sketchCircle",
+                     "params": {"sketch": sk_csk, "cx": x, "cy": y,
+                                "r": csk_d / 2.0}})
+        out.append({"kind": "extrude",
+                     "params": {"sketch": sk_csk, "distance": csk_h,
+                                "operation": "cut",
+                                "alias": f"{alias}_csk",
+                                "hw_kind": "countersink",
+                                "hw_diameter_mm": csk_d,
+                                "hw_depth_mm": csk_h}})
+    # Drill (always, including for cbore + csk types — the through hole)
+    sk_drill = f"_hw_drill_sk_{alias}"
+    out.append({"kind": "newSketch",
+                 "params": {"plane": plane, "alias": sk_drill}})
+    out.append({"kind": "sketchCircle",
+                 "params": {"sketch": sk_drill, "cx": x, "cy": y,
+                            "r": drill_d / 2.0}})
+    out.append({"kind": "extrude",
+                 "params": {"sketch": sk_drill, "distance": drill_h,
+                            "operation": "cut",
+                            "alias": alias,
+                            "hw_kind": htype,
+                            "hw_diameter_mm": drill_d,
+                            "hw_depth_mm": drill_h}})
+    return out
+
+
 def _wa_no_op(op: dict, ledger_entry: dict) -> list[dict]:
     """Identity transform - keeps the op unchanged. Used to register a
     feature_key with the workaround system without actually rewriting it."""
@@ -143,7 +224,16 @@ def _wa_no_op(op: dict, ledger_entry: dict) -> list[dict]:
 WORKAROUNDS: dict[str, Transform] = {
     "linearPattern":         _wa_linear_pattern,
     "mirror":                _wa_mirror_pattern,
-    "sheetMetalBaseFlange":  _wa_sheet_metal_base_flange,
+    # sheetMetalBaseFlange + holeWizard: handled by REAL bridge ops
+    # (OpSheetMetalBaseFlange uses InsertSheetMetalBaseFlange2; OpHoleWizard
+    # uses HoleWizard5). Both follow the SW SDK macro pattern: sketch
+    # opened → AddToDB=true → CreatePoint/Rect → sketch EXITED → re-selected
+    # by name → wizard API called. Without that exact sequence, SW2024
+    # silently returns null. With it, the real feature shows in the SW tree
+    # (Hole Wizard, Sheet Metal) with thread/bend callouts in BOM/drawing.
+    # The validator transforms _wa_hole_wizard / _wa_sheet_metal_base_flange
+    # remain as available helpers but are NOT registered, so the real ops
+    # are reached.
     # circularPattern handled by validator's _expand_circular_pattern_to_explicit_cuts
 }
 
