@@ -4,14 +4,22 @@ Applies `native_op` events to a growing `pcbnew.BOARD` and writes the
 intermediate `.kicad_pcb` to disk after each op. The user refreshes KiCad
 to see live progress — there's no interactive WebView like Fusion/Rhino.
 
-Graceful degrade: if `pcbnew` isn't importable (common on non-KiCad Python
-envs), we fall back to the existing `aria_os.ecad.kicad_pcb_writer` which
-emits a serialized .kicad_pcb file from a dataclass model.
+Graceful degrade: if `pcbnew` isn't importable (the dashboard's Python
+env is rarely KiCad's bundled python), we maintain the same op state
+in-memory and serialise via `aria_os.ecad.kicad_pcb_writer.write_kicad_pcb`
+at every save. The user gets a real .kicad_pcb either way — the only
+thing they lose without pcbnew is per-op auto-route hooks (routeBoard).
 """
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from aria_os.ecad import recipe_db
 
@@ -22,6 +30,27 @@ def _try_import_pcbnew():
         return pcbnew
     except Exception:
         return None
+
+
+def _kicad_python_paths() -> list[Path]:
+    """Candidate locations for KiCad's bundled python.exe across versions
+    and Windows install variants. Used so the user is told *exactly* which
+    interpreter has pcbnew when fallback also fails."""
+    user = os.environ.get("LOCALAPPDATA", "")
+    return [
+        Path(user) / "Programs" / "KiCad" / "10.0" / "bin" / "python.exe",
+        Path(user) / "Programs" / "KiCad" / "9.0"  / "bin" / "python.exe",
+        Path("C:/Program Files/KiCad/10.0/bin/python.exe"),
+        Path("C:/Program Files/KiCad/9.0/bin/python.exe"),
+        Path("C:/Program Files/KiCad/8.0/bin/python.exe"),
+    ]
+
+
+def _resolve_kicad_python() -> Optional[str]:
+    for p in _kicad_python_paths():
+        if p.is_file():
+            return str(p)
+    return None
 
 
 class KicadExecutor:
@@ -39,9 +68,41 @@ class KicadExecutor:
         # Auto-learning recipe cache for native KiCad/pcbnew ops.
         recipe_db.init()
 
+        # Fallback state — used when pcbnew can't be imported into the
+        # caller's Python env. Mirrors the BoardState dataclass in
+        # aria_kicad_server.py so the same write_kicad_pcb path can
+        # serialise it at /save_pcb time.
+        self._fallback = self._pcbnew is None
+        self._fallback_state: dict[str, Any] = {
+            "board_name":   self.out_path.stem or "aria_board",
+            "board_w_mm":   60.0,
+            "board_h_mm":   40.0,
+            "n_layers":     2,
+            "components":   [],     # list[dict]
+            "extra_tracks": [],
+            "extra_vias":   [],
+            "extra_zones":  [],
+            "nets":         set(),  # str
+        }
+        if self._fallback:
+            print(f"[kicad-executor] pcbnew unavailable — using "
+                  f"write_kicad_pcb fallback (KiCad python at "
+                  f"{_resolve_kicad_python() or 'NOT FOUND'} when needed)",
+                  flush=True)
+
     # ---- Public API ----------------------------------------------------
 
     def execute(self, kind: str, params: dict) -> dict:
+        if self._fallback:
+            handler = getattr(self, f"_fbop_{kind}", None)
+            if handler is None:
+                raise ValueError(f"Unknown KiCad op (fallback): {kind}")
+            result = handler(params or {})
+            self._ops_applied += 1
+            self._save_fallback()
+            return {"ok": True, "op": kind, "ops_applied": self._ops_applied,
+                    "out": str(self.out_path), "via": "kicad_pcb_writer",
+                    **result}
         handler = getattr(self, f"_op_{kind}", None)
         if handler is None:
             raise ValueError(f"Unknown KiCad op: {kind}")
@@ -49,7 +110,7 @@ class KicadExecutor:
         self._ops_applied += 1
         self._save()
         return {"ok": True, "op": kind, "ops_applied": self._ops_applied,
-                "out": str(self.out_path), **result}
+                "out": str(self.out_path), "via": "pcbnew", **result}
 
     def _save(self):
         if self._pcbnew is None or self._board is None:
@@ -62,15 +123,41 @@ class KicadExecutor:
             # result already carries `out` path.
             pass
 
-    # ---- Op handlers ---------------------------------------------------
+    def _save_fallback(self) -> None:
+        """Materialise the in-memory BOM state to a real .kicad_pcb via
+        the file-format writer. Runs after every op so the user can
+        refresh KiCad and see live progress."""
+        from aria_os.ecad.kicad_pcb_writer import write_kicad_pcb
+        bom = {
+            "board_name":   self._fallback_state["board_name"],
+            "board_w_mm":   self._fallback_state["board_w_mm"],
+            "board_h_mm":   self._fallback_state["board_h_mm"],
+            "n_layers":     self._fallback_state["n_layers"],
+            "components":   list(self._fallback_state["components"]),
+            "extra_tracks": list(self._fallback_state["extra_tracks"]),
+            "extra_vias":   list(self._fallback_state["extra_vias"]),
+            "extra_zones":  list(self._fallback_state["extra_zones"]),
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".bom.json",
+                                           encoding="utf-8",
+                                           delete=False) as tmp:
+            json.dump(bom, tmp, indent=2)
+            bom_path = Path(tmp.name)
+        try:
+            write_kicad_pcb(
+                bom_path,
+                self.out_path,
+                board_name=self._fallback_state["board_name"],
+                n_layers=int(self._fallback_state["n_layers"]),
+            )
+        finally:
+            try: bom_path.unlink()
+            except Exception: pass
+
+    # ---- Op handlers (pcbnew path) ------------------------------------
 
     def _op_beginBoard(self, p: dict) -> dict:
-        if self._pcbnew is None:
-            raise RuntimeError(
-                "pcbnew not available in this Python env. "
-                "Run KiCad's bundled Python (Windows: "
-                "C:/Program Files/KiCad/9.0/bin/python.exe) or install "
-                "kicad-python bindings.")
+        # pcbnew is non-None here (fallback would have hijacked execute()).
         self._board = self._pcbnew.BOARD()
         # Set board outline rectangle
         w = float(p.get("width_mm", 30.0))
@@ -238,7 +325,7 @@ class KicadExecutor:
         return {"net": net_name, "layer": p.get("layer"),
                 "vertices": len(polygon)}
 
-    # ---- Helpers -------------------------------------------------------
+    # ---- Helpers (pcbnew path) ----------------------------------------
 
     def _resolve_layer(self, name: str) -> int:
         # KiCad's layer names → integer IDs via GetLayerID
@@ -257,3 +344,135 @@ class KicadExecutor:
             seg.SetLayer(edge)
             seg.SetWidth(self._pcbnew.FromMM(0.15))
             self._board.Add(seg)
+
+    # ---- Op handlers (fallback path: write_kicad_pcb-only) ------------
+    # These mirror the BoardState ops in cad-plugins/kicad/aria_kicad_server.py.
+    # No live pcbnew board — every op mutates self._fallback_state and the
+    # serializer rebuilds the .kicad_pcb on every save.
+
+    def _fbop_beginBoard(self, p: dict) -> dict:
+        self._fallback_state["board_w_mm"] = float(
+            p.get("width_mm", p.get("board_w_mm", 60.0)))
+        self._fallback_state["board_h_mm"] = float(
+            p.get("height_mm", p.get("board_h_mm", 40.0)))
+        if "name" in p:
+            self._fallback_state["board_name"] = str(p["name"])
+        return {"board_size_mm": [self._fallback_state["board_w_mm"],
+                                    self._fallback_state["board_h_mm"]]}
+
+    def _fbop_setStackup(self, p: dict) -> dict:
+        layers = p.get("layers") or ["F.Cu", "B.Cu"]
+        n_cu = sum(1 for l in layers if ".Cu" in l)
+        if n_cu not in (2, 4): n_cu = 2
+        self._fallback_state["n_layers"] = n_cu
+        return {"copper_layers": n_cu}
+
+    def _fbop_addNet(self, p: dict) -> dict:
+        name = p.get("name")
+        if not name:
+            raise ValueError("addNet requires name")
+        self._fallback_state["nets"].add(str(name))
+        return {"name": name}
+
+    def _fbop_placeComponent(self, p: dict) -> dict:
+        # Same shape as aria_kicad_server.py:_op_place_component, so the
+        # writer (which reads BoardState dicts) handles it identically.
+        ref = str(p.get("ref") or
+                    f"U{len(self._fallback_state['components']) + 1}")
+        value = str(p.get("value", ""))
+        package = p.get("package")
+        footprint = str(p.get("footprint", "")).strip()
+        if not footprint or ":" not in footprint:
+            cached = recipe_db.lookup_footprint_recipe(value, package)
+            if cached and cached.get("lib") and cached.get("fp"):
+                footprint = f"{cached['lib']}:{cached['fp']}"
+            else:
+                footprint = footprint or f"Generic:{value or 'unknown'}"
+        comp = {
+            "ref":           ref,
+            "value":         value,
+            "footprint":     footprint,
+            "x_mm":          float(p.get("x_mm", 0.0)),
+            "y_mm":          float(p.get("y_mm", 0.0)),
+            "width_mm":      float(p.get("width_mm", 5.0)),
+            "height_mm":     float(p.get("height_mm", 3.0)),
+            "rotation_deg":  float(p.get("rotation_deg",
+                                           p.get("rot_deg", 0.0))),
+            "nets":          list(p.get("nets") or []),
+            "net_map":       dict(p.get("net_map") or {}),
+            "description":   str(p.get("description", "")),
+        }
+        self._fallback_state["components"].append(comp)
+        for n in comp["nets"]:
+            self._fallback_state["nets"].add(str(n))
+        for n in comp["net_map"].values():
+            self._fallback_state["nets"].add(str(n))
+        return {"ref": ref, "footprint": footprint,
+                "n_components": len(self._fallback_state["components"])}
+
+    def _fbop_addTrack(self, p: dict) -> dict:
+        net = str(p.get("net", p.get("net_name", "")))
+        width = float(p.get("width_mm", 0.25))
+        x1 = float(p.get("x1_mm", (p.get("start") or [0, 0])[0]))
+        y1 = float(p.get("y1_mm", (p.get("start") or [0, 0])[1]))
+        x2 = float(p.get("x2_mm", (p.get("end")   or [0, 0])[0]))
+        y2 = float(p.get("y2_mm", (p.get("end")   or [0, 0])[1]))
+        layer = str(p.get("layer", "F.Cu"))
+        self._fallback_state["extra_tracks"].append({
+            "net":      net,
+            "start":    [x1, y1],
+            "end":      [x2, y2],
+            "width_mm": width,
+            "layer":    layer,
+        })
+        if net:
+            self._fallback_state["nets"].add(net)
+        return {"net": net, "width_mm": width, "layer": layer}
+
+    def _fbop_addVia(self, p: dict) -> dict:
+        net = str(p.get("net", p.get("net_name", "")))
+        self._fallback_state["extra_vias"].append({
+            "net":          net,
+            "at":           [float(p.get("x_mm", 0.0)),
+                              float(p.get("y_mm", 0.0))],
+            "drill_mm":     float(p.get("drill_mm", 0.3)),
+            "diameter_mm":  float(p.get("diameter_mm", 0.6)),
+        })
+        if net:
+            self._fallback_state["nets"].add(net)
+        return {"net": net}
+
+    def _fbop_addZone(self, p: dict) -> dict:
+        net = str(p.get("net", p.get("net_name", "GND")))
+        layer = str(p.get("layer", "B.Cu"))
+        polygon = p.get("polygon") or p.get("points")
+        if not polygon:
+            w = self._fallback_state["board_w_mm"]
+            h = self._fallback_state["board_h_mm"]
+            polygon = [[0, 0], [w, 0], [w, h], [0, h]]
+        if len(polygon) < 3:
+            raise ValueError("Zone polygon must have at least 3 points")
+        self._fallback_state["extra_zones"].append({
+            "net":      net,
+            "layer":    layer,
+            "points":   [[float(pt[0]), float(pt[1])] for pt in polygon],
+        })
+        if net:
+            self._fallback_state["nets"].add(net)
+        return {"net": net, "layer": layer, "vertices": len(polygon)}
+
+    def _fbop_routeBoard(self, p: dict) -> dict:
+        """Auto-route via Freerouting on the in-memory BOM serialised so
+        far. Same behaviour as the pcbnew path — just with one extra
+        save round-trip since we don't keep a live BOARD."""
+        from aria_os.ecad.autoroute import run_autoroute
+        self._save_fallback()
+        result = run_autoroute(self.out_path,
+                                max_seconds=int(p.get("timeout_s", 90)))
+        if not result.get("ok"):
+            raise RuntimeError(
+                f"Freerouting failed: {result.get('error', 'unknown')}")
+        return {"ok": True, "kind": "routed_board",
+                "tracks_added": result.get("tracks_added", 0),
+                "vias_added":   result.get("vias_added", 0),
+                "via":          "fallback+freerouting"}

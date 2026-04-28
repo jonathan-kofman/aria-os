@@ -19,6 +19,10 @@
  *   window.ARIA_API_BASE  (CAD host injection)
  *   import.meta.env.VITE_API_BASE  (build-time env)
  *   /api   (default — same-origin standalone)
+ *
+ * NOTE: ConfigProvider (in configProvider.jsx) provides the authoritative
+ * runtime API_BASE. This module is kept for backwards compatibility and
+ * bootstrap-time use.
  */
 
 function _resolveBase() {

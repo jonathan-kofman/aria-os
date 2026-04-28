@@ -1,0 +1,12 @@
+{
+  "goal": "Heavy-lift cinematic FPV drone - 7\" 6S 4000mAh, FC + frame, full bundle (v15 stress test)",
+  "pcb_goal": "4-layer 60x60mm quadcopter flight controller PCB with STM32, IMU, baro, USB-C, XT60",
+  "frame_goal": "7 inch FPV X-frame, 4 motor mounts, large battery slot, 4mm carbon fiber",
+  "mcad_cad": "solidworks",
+  "quality_tier": "fast",
+  "bundle_name": "drone_heavy_v15",
+  "motor_count": 4,
+  "prop_size_in": 7.0,
+  "battery_capacity_mah": 4000,
+  "battery_cells": 6
+}

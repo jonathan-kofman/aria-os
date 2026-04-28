@@ -93,30 +93,36 @@ def plan_impeller(spec: dict) -> list[dict]:
          "params": {"sketch": "sk_hub", "distance": height,
                     "operation": "join", "alias": "hub_joined"},
          "label": f"Join hub, extrude {height:g}mm"},
-        # ONE blade — rectangle offset at (mid_r, 0), blade aligned
-        # radially. We extrude it as a join, then pattern THAT (not the
-        # full body — that's the degenerate case we're avoiding).
-        {"kind": "newSketch",
-         "params": {"plane": "XY", "alias": "sk_blade",
-                    "name": "ARIA Impeller Blade"},
-         "label": "Sketch for single blade"},
-        {"kind": "sketchRect",
-         "params": {"sketch": "sk_blade",
-                    "cx": cx, "cy": cy,
-                    "w": blade_length, "h": blade_t},
-         "label": f"Blade {blade_length:g}×{blade_t:g}mm at r={mid_r:.1f}"},
-        {"kind": "extrude",
-         "params": {"sketch": "sk_blade", "distance": blade_h,
-                    "operation": "join", "alias": "blade_1"},
-         "label": f"Join blade, extrude {blade_h:g}mm"},
-        # Pattern the SINGLE blade around Z. This is the correct pattern
-        # — patterning just the blade feature replicates it around the
-        # hub.
-        {"kind": "circularPattern",
-         "params": {"feature": "blade_1", "axis": "Z",
-                    "count": n_blades,
-                    "alias": "blade_pattern"},
-         "label": f"Circular pattern: {n_blades} blades around Z"},
+    ]
+    # Emit N blade-rectangles at rotated positions instead of using
+    # circularPattern (broken in SW2024 IDispatch — see
+    # feedback_sw2024_idispatch_quirks). Each blade is centered at
+    # (mid_r * cos(theta), mid_r * sin(theta)). The rectangle stays
+    # axis-aligned (visual approximation — proper sweep angle would
+    # need a rotated sketchRect or a per-blade spline profile).
+    for i in range(n_blades):
+        theta = 2 * math.pi * i / n_blades
+        bcx = mid_r * math.cos(theta)
+        bcy = mid_r * math.sin(theta)
+        sk_alias = f"sk_blade_{i}"
+        plan.extend([
+            {"kind": "newSketch",
+             "params": {"plane": "XY", "alias": sk_alias,
+                        "name": f"ARIA Impeller Blade {i+1}"},
+             "label": f"Sketch blade {i+1}/{n_blades}"},
+            {"kind": "sketchRect",
+             "params": {"sketch": sk_alias,
+                         "cx": bcx, "cy": bcy,
+                         "w": blade_length, "h": blade_t},
+             "label": (f"Blade {i+1}/{n_blades} {blade_length:g}×"
+                        f"{blade_t:g}mm at ({bcx:+.1f},{bcy:+.1f})")},
+            {"kind": "extrude",
+             "params": {"sketch": sk_alias, "distance": blade_h,
+                         "operation": "join",
+                         "alias": f"blade_{i}"},
+             "label": f"Join blade {i+1}/{n_blades}, extrude {blade_h:g}mm"},
+        ])
+    plan.extend([
         # Center bore — cut through the hub
         {"kind": "newSketch",
          "params": {"plane": "XY", "alias": "sk_bore",
@@ -130,7 +136,7 @@ def plan_impeller(spec: dict) -> list[dict]:
          "params": {"sketch": "sk_bore", "distance": height * 1.5,
                     "operation": "cut", "alias": "cut_bore"},
          "label": f"Cut bore through {height * 1.5:g}mm"},
-    ]
+    ])
     # Note the sweep in the label for visual clarity — real sweep requires
     # angled blade sketches which need better geometry primitives (arcs,
     # loft). MVP does radial blades and labels the intended sweep.

@@ -96,6 +96,37 @@ namespace AriaSW
         /// change) and the new one took its place.</summary>
         public static void RecordSuccess(string intent, JObject args)
         {
+            // Invariant guard — reject obviously-wrong recipes BEFORE they
+            // poison the cache and get replayed forever. We saw a class of
+            // bug where a `cut_extrude_blind` succeeded against a body with
+            // through-all geometry and ended up storing `blind:false`,
+            // which then misbehaved on every future blind cut. Cheap intent
+            // check stops that loop without needing a manual cache wipe.
+            if (intent != null && args != null)
+            {
+                bool intentBlind = intent.IndexOf("blind",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+                bool intentThrough = intent.IndexOf("through",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+                if (intentBlind && args["blind"] != null
+                    && args["blind"].Type == JTokenType.Boolean
+                    && !args["blind"].Value<bool>())
+                {
+                    AriaSwAddin.FileLog($"RecipeDb: REJECTED '{intent}' — "
+                        + "intent says blind but args have blind=false. "
+                        + "Not poisoning the cache.");
+                    return;
+                }
+                if (intentThrough && args["blind"] != null
+                    && args["blind"].Type == JTokenType.Boolean
+                    && args["blind"].Value<bool>())
+                {
+                    AriaSwAddin.FileLog($"RecipeDb: REJECTED '{intent}' — "
+                        + "intent says through-all but args have blind=true. "
+                        + "Not poisoning the cache.");
+                    return;
+                }
+            }
             lock (_lock)
             {
                 _store[intent] = args;

@@ -47,7 +47,15 @@ namespace AriaPanel
             try
             {
                 _listener = new HttpListener();
+                // Bind both hostnames. Windows HTTP.sys filters by Host header
+                // at the kernel layer BEFORE our handler runs, so a single
+                // "localhost" prefix rejects 127.0.0.1 requests with HTTP 400
+                // Bad Hostname. Adding both is required so any client (script,
+                // browser, dashboard) reaches us regardless of how they spell
+                // the loopback address. (Same hardening applied across SW,
+                // Rhino, and any future C# HttpListener-based bridge.)
                 _listener.Prefixes.Add($"http://localhost:{Port}/");
+                _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
                 _listener.Start();
                 _running = true;
                 _thread = new Thread(AcceptLoop)
@@ -56,7 +64,7 @@ namespace AriaPanel
                     Name = "AriaRhino-HttpListener",
                 };
                 _thread.Start();
-                RhinoApp.WriteLine($"AriaRhino HttpListener: http://localhost:{Port}/");
+                RhinoApp.WriteLine($"AriaRhino HttpListener: http://localhost:{Port}/ + http://127.0.0.1:{Port}/");
             }
             catch (Exception ex)
             {

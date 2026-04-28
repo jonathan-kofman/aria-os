@@ -27,6 +27,9 @@ _VALID_KINDS = {
     # The server expands implicitInfill/Channel/Lattice into one of
     # these per implicit op before streaming to the host bridge.
     "meshImportAndCombine",
+    # Editable lattice — same idea as the implicit ops but the SW addin
+    # records SDF parameters on user-parameters and re-bakes on change.
+    "latticeFeature",
     # Assembly
     "asmBegin", "addComponent", "joint",
     # W4: real assembly mates + motion drivers
@@ -105,6 +108,13 @@ _REQUIRED_PARAMS = {
     "implicitField":    {"expr", "bounds", "operation"},
     "implicitBoolean":  {"sdf_a", "sdf_b", "op"},
     "meshImportAndCombine": {"stl_path", "target", "operation"},
+    # Editable lattice — re-bakes the SDF on SW user-parameter change.
+    # `target` = host body alias; bbox is auto-derived from the host
+    # body bounds at bake time so callers don't need to recompute.
+    # alias names the resulting lattice body so a fillet / shell op
+    # later in the plan can reference it.
+    "latticeFeature":   {"target", "pattern", "cell_mm", "wall_mm",
+                           "operation", "alias"},
     # W5: sheet metal — body-creating ops mark saw_new_body via the
     # main loop; flange/bend/louver attach to existing edges/faces.
     "sheetMetalBend":    {"edges", "angle"},
@@ -262,6 +272,282 @@ _EXTRUDE_OPERATION_ALIASES = {
 }
 
 
+# Ops that MUST reference a sketch alias. When the LLM forgets the
+# `sketch` field but emitted a fresh sketch immediately before, we can
+# infer it from context. Saves the "Op #4 (extrude): missing params
+# ['sketch']" failure mode that exhausted all 3 LLM tiers in live tests.
+_SKETCH_REFERENCING_OPS = {
+    "extrude", "revolve", "sweep", "rib", "gearFeature",
+    "sketchCircle", "sketchRect", "sketchSpline", "sketchPolyline",
+    "sketchTangentArc", "sketchOffset", "sketchProjection",
+    "sketchEquationCurve", "sheetMetalBase", "sheetMetalCutout",
+}
+
+
+# Body-creating sketch consumers — once one of these takes a sketch,
+# emitting another body-creating op without an explicit sketch ref
+# means the LLM forgot to start a fresh sketch first. These get
+# inferred-from-context only the FIRST time the most-recent sketch
+# is used; later body ops still need an explicit ref.
+_BODY_CREATING_SKETCH_OPS = {
+    "extrude", "revolve", "sweep", "rib", "gearFeature",
+    "sheetMetalBase", "sheetMetalCutout",
+}
+
+
+def _expand_circular_pattern_to_explicit_cuts(
+    plan: list[dict]) -> list[dict]:
+    """Replace each `circularPattern` op with N-1 discrete sketch+extrude
+    ops at rotated positions.
+
+    Background: SW2024's COM IDispatch silently rejects
+    FeatureCircularPattern5 even with selection state correct (verified
+    via probe / addin.log — see feedback_sw2024_idispatch_quirks). The
+    architectural fix is to skip the pattern op entirely and emit each
+    rotated cut as a discrete sketch+cut sequence — extrude works
+    flawlessly across all SW versions and all CAD bridges.
+
+    Looks up the seed feature in the plan to extract:
+      - sketch alias the seed used → look up its sketchCircle's center
+        (cx, cy) and radius (or sketchRect's center + size)
+      - extrude distance + operation
+      - extrusion plane
+
+    Then emits N-1 copies at theta = (2π * i / count) for i in 1..N-1.
+    The original seed (i=0) stays in place.
+
+    If we can't recover the seed geometry from the plan (e.g. the seed
+    is from an external alias map, or uses unsupported sketch primitives),
+    fall back to the legacy _heal_dangling_pattern_refs behavior — drop
+    the pattern op rather than fail the build.
+    """
+    import math
+    if not plan:
+        return plan
+    # Build a lookup: feature_alias → (sketch_alias, extrude_op_index)
+    extrude_by_alias: dict[str, int] = {}
+    sketch_by_alias: dict[str, int] = {}
+    for i, op in enumerate(plan):
+        kind = op.get("kind")
+        params = op.get("params") or {}
+        alias = params.get("alias")
+        if not alias:
+            continue
+        if kind == "extrude":
+            extrude_by_alias[alias] = i
+        elif kind == "newSketch":
+            sketch_by_alias[alias] = i
+    out: list[dict] = []
+    for op in plan:
+        kind = op.get("kind")
+        params = op.get("params") or {}
+        if kind != "circularPattern":
+            out.append(op)
+            continue
+        feat_alias = params.get("feature")
+        count = int(params.get("count", 0))
+        if not feat_alias or count < 2:
+            # Bad pattern op — drop it (legacy behavior).
+            op.setdefault("_normalized", []).append(
+                f"dropped: circularPattern missing feature/count")
+            continue
+        # Find the seed extrude op.
+        idx = extrude_by_alias.get(feat_alias)
+        if idx is None:
+            op.setdefault("_normalized", []).append(
+                f"dropped: circularPattern references unknown feature "
+                f"{feat_alias!r} (no extrude with that alias)")
+            continue
+        seed_extrude = plan[idx]
+        seed_params = seed_extrude.get("params") or {}
+        seed_sketch_alias = seed_params.get("sketch")
+        operation = seed_params.get("operation", "cut")
+        distance = float(seed_params.get("distance", 0.0))
+        # Find the seed sketch op (must be a sketchCircle or sketchRect).
+        sk_idx = sketch_by_alias.get(seed_sketch_alias)
+        if sk_idx is None:
+            op.setdefault("_normalized", []).append(
+                f"dropped: circularPattern seed sketch "
+                f"{seed_sketch_alias!r} not found")
+            continue
+        plane = (plan[sk_idx].get("params") or {}).get("plane", "XY")
+        # Find the FIRST primitive in this sketch (sketchCircle or
+        # sketchRect) by scanning forward from sk_idx until we hit the
+        # next op that's not a sketch primitive.
+        cx0 = cy0 = 0.0
+        radius = 0.0
+        rect_w = rect_h = None
+        primitive_kind = None
+        for j in range(sk_idx + 1, idx):
+            jop = plan[j]
+            jkind = jop.get("kind")
+            jparams = jop.get("params") or {}
+            if jkind == "sketchCircle":
+                cx0 = float(jparams.get("cx", 0.0))
+                cy0 = float(jparams.get("cy", 0.0))
+                radius = float(jparams.get("r",
+                    jparams.get("radius",
+                        float(jparams.get("diameter", 0.0)) / 2)))
+                primitive_kind = "circle"
+                break
+            if jkind == "sketchRect":
+                cx0 = float(jparams.get("cx", 0.0))
+                cy0 = float(jparams.get("cy", 0.0))
+                rect_w = float(jparams.get("w", 0.0))
+                rect_h = float(jparams.get("h", 0.0))
+                primitive_kind = "rect"
+                break
+        if primitive_kind is None:
+            op.setdefault("_normalized", []).append(
+                f"dropped: circularPattern seed sketch primitive "
+                f"unsupported (only sketchCircle/sketchRect supported)")
+            continue
+        # Phase angle of the seed.
+        phase = math.atan2(cy0, cx0) if (cx0 != 0 or cy0 != 0) else 0.0
+        rRot = math.sqrt(cx0 * cx0 + cy0 * cy0)
+        # Mark the original op as expanded (for the trace) and emit N-1
+        # rotated copies.
+        op.setdefault("_normalized", []).append(
+            f"expanded: circularPattern × {count} → {count - 1} "
+            f"explicit {primitive_kind} cuts (SW2024 IDispatch workaround)")
+        # The original seed extrude is already in `out` (we appended
+        # everything before this circularPattern op above). Now emit
+        # N-1 more.
+        for i in range(1, count):
+            theta = phase + 2 * math.pi * i / count
+            cx = rRot * math.cos(theta)
+            cy = rRot * math.sin(theta)
+            sk_alias_i = f"{seed_sketch_alias}_p{i}"
+            ext_alias_i = f"{feat_alias}_p{i}"
+            out.append({
+                "kind": "newSketch",
+                "params": {"plane": plane, "alias": sk_alias_i,
+                            "name": f"ARIA pattern {i+1}/{count}"},
+                "label": (f"Pattern {i+1}/{count}: sketch on {plane}"),
+            })
+            if primitive_kind == "circle":
+                out.append({
+                    "kind": "sketchCircle",
+                    "params": {"sketch": sk_alias_i,
+                                "cx": cx, "cy": cy, "r": radius},
+                    "label": (f"Pattern {i+1}/{count}: Ø{radius*2:g}mm "
+                               f"at ({cx:+.1f}, {cy:+.1f})"),
+                })
+            else:
+                # For rect, rotating the center but keeping the rect
+                # axis-aligned — visual approximation; proper rotation
+                # would need a rotated polyline.
+                out.append({
+                    "kind": "sketchRect",
+                    "params": {"sketch": sk_alias_i,
+                                "cx": cx, "cy": cy,
+                                "w": rect_w, "h": rect_h},
+                    "label": (f"Pattern {i+1}/{count}: rect {rect_w:g}×"
+                               f"{rect_h:g} at ({cx:+.1f}, {cy:+.1f})"),
+                })
+            out.append({
+                "kind": "extrude",
+                "params": {"sketch": sk_alias_i, "distance": distance,
+                            "operation": operation,
+                            "alias": ext_alias_i},
+                "label": (f"Pattern {i+1}/{count}: extrude {operation} "
+                           f"{distance:g}mm"),
+            })
+    return out
+
+
+def _heal_dangling_pattern_refs(plan: list[dict]) -> list[dict]:
+    """Drop circularPattern / mirrorPattern ops that reference a
+    feature alias not declared elsewhere in the plan.
+
+    Why: LLMs commonly generate "patternCircular(feature='keyway_cutout')"
+    after emitting only a sketch op named keyway_cutout (not a real
+    feature) — or after dropping the source feature from the plan
+    entirely. Validator catches it but the whole plan ends up rejected.
+    Better self-heal: drop the dangling pattern op and continue.
+    """
+    if not plan:
+        return plan
+    feature_aliases: set[str] = set()
+    for op in plan:
+        kind = op.get("kind")
+        params = op.get("params") or {}
+        # An op declares a feature alias whenever it has alias= AND it's
+        # a feature-creating kind (anything that lands in the SW tree).
+        alias = params.get("alias")
+        if alias and kind not in (
+                "newSketch", "sketchCircle", "sketchRect",
+                "sketchPolyline", "sketchSpline", "sketchTangentArc",
+                "sketchOffset", "sketchProjection",
+                "sketchEquationCurve"):
+            feature_aliases.add(alias)
+    out: list[dict] = []
+    for op in plan:
+        kind = op.get("kind")
+        params = op.get("params") or {}
+        if kind in ("circularPattern", "mirrorPattern", "linearPattern"):
+            ref = params.get("feature")
+            if ref and ref not in feature_aliases:
+                op.setdefault("_normalized", []).append(
+                    f"dropped: circularPattern references unknown "
+                    f"feature {ref!r} — auto-pruned to keep plan valid")
+                # Skip emitting this op entirely.
+                continue
+        out.append(op)
+    return out
+
+
+def _heal_missing_sketch_refs(plan: list[dict]) -> list[dict]:
+    """If an op like extrude/revolve/sketchCircle is missing its `sketch`
+    field, infer it from the most-recent newSketch alias declared
+    earlier in the plan.
+
+    Why: LLMs in fast/balanced tiers commonly emit extrude immediately
+    after newSketch and forget the back-reference field. The intent is
+    obvious — use the sketch that was just created. Without this layer
+    the planner exhausts all 3 tiers, the user sees nothing built, and
+    has to retry by hand. See live test "stepped shaft 200mm long..."
+    where 3 of the 11 extrudes hit this exact failure.
+    """
+    if not plan:
+        return plan
+    last_sketch_alias: str | None = None
+    # Track which sketches have already been consumed by a body-creating
+    # op (extrude / revolve / etc.). sketchCircle / sketchRect / etc.
+    # POPULATE a sketch — they don't consume it, so re-using the same
+    # alias for the eventual extrude is correct CAD semantics.
+    body_consumed: set[str] = set()
+    for op in plan:
+        kind = op.get("kind")
+        params = op.get("params")
+        if not isinstance(params, dict):
+            continue
+        if kind == "newSketch":
+            alias = params.get("alias")
+            if isinstance(alias, str) and alias:
+                last_sketch_alias = alias
+            continue
+        if kind in _SKETCH_REFERENCING_OPS:
+            if params.get("sketch"):
+                if kind in _BODY_CREATING_SKETCH_OPS:
+                    body_consumed.add(str(params["sketch"]))
+                continue
+            if last_sketch_alias is None:
+                continue
+            # For body-creating ops, only infer if the candidate sketch
+            # hasn't already been consumed by an earlier body op.
+            if kind in _BODY_CREATING_SKETCH_OPS \
+                    and last_sketch_alias in body_consumed:
+                continue
+            params["sketch"] = last_sketch_alias
+            op["params"] = params
+            op.setdefault("_normalized", []).append(
+                f"sketch<-{last_sketch_alias} (auto-inferred)")
+            if kind in _BODY_CREATING_SKETCH_OPS:
+                body_consumed.add(last_sketch_alias)
+    return plan
+
+
 def _normalize_plan(plan: list[dict]) -> list[dict]:
     """Mutate each op's params in-place to canonical form. Returns plan
     so callers can chain. Records changes on op["_normalized"]."""
@@ -306,8 +592,36 @@ def _normalize_plan(plan: list[dict]) -> list[dict]:
                     changes.append(f"operation:{v!r}->{canon!r}")
 
         if changes:
-            op["_normalized"] = changes
+            op.setdefault("_normalized", []).extend(changes)
         op["params"] = params
+
+    # 4. Cross-op heal: fill missing sketch back-references from the
+    # last-declared newSketch alias. Runs LAST so it sees the
+    # post-aliasing param shape.
+    plan = _heal_missing_sketch_refs(plan)
+    # 5. Auto-expand circularPattern → N-1 explicit cut-extrudes. SW2024
+    # silently rejects FeatureCircularPattern5; expanding upstream keeps
+    # all CAD bridges happy with one code path. Patterns whose seed
+    # geometry can't be recovered fall through to the dangling-ref drop.
+    plan = _expand_circular_pattern_to_explicit_cuts(plan)
+    # 6. Apply ledger-driven workarounds (linearPattern, mirror -> explicit
+    # cuts when ledger marks them needs_workaround). This is the
+    # generalization of the circular pattern fix - any op the bridge can't
+    # do reliably gets rewritten upstream.
+    try:
+        from aria_os.native_planner import feature_workarounds
+        import json
+        from pathlib import Path
+        ledger_path = (Path(__file__).resolve().parents[2]
+                       / "outputs" / "sw_learning_ledger.json")
+        ledger = (json.loads(ledger_path.read_text(encoding="utf-8"))
+                  if ledger_path.exists() else {})
+        plan = feature_workarounds.apply_workarounds(plan, ledger=ledger)
+    except Exception:
+        pass  # workarounds are best-effort; never break the validator
+    # 7. Drop any remaining dangling pattern refs (mirror / linear,
+    # plus circularPattern that the expander couldn't recover).
+    plan = _heal_dangling_pattern_refs(plan)
     return plan
 
 

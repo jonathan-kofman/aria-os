@@ -156,6 +156,31 @@ def lookup(intent: str) -> Optional[dict]:
 
 
 def record_success(intent: str, args: dict) -> None:
+    # Intent-vs-args invariant — same guard pattern shared with SW,
+    # Rhino, Fusion RecipeDb implementations. Reject recipes whose args
+    # contradict the intent so one quirky success can't poison the
+    # cache and cause every future matching intent to replay the bad
+    # combo. Cheap and prevents a class of "silently wrong forever"
+    # failures we've seen on the SW side.
+    if intent and isinstance(args, dict):
+        intent_low = intent.lower()
+        intent_blind = "blind" in intent_low
+        intent_through = "through" in intent_low
+        blind_val = args.get("blind")
+        if intent_blind and isinstance(blind_val, bool) and not blind_val:
+            try:
+                print(f"AriaECAD RecipeDb: REJECTED '{intent}' — "
+                      "intent says blind but args have blind=false.")
+            except Exception:
+                pass
+            return
+        if intent_through and isinstance(blind_val, bool) and blind_val:
+            try:
+                print(f"AriaECAD RecipeDb: REJECTED '{intent}' — "
+                      "intent says through-all but args have blind=true.")
+            except Exception:
+                pass
+            return
     if not _INITIALIZED:
         init()
     with _LOCK:

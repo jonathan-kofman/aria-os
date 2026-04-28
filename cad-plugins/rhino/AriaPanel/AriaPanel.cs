@@ -111,14 +111,90 @@ namespace AriaPanel
                 _bridge = new AriaBridge(this);
                 core.WebMessageReceived += _bridge.OnWebMessageReceived;
 
+                // Probe backend reachability. If dev server is down, show a
+                // placeholder with polling logic (same pattern as SolidWorks).
+                string targetUrl = _url;
+                if (!IsHostReachable(_url))
+                {
+                    RhinoApp.WriteLine($"[ARIA] dev server unreachable; loading placeholder");
+                    targetUrl = WaitingDataUri(_url);
+                }
+
                 // Navigate to the panel URL.
-                core.Navigate(_url);
+                core.Navigate(targetUrl);
                 _webViewReady = true;
             }
             catch (Exception ex)
             {
                 RhinoApp.WriteLine($"[ARIA] WebView2 init failed: {ex.Message}");
             }
+        }
+
+        // Helper: probe if host:port is reachable within 1 second
+        private static bool IsHostReachable(string url)
+        {
+            try
+            {
+                var uri = new Uri(url);
+                int port = uri.Port > 0 ? uri.Port : (uri.Scheme == "https" ? 443 : 80);
+                using (var sock = new System.Net.Sockets.TcpClient())
+                {
+                    var connect = sock.BeginConnect(uri.Host, port, null, null);
+                    bool ok = connect.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(1));
+                    if (!ok) return false;
+                    sock.EndConnect(connect);
+                    return sock.Connected;
+                }
+            }
+            catch { return false; }
+        }
+
+        // Helper: data: URI with polling placeholder + auto-reload script
+        private static string WaitingDataUri(string url)
+        {
+            string safe = (url ?? "")
+                .Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+            string jsTarget = (url ?? "").Replace("\\", "\\\\").Replace("'", "\\'");
+            string html =
+                "<!doctype html><html><head><meta charset='utf-8'>" +
+                "<style>" +
+                "body{margin:0;font:14px system-ui,Segoe UI,Arial;" +
+                "background:#1a1d24;color:#e0e2e6;" +
+                "display:flex;align-items:center;justify-content:center;" +
+                "height:100vh;text-align:center}" +
+                ".box{max-width:380px;padding:24px}" +
+                ".title{font-size:18px;font-weight:600;color:#5d8cdc;margin-bottom:12px}" +
+                ".hint{opacity:.7;margin-top:16px;font-size:12px;line-height:1.5}" +
+                "#status{margin-top:8px;font-size:12px;opacity:.6}" +
+                "code{background:#2a2e38;padding:2px 6px;border-radius:3px}" +
+                "</style></head><body><div class='box'>" +
+                "<div class='title'>ARIA panel</div>" +
+                "<div>Waiting for the React dev server.</div>" +
+                "<div class='hint'>" +
+                "Start it with <code>npm run dev</code> in the " +
+                "<code>frontend/</code> directory.<br>" +
+                "Target: " + safe + "</div>" +
+                "<div id='status'>polling...</div>" +
+                "</div>" +
+                "<script>" +
+                "const target='" + jsTarget + "';" +
+                "const status=document.getElementById('status');" +
+                "let tries=0;" +
+                "async function check(){" +
+                "  tries++;" +
+                "  status.textContent='polling... (try '+tries+')';" +
+                "  try{" +
+                "    await fetch(target,{method:'GET',mode:'no-cors',cache:'no-store'});" +
+                "    status.textContent='dev server up — loading...';" +
+                "    location.replace(target);" +
+                "  }catch(e){" +
+                "    setTimeout(check,3000);" +
+                "  }" +
+                "}" +
+                "setTimeout(check,500);" +
+                "</script>" +
+                "</body></html>";
+            return "data:text/html;charset=utf-8," + Uri.EscapeDataString(html);
         }
 
         // -----------------------------------------------------------------
@@ -140,11 +216,19 @@ namespace AriaPanel
             if (!_webViewReady || WebView?.CoreWebView2 == null) return;
             try
             {
-                Dispatcher.Invoke(() => WebView.CoreWebView2.Reload());
+                Dispatcher.Invoke(() =>
+                {
+                    try { WebView.CoreWebView2?.Reload(); }
+                    catch (Exception ex2)
+                    {
+                        RhinoApp.WriteLine(
+                            $"[ARIA] Reload innermost failed: {ex2.GetType().Name}: {ex2.Message}");
+                    }
+                });
             }
             catch (Exception ex)
             {
-                RhinoApp.WriteLine($"[ARIA] Reload failed: {ex.Message}");
+                RhinoApp.WriteLine($"[ARIA] Reload dispatch failed: {ex.GetType().Name}: {ex.Message}");
             }
         }
 

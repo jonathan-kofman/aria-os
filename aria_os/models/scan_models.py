@@ -64,6 +64,7 @@ class CatalogEntry:
     topology: str = "unknown"
     primitives_summary: List[dict] = field(default_factory=list)
     stl_path: str = ""
+    step_path: str = ""
     features_path: str = ""
     confidence: float = 0.0
     tags: List[str] = field(default_factory=list)
@@ -79,6 +80,7 @@ class CatalogEntry:
             "topology": self.topology,
             "primitives_summary": self.primitives_summary,
             "stl_path": self.stl_path,
+            "step_path": self.step_path,
             "features_path": self.features_path,
             "confidence": self.confidence,
             "tags": self.tags,
@@ -97,6 +99,7 @@ class CatalogEntry:
             topology=d.get("topology", "unknown"),
             primitives_summary=d.get("primitives_summary", []),
             stl_path=d.get("stl_path", ""),
+            step_path=d.get("step_path", ""),
             features_path=d.get("features_path", ""),
             confidence=d.get("confidence", 0.0),
             tags=d.get("tags", []),

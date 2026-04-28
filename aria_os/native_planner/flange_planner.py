@@ -10,6 +10,7 @@ bolt-hole pattern and bore cut down through it.
 """
 from __future__ import annotations
 
+from .circular_pattern_helper import emit_circular_cuts
 from .iso_hardware import resolve_bolt_hole
 
 
@@ -79,23 +80,22 @@ def plan_flange(spec: dict, goal: str = "") -> list[dict]:
          "params": {"sketch": "sketch_body", "distance": thick,
                     "operation": "new", "alias": "body_flange"},
          "label": f"Extrude {thick:g}mm (new body)"},
-        # --- Bolt-hole pattern ---
-        {"kind": "newSketch",
-         "params": {"plane": "XY", "alias": "sketch_bolt",
-                    "name": "ARIA Bolt Hole"},
-         "label": "Sketch on XY plane"},
-        {"kind": "sketchCircle",
-         "params": {"sketch": "sketch_bolt",
-                    "cx": bolt_r, "cy": 0, "r": bolt_dia / 2.0},
-         "label": f"Bolt circle Ø{bolt_dia:g}mm at r={bolt_r:g}mm"},
-        {"kind": "extrude",
-         "params": {"sketch": "sketch_bolt", "distance": cut_dist,
-                    "operation": "cut", "alias": "cut_bolt"},
-         "label": f"Cut bolt hole through ({cut_dist:g}mm)"},
-        {"kind": "circularPattern",
-         "params": {"feature": "cut_bolt", "axis": "Z",
-                    "count": n_bolts, "alias": "pat_bolts"},
-         "label": f"Circular pattern × {n_bolts} around Z"},
+    ]
+    # --- Bolt-hole pattern: emit N explicit cut-extrudes instead of
+    # --- using `circularPattern` (broken in SW2024 IDispatch — see
+    # --- feedback_sw2024_idispatch_quirks memory). Each cut is a
+    # --- separate sketch+extrude, fully reliable across all CAD
+    # --- bridges (SW/Rhino/Fusion/Onshape).
+    plan.extend(emit_circular_cuts(
+        count=n_bolts,
+        radius_mm=bolt_r,
+        hole_dia_mm=bolt_dia,
+        cut_dist_mm=cut_dist,
+        plane="XY",
+        alias_prefix="bolt",
+        label_prefix="Bolt hole",
+    ))
+    plan.extend([
         # --- Center bore ---
         {"kind": "newSketch",
          "params": {"plane": "XY", "alias": "sketch_bore",
@@ -108,5 +108,5 @@ def plan_flange(spec: dict, goal: str = "") -> list[dict]:
          "params": {"sketch": "sketch_bore", "distance": cut_dist,
                     "operation": "cut", "alias": "cut_bore"},
          "label": f"Cut bore through ({cut_dist:g}mm)"},
-    ]
+    ])
     return plan

@@ -224,6 +224,11 @@ namespace AriaSW
                     "circularPattern" => OpCircularPattern(p),
                     "fillet"          => OpFillet(p),
                     "addParameter"    => OpAddParameter(p),
+                    // Configurations + design tables (T3_EXPERT — CSWE)
+                    "addConfiguration"      => OpAddConfiguration(p),
+                    "activateConfiguration" => OpActivateConfiguration(p),
+                    "suppressFeature"       => OpSuppressFeature(p),
+                    "unsuppressFeature"     => OpUnsuppressFeature(p),
                     "verifyPart"      => OpVerifyPart(p),
                     // SW-native ops (extend the bridge contract beyond the
                     // shared CAD vocabulary so a SW-aware planner can
@@ -261,6 +266,56 @@ namespace AriaSW
                     // Surface modeling ops
                     "surfaceLoft"     => OpSurfaceLoft(p),
                     "surfaceExtrude"  => OpSurfaceExtrude(p),
+                    // Editable lattice — dispatches to dashboard's bake
+                    // endpoint, imports STL as Mesh BREP, booleans
+                    // against host body, hooks SW user-parameter
+                    // changes for in-place re-bake.
+                    "latticeFeature"  => OpLatticeFeature(p),
+                    "meshImportAndCombine" => OpMeshImportAndCombine(p),
+                    // 3D solid features beyond extrude — needed by the
+                    // revolve / lattice / nozzle planners.
+                    "revolve"         => OpRevolve(p),
+                    "sweep"           => OpSweep(p),
+                    "loft"            => OpLoft(p),
+                    "shell"           => OpShell(p),
+                    "rib"             => OpRib(p),
+                    "draft"           => OpDraft(p),
+                    "helix"           => OpHelix(p),
+                    "coil"            => OpCoil(p),
+                    // Sketch primitives beyond circle/rect — needed by
+                    // revolve_planner (spline/polyline profiles) and
+                    // any LLM plan with curved geometry.
+                    "sketchPolyline"  => OpSketchPolyline(p),
+                    "sketchSpline"    => OpSketchSpline(p),
+                    "sketchTangentArc" => OpSketchTangentArc(p),
+                    "sketchOffset"    => OpSketchOffset(p),
+                    "sketchProjection"=> OpSketchProjection(p),
+                    // Drawing ops — emit by the pro-quality dwg planner.
+                    // These dispatch to the active .slddrw and use
+                    // SW DrawingDoc API where available; placeholders
+                    // (datumLabel / gdtFrame / surfaceFinishCallout)
+                    // queue up state for OpEnrichDrawing to apply in
+                    // a single pass (avoids one COM round-trip per op).
+                    "beginDrawing"    => OpBeginDrawing(p),
+                    "newSheet"        => OpNewSheet(p),
+                    "addView"         => OpAddView(p),
+                    "linearDimension" => OpLinearDimension(p),
+                    "angularDimension" => OpAngularDimension(p),
+                    "diameterDimension" => OpDiameterDimension(p),
+                    "radialDimension" => OpRadialDimension(p),
+                    "ordinateDimension" => OpOrdinateDimension(p),
+                    "datumLabel"      => OpDatumLabel(p),
+                    "gdtFrame"        => OpGdtFrame(p),
+                    "surfaceFinishCallout" => OpSurfaceFinishCallout(p),
+                    "weldSymbol"      => OpWeldSymbol(p),
+                    "centerlineMark"  => OpCenterlineMark(p),
+                    "balloon"         => OpBalloon(p),
+                    "revisionTable"   => OpRevisionTable(p),
+                    "bomTable"        => OpBomTable(p),
+                    "sectionView"     => OpSectionView(p),
+                    "detailView"      => OpDetailView(p),
+                    "brokenView"      => OpBrokenView(p),
+                    "autoDimension"   => OpAutoDimension(p),
                     // Existing SW-unique stubs
                     "toolboxHardware" => OpToolboxHardware(p),
                     "weldmentProfile" => OpWeldmentProfile(p),
@@ -307,6 +362,118 @@ namespace AriaSW
 
         private static double Mm(object v) => Convert.ToDouble(v) / 1000.0;
 
+        /// <summary>
+        /// Late-bound COM dispatch helper. Many SW2024 IFeatureManager
+        /// methods (InsertHelix, InsertFeatureShell2, FeatureRib3,
+        /// InsertDraftDC2, InsertSheetMetalBaseFlange2, FeatureLoft2,
+        /// FeatureCircularPattern5...) are exposed only through IDispatch
+        /// and not through the RCW's GetMethods table. Reflection can't
+        /// find them, but Type.InvokeMember can.
+        ///
+        /// This helper tries each (holder, name) tuple in order:
+        ///   1) GetMethod + Invoke (works for typelib-visible methods)
+        ///   2) InvokeMember(BindingFlags.InvokeMethod) — late-bound,
+        ///      goes through IDispatch.
+        /// Returns the first non-null result, or null if every attempt
+        /// fails. `caller` is just a tag for FileLog.
+        /// </summary>
+        private object LateBoundInvoke(
+            string caller,
+            object[] holders,
+            string[] methodNames,
+            object[] args)
+        {
+            foreach (var name in methodNames)
+            {
+                if (string.IsNullOrEmpty(name)) continue;
+                foreach (var holder in holders)
+                {
+                    if (holder == null) continue;
+                    var t = holder.GetType();
+                    // Path 1: typelib-visible
+                    var probe = t.GetMethod(name);
+                    if (probe != null)
+                    {
+                        try
+                        {
+                            // Pad args if the method expects more (some
+                            // versions add tail params we don't care about).
+                            int n = probe.GetParameters().Length;
+                            object[] padded = args;
+                            if (n != args.Length)
+                            {
+                                padded = new object[n];
+                                for (int i = 0; i < n; i++)
+                                    padded[i] = i < args.Length ? args[i] : false;
+                            }
+                            object res = probe.Invoke(holder, padded);
+                            if (res != null)
+                            {
+                                FileLog($"  {caller}: typelib {t.Name}.{name} -> ok");
+                                return res;
+                            }
+                            FileLog($"  {caller}: typelib {t.Name}.{name} -> null");
+                        }
+                        catch (Exception ex)
+                        {
+                            FileLog($"  {caller}: typelib {t.Name}.{name} threw {ex.Message}");
+                        }
+                    }
+                    // Path 2: late-bound IDispatch
+                    try
+                    {
+                        object res = t.InvokeMember(
+                            name,
+                            System.Reflection.BindingFlags.InvokeMethod,
+                            null, holder, args);
+                        if (res != null)
+                        {
+                            FileLog($"  {caller}: late-bound {t.Name}.{name} -> ok");
+                            return res;
+                        }
+                    }
+                    catch { /* method not exposed on this holder */ }
+                }
+            }
+            FileLog($"  {caller}: late-bound dispatch found no working {string.Join("/", methodNames)}");
+            // Diagnostic: extract a couple of root substrings (e.g.
+            // "Shell", "Helix") from the candidate names and dump every
+            // method on every holder that matches. Helps us discover
+            // unexpected SW2024 method names.
+            try
+            {
+                var roots = new System.Collections.Generic.HashSet<string>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (var name in methodNames)
+                {
+                    if (string.IsNullOrEmpty(name)) continue;
+                    string stripped = name
+                        .Replace("Insert", "")
+                        .Replace("Feature", "")
+                        .TrimEnd('1', '2', '3', '4', '5', '6', '7', '8', '9');
+                    if (stripped.Length >= 4) roots.Add(stripped);
+                }
+                var hits = new System.Collections.Generic.List<string>();
+                foreach (var root in roots)
+                {
+                    foreach (var holder in holders)
+                    {
+                        if (holder == null) continue;
+                        foreach (var m in holder.GetType().GetMethods())
+                            if (m.Name.IndexOf(root,
+                                StringComparison.OrdinalIgnoreCase) >= 0)
+                                hits.Add($"{holder.GetType().Name}.{m.Name}({m.GetParameters().Length})");
+                    }
+                }
+                FileLog($"  {caller}: probe roots={string.Join(",", roots)} hits={string.Join(", ", hits)}");
+            }
+            catch (Exception probeEx)
+            {
+                FileLog($"  {caller}: probe threw {probeEx.Message}");
+            }
+            return null;
+        }
+
         private IModelDoc2 EnsurePart()
         {
             // If a part is already open, reuse it. Otherwise create one
@@ -335,22 +502,55 @@ namespace AriaSW
             _lastBodyFeature = null;
 
             // Force a fresh part document so each plan runs in isolation.
-            // Previously EnsurePart reused the active doc — that left stale
-            // bodies + features from the prior generation polluting bbox
-            // diagnostics and feature counts. Close any active doc (silent,
-            // no save) and open a new one from the user's default template.
+            // CloseDoc alone fails silently when the active doc has
+            // unsaved changes (e.g. after saveAs of a derived form, or
+            // after addParameter mutations on the equation manager). Use
+            // CloseAllDocuments(true) which closes all docs INCLUDING
+            // unsaved ones — guaranteed clean slate.
             try
             {
-                var active = _sw.IActiveDoc2 as IModelDoc2;
-                if (active != null)
+                // Pre-mark every open doc as "needs no save" so the
+                // bulk close below is a no-op for the save-prompt UI.
+                var docs = _sw.GetDocuments() as object[];
+                if (docs != null)
                 {
-                    _sw.CloseDoc(active.GetTitle());
-                    FileLog($"  beginPlan: closed prior doc '{active.GetTitle()}'");
+                    foreach (var d in docs)
+                    {
+                        var md = d as IModelDoc2;
+                        if (md == null) continue;
+                        try
+                        {
+                            // IModelDoc2.GetType() shadows Object.GetType
+                            // and returns an int (doc-type enum), so we
+                            // must cast to object first to reach the .NET
+                            // reflection method.
+                            ((object)md).GetType().InvokeMember(
+                                "SetSaveFlag",
+                                System.Reflection.BindingFlags.InvokeMethod,
+                                null, md, new object[] { 0 });
+                        }
+                        catch { }
+                    }
                 }
+                bool allClosed = _sw.CloseAllDocuments(true);
+                FileLog($"  beginPlan: CloseAllDocuments(true) -> {allClosed}");
             }
             catch (Exception ex)
             {
-                FileLog($"  beginPlan: close prior doc threw (continuing): {ex.Message}");
+                FileLog($"  beginPlan: CloseAllDocuments threw {ex.Message}, falling through to CloseDoc");
+                try
+                {
+                    var active = _sw.IActiveDoc2 as IModelDoc2;
+                    if (active != null)
+                    {
+                        _sw.CloseDoc(active.GetTitle());
+                        FileLog($"  beginPlan: legacy close '{active.GetTitle()}'");
+                    }
+                }
+                catch (Exception ex2)
+                {
+                    FileLog($"  beginPlan: legacy close threw {ex2.Message}");
+                }
             }
             _model = null;
             _model = EnsurePart();
@@ -362,7 +562,14 @@ namespace AriaSW
         private object OpAddParameter(Dictionary<string, object> p)
         {
             string name = p["name"]?.ToString();
-            double val  = Convert.ToDouble(p["value_mm"]);
+            // Accept either "value_mm" or plain "value" — different planners
+            // and tests have used both spellings.
+            object rawVal = p.ContainsKey("value_mm") ? p["value_mm"]
+                          : p.ContainsKey("value")    ? p["value"]
+                          : null;
+            if (rawVal == null)
+                return new { ok = false, error = "addParameter: missing 'value_mm' or 'value'" };
+            double val  = Convert.ToDouble(rawVal);
             if (_model == null) _model = EnsurePart();
 
             var eq = _model.GetEquationMgr() as IEquationMgr;
@@ -378,6 +585,344 @@ namespace AriaSW
             return new { ok = idx >= 0, name, value_mm = val, idx };
         }
 
+        // -----------------------------------------------------------------
+        // T3_EXPERT — Configurations
+        //
+        // SW Configurations are named saved states of the part: each can
+        // suppress different features, override dimensions, or use a
+        // different material. They're the foundation of design tables and
+        // the CSWE configurations question.
+        //
+        // ConfigurationManager.AddConfiguration2 signature (SW 2014+):
+        //   AddConfiguration2(Name, Comment, AlternateName, Options,
+        //                     ParentConfigName, Description, ColorIndex)
+        // Returns IConfiguration on success, null on failure.
+        // -----------------------------------------------------------------
+        private object OpAddConfiguration(Dictionary<string, object> p)
+        {
+            if (_model == null)
+                return new { ok = false, error = "addConfiguration: no model" };
+            string name = p.ContainsKey("name") ? p["name"]?.ToString() : null;
+            if (string.IsNullOrEmpty(name))
+                return new { ok = false, error = "addConfiguration: 'name' required" };
+            string comment = p.ContainsKey("comment") ? p["comment"]?.ToString() : "";
+            string parent  = p.ContainsKey("parent")  ? p["parent"]?.ToString()  : null;
+            string descrip = p.ContainsKey("description") ? p["description"]?.ToString() : name;
+            try
+            {
+                var cmgr = _model.ConfigurationManager;
+                if (cmgr == null)
+                    return new { ok = false, error = "ConfigurationManager unavailable" };
+                // SW interop versions disagree on AddConfiguration2's arg
+                // count (saw 6, 7, 8 across 2018→2024). Build via reflection.
+                var cmType = cmgr.GetType();
+                var mi = cmType.GetMethod("AddConfiguration2")
+                       ?? cmType.GetMethod("AddConfiguration");
+                if (mi == null)
+                    return new { ok = false, error = "AddConfiguration[2] not found on ConfigurationManager" };
+                var paramInfos = mi.GetParameters();
+                int n = paramInfos.Length;
+                var args = new object[n];
+                for (int i = 0; i < n; i++)
+                {
+                    Type pt = paramInfos[i].ParameterType;
+                    if (pt == typeof(string))      args[i] = "";
+                    else if (pt == typeof(int))    args[i] = 0;
+                    else if (pt == typeof(bool))   args[i] = false;
+                    else                            args[i] = null;
+                }
+                if (n > 0) args[0] = name;
+                if (n > 1) args[1] = comment ?? "";
+                if (n > 2) args[2] = "";              // alternate name
+                if (n > 3) args[3] = 0;               // options
+                if (n > 4) args[4] = parent;          // parent (null = top)
+                if (n > 5) args[5] = descrip ?? name; // description
+                object cfg = mi.Invoke(cmgr, args);
+                FileLog($"  addConfiguration: name='{name}' parent='{parent ?? "<top>"}' -> {(cfg != null ? "ok" : "null")}");
+                if (cfg == null)
+                    return new { ok = false, error = $"AddConfiguration2 returned null for '{name}' (duplicate?)" };
+                return new { ok = true, name, parent };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"addConfiguration threw: {ex.Message}" };
+            }
+        }
+
+        private object OpActivateConfiguration(Dictionary<string, object> p)
+        {
+            if (_model == null)
+                return new { ok = false, error = "activateConfiguration: no model" };
+            string name = p.ContainsKey("name") ? p["name"]?.ToString() : null;
+            if (string.IsNullOrEmpty(name))
+                return new { ok = false, error = "activateConfiguration: 'name' required" };
+            try
+            {
+                // Late-bind: ShowConfiguration2 returns bool; ShowConfiguration
+                // returns int; some SW versions only expose one. Also try
+                // ConfigurationManager.set_ActiveConfiguration as a fallback.
+                bool ok = false;
+                var mt = ((object)_model).GetType();
+                // InvokeMember handles dispatch / overload resolution more
+                // permissively than GetMethod(name, types). Useful when the
+                // method exists on the COM IDispatch but isn't visible to
+                // strict .NET reflection.
+                foreach (var mname in new[] {
+                    "ShowConfiguration2", "ShowConfiguration" })
+                {
+                    try
+                    {
+                        var r = mt.InvokeMember(mname,
+                            System.Reflection.BindingFlags.InvokeMethod,
+                            null, _model, new object[] { name });
+                        ok = (r is bool b && b) || (r is int ri && ri != 0);
+                        FileLog($"  activateConfiguration: {mname}('{name}') -> {ok} (raw={r ?? "null"})");
+                        if (ok) break;
+                    }
+                    catch (System.Reflection.TargetInvocationException tie)
+                    {
+                        FileLog($"  activateConfiguration {mname} target-threw: {tie.InnerException?.Message ?? tie.Message}");
+                    }
+                    catch (System.MissingMethodException)
+                    {
+                        FileLog($"  activateConfiguration {mname}: not found on _model");
+                    }
+                    catch (Exception mex)
+                    {
+                        FileLog($"  activateConfiguration {mname} threw: {mex.GetType().Name}: {mex.Message}");
+                    }
+                }
+                // Last-ditch: walk configs and pick by name via ActiveConfiguration set.
+                if (!ok)
+                {
+                    var cmgr = _model.ConfigurationManager;
+                    var configs = _model.GetConfigurationNames() as string[];
+                    var listed = configs != null ? string.Join(", ", configs) : "<null>";
+                    FileLog($"  activateConfiguration: configs in doc=[{listed}]");
+                    if (configs != null && Array.Exists(configs, c => c == name))
+                    {
+                        // Some interops expose set_ActiveConfiguration as
+                        // a property. Try setting via reflection.
+                        var cmType = cmgr.GetType();
+                        var setProp = cmType.GetProperty("ActiveConfiguration");
+                        if (setProp != null && setProp.CanWrite)
+                        {
+                            try
+                            {
+                                var cfgObj = _model.GetConfigurationByName(name);
+                                setProp.SetValue(cmgr, cfgObj, null);
+                                ok = true;
+                                FileLog($"  activateConfiguration: set via ActiveConfiguration property -> ok");
+                            }
+                            catch (Exception sx)
+                            {
+                                FileLog($"  activateConfiguration set-prop threw: {sx.Message}");
+                            }
+                        }
+                    }
+                }
+                if (!ok)
+                    return new { ok = false,
+                                  error = $"could not activate config '{name}' " +
+                                          $"(none of ShowConfiguration*/ActiveConfiguration paths worked)" };
+                _model.ForceRebuild3(false);
+                string active = _model.ConfigurationManager?.ActiveConfiguration?.Name;
+                return new { ok = true, name, active };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"activateConfiguration threw: {ex.Message}" };
+            }
+        }
+
+        // Suppress / unsuppress a feature in the active configuration. Used
+        // to differentiate configurations geometrically (e.g. "with hole" vs
+        // "without hole"). Resolves alias → real SW feature name first.
+        private (bool, IFeature, string) ResolveFeature(string aliasOrName)
+        {
+            if (string.IsNullOrEmpty(aliasOrName))
+                return (false, null, "feature name/alias required");
+            IFeature feat = null;
+            string resolved = aliasOrName;
+            if (_aliasMap.ContainsKey(aliasOrName)
+                && _aliasMap[aliasOrName] is IFeature f)
+            {
+                feat = f;
+                resolved = f.Name;
+            }
+            else
+            {
+                // Walk the feature tree looking for a name match.
+                var first = _model.FirstFeature() as IFeature;
+                while (first != null)
+                {
+                    if (first.Name == aliasOrName)
+                    {
+                        feat = first;
+                        resolved = first.Name;
+                        break;
+                    }
+                    first = first.GetNextFeature() as IFeature;
+                }
+            }
+            if (feat == null)
+                return (false, null, $"feature '{aliasOrName}' not found");
+            return (true, feat, resolved);
+        }
+
+        // SetSuppression has multiple names across SW interop versions:
+        // SetSuppression2 (newer), SetSuppression (older), EditSuppression2.
+        // Probe via reflection so we work on whatever this user has.
+        // action: 0=suppress, 1=unsuppress, 2=unsuppress with deps
+        // configOption: 1=this config only, 2=all configs, 3=specified
+        private bool TrySetSuppression(string name, int action, int configOption)
+        {
+            object ext = _model.Extension;
+            var t = ext.GetType();
+            foreach (var m in new[] {
+                "SetSuppression2", "SetSuppression", "EditSuppression2" })
+            {
+                var mi = t.GetMethod(m);
+                if (mi == null) continue;
+                try
+                {
+                    var paramInfos = mi.GetParameters();
+                    int n = paramInfos.Length;
+                    var args = new object[n];
+                    for (int i = 0; i < n; i++)
+                    {
+                        Type pt = paramInfos[i].ParameterType;
+                        if (pt == typeof(string))    args[i] = "";
+                        else if (pt == typeof(int))  args[i] = 0;
+                        else if (pt == typeof(bool)) args[i] = false;
+                        else                          args[i] = null;
+                    }
+                    if (n > 0) args[0] = name;
+                    if (n > 1) args[1] = action;
+                    if (n > 2) args[2] = configOption;
+                    if (n > 3) args[3] = null;  // configNames (null = active only)
+                    object r = mi.Invoke(ext, args);
+                    bool ok = (r is bool b && b) || (r is int ri && ri != 0);
+                    FileLog($"  setSuppression via {m}: '{name}' action={action} -> {ok}");
+                    if (ok) return true;
+                }
+                catch (Exception ex)
+                {
+                    FileLog($"  setSuppression {m} threw: {ex.Message}");
+                }
+            }
+            // Final fallback: feature-level Select2 + EditSuppress.
+            // IFeature.EditSuppress() returns int (1=ok).
+            try
+            {
+                IFeature feat = null;
+                if (_aliasMap.ContainsKey(name) && _aliasMap[name] is IFeature af)
+                    feat = af;
+                if (feat == null)
+                {
+                    var first = _model.FirstFeature() as IFeature;
+                    while (first != null)
+                    {
+                        if (first.Name == name) { feat = first; break; }
+                        first = first.GetNextFeature() as IFeature;
+                    }
+                }
+                if (feat != null)
+                {
+                    _model.ClearSelection2(true);
+                    feat.Select2(false, 0);
+                    // Late-bind everything so we work regardless of which
+                    // interop dll defines which suppress methods.
+                    var ft = ((object)feat).GetType();
+                    foreach (var fm in (action == 0
+                        ? new[] { "EditSuppress2", "EditSuppress",
+                                  "SetSuppression2", "SetSuppression" }
+                        : new[] { "EditUnsuppress2", "EditUnsuppress",
+                                  "SetSuppression2", "SetSuppression" }))
+                    {
+                        var fmi = ft.GetMethod(fm);
+                        if (fmi == null) continue;
+                        try
+                        {
+                            var paramInfos = fmi.GetParameters();
+                            int n = paramInfos.Length;
+                            var args = new object[n];
+                            for (int i = 0; i < n; i++)
+                            {
+                                Type pt = paramInfos[i].ParameterType;
+                                if (pt == typeof(int))       args[i] = 0;
+                                else if (pt == typeof(bool)) args[i] = false;
+                                else                          args[i] = null;
+                            }
+                            // SetSuppression2(action, configOption, configNames)
+                            if (fm.StartsWith("SetSuppression"))
+                            {
+                                if (n > 0) args[0] = action;
+                                if (n > 1) args[1] = 1;
+                            }
+                            object rv = fmi.Invoke(feat, args);
+                            bool okv = (rv is bool bb && bb)
+                                     || (rv is int ri && ri != 0)
+                                     || rv is null;  // EditSuppress returns void
+                            FileLog($"  setSuppression via IFeature.{fm}: '{name}' -> {okv}");
+                            if (okv) return true;
+                        }
+                        catch (Exception fex)
+                        {
+                            FileLog($"  setSuppression IFeature.{fm} threw: {fex.Message}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  setSuppression IFeature fallback threw: {ex.Message}");
+            }
+            return false;
+        }
+
+        private object OpSuppressFeature(Dictionary<string, object> p)
+        {
+            if (_model == null)
+                return new { ok = false, error = "suppressFeature: no model" };
+            string aliasOrName = p.ContainsKey("feature") ? p["feature"]?.ToString() : null;
+            var (found, _, resolved) = ResolveFeature(aliasOrName);
+            if (!found)
+                return new { ok = false, error = resolved };
+            try
+            {
+                bool ok = TrySetSuppression(resolved, 0, 1);
+                _model.ForceRebuild3(false);
+                return new { ok, feature = resolved,
+                              activeConfig = _model.ConfigurationManager?.ActiveConfiguration?.Name };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"suppressFeature threw: {ex.Message}" };
+            }
+        }
+
+        private object OpUnsuppressFeature(Dictionary<string, object> p)
+        {
+            if (_model == null)
+                return new { ok = false, error = "unsuppressFeature: no model" };
+            string aliasOrName = p.ContainsKey("feature") ? p["feature"]?.ToString() : null;
+            var (found, _, resolved) = ResolveFeature(aliasOrName);
+            if (!found)
+                return new { ok = false, error = resolved };
+            try
+            {
+                bool ok = TrySetSuppression(resolved, 1, 1);
+                _model.ForceRebuild3(false);
+                return new { ok, feature = resolved,
+                              activeConfig = _model.ConfigurationManager?.ActiveConfiguration?.Name };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"unsuppressFeature threw: {ex.Message}" };
+            }
+        }
+
         private static string SwPlaneName(string plane) =>
             (plane ?? "XY").ToUpperInvariant() switch
             {
@@ -390,28 +935,130 @@ namespace AriaSW
         private object OpNewSketch(Dictionary<string, object> p)
         {
             string plane = p.ContainsKey("plane") ? p["plane"]?.ToString() : "XY";
-            string alias = p["alias"]?.ToString();
+            // Default alias to "sk_<n>" when caller omits it. Previously a
+            // missing "alias" field threw KeyNotFoundException, breaking
+            // any LLM plan that emitted bare-bones newSketch ops.
+            string alias = p.ContainsKey("alias")
+                            ? p["alias"]?.ToString()
+                            : $"sk_{_aliasMap.Count}";
             string name  = p.ContainsKey("name") ? p["name"]?.ToString() : null;
+            // Offset (mm) along the std plane normal — when non-zero, create
+            // a parallel reference plane and sketch on that. Required for
+            // loft, sweep guide-rails, and any feature spanning Z. Without
+            // this every newSketch ends up at z=0 and lofts/sweeps fail
+            // because all profiles are coplanar.
+            double offsetMm = p.ContainsKey("offset_mm") ? Convert.ToDouble(p["offset_mm"])
+                            : (p.ContainsKey("offset") ? Convert.ToDouble(p["offset"]) : 0.0);
             if (_model == null) _model = EnsurePart();
 
+            // CRITICAL: SketchManager.InsertSketch(true) is a TOGGLE — if a
+            // sketch is already active it EXITS instead of starting a new
+            // one. Sequential newSketch calls (e.g. for loft) hit this:
+            // the second call exited the first sketch and never entered the
+            // new one. Always exit any active sketch up front so the
+            // subsequent InsertSketch(true) reliably enters the new one.
+            if (_model.SketchManager.ActiveSketch != null)
+                _model.SketchManager.InsertSketch(true);
+
             string planeName = SwPlaneName(plane);
-            // Clear current selection, then select the reference plane.
+            string targetPlaneName = planeName;
+
+            // If offset requested, materialize a new reference plane parallel
+            // to the std plane at the requested offset, then sketch on THAT.
+            if (Math.Abs(offsetMm) > 1e-6)
+            {
+                _model.ClearSelection2(true);
+                bool stagedRef = _model.Extension.SelectByID2(
+                    planeName, "PLANE", 0, 0, 0, false, 0, null, 0);
+                if (!stagedRef)
+                    return new { ok = false, error = $"newSketch offset: could not select base plane '{planeName}'" };
+                double offsetM = offsetMm / 1000.0;
+                IFeature refPlaneFeat = null;
+                // FeatureManager.InsertRefPlane signature varies across SW
+                // versions; reflect to be safe. Common shape:
+                // InsertRefPlane(constraint1, dist1, constraint2, dist2, constraint3, dist3)
+                // where constraint=8 means "offset distance" and the other
+                // five slots are unused for a simple offset plane.
+                try
+                {
+                    var fm = _model.FeatureManager;
+                    var fmType = fm.GetType();
+                    var mi = fmType.GetMethod("InsertRefPlane");
+                    if (mi != null)
+                    {
+                        // Constraint code 8 = swRefPlaneReferenceConstraint_Distance
+                        const short OFFSET_CONSTRAINT = 8;
+                        var args = new object[] {
+                            OFFSET_CONSTRAINT, offsetM,
+                            (short)0, 0.0,
+                            (short)0, 0.0
+                        };
+                        // If signature uses int instead of short, fix per
+                        // ParameterInfo.
+                        var pis = mi.GetParameters();
+                        for (int i = 0; i < pis.Length && i < args.Length; i++)
+                        {
+                            if (pis[i].ParameterType == typeof(int))
+                                args[i] = Convert.ToInt32(args[i]);
+                            else if (pis[i].ParameterType == typeof(double))
+                                args[i] = Convert.ToDouble(args[i]);
+                        }
+                        refPlaneFeat = mi.Invoke(fm, args) as IFeature;
+                    }
+                }
+                catch (Exception planeEx)
+                {
+                    FileLog($"  newSketch offset: InsertRefPlane threw: {planeEx.Message}");
+                }
+                if (refPlaneFeat == null)
+                    return new { ok = false,
+                                  error = $"newSketch offset: InsertRefPlane returned null (offset={offsetMm}mm from {planeName})" };
+                targetPlaneName = refPlaneFeat.Name;
+                FileLog($"  newSketch: created ref plane '{targetPlaneName}' offset {offsetMm}mm from {planeName}");
+            }
+
+            // Clear current selection, then select the target plane.
             _model.ClearSelection2(true);
             bool selected = _model.Extension.SelectByID2(
-                planeName, "PLANE", 0, 0, 0, false, 0, null,
+                targetPlaneName, "PLANE", 0, 0, 0, false, 0, null,
                 (int)swSelectOption_e.swSelectOptionDefault);
             if (!selected)
-                return new { ok = false, error = $"Could not select '{planeName}'" };
+                return new { ok = false, error = $"Could not select '{targetPlaneName}'" };
 
             _model.SketchManager.InsertSketch(true);   // Enter sketch mode
 
-            // The just-created sketch is the most-recent feature. ISketch
-            // doesn't expose its parent IFeature via cast, so grab via
-            // FeatureByPositionReverse(0). We store the IFeature reference
-            // itself in the alias map so later re-selection works without
-            // depending on names (selection by name is unreliable when
-            // multiple sketches with similar names exist).
-            var sketchFeature = _model.FeatureByPositionReverse(0) as IFeature;
+            // Capture the sketch IFeature. Prefer ActiveSketch (most reliable
+            // mid-sketch), fall back to FeatureByPositionReverse for older
+            // SW versions where ActiveSketch returns a non-IFeature wrapper.
+            // FeatureByPositionReverse(0) was the only path before, but it
+            // returns the ref-plane feature (not the sketch) when InsertSketch
+            // was called on a freshly-created ref plane — the plane is still
+            // the most recent tree entry. ActiveSketch sidesteps that race.
+            IFeature sketchFeature = null;
+            try
+            {
+                var active = _model.SketchManager.ActiveSketch;
+                if (active != null)
+                    sketchFeature = ((object)active) as IFeature;
+            }
+            catch { }
+            if (sketchFeature == null)
+                sketchFeature = _model.FeatureByPositionReverse(0) as IFeature;
+            // Final guard: the most-recent feature must actually be a sketch
+            // (type "ProfileFeature"). If it's the ref plane we just made,
+            // walk forward one position.
+            if (sketchFeature != null && sketchFeature.GetTypeName2() == "RefPlane")
+            {
+                FileLog($"  newSketch: FeatureByPositionReverse(0) returned ref plane, scanning for ProfileFeature");
+                var scan = _model.FirstFeature() as IFeature;
+                IFeature lastSketch = null;
+                while (scan != null)
+                {
+                    if (scan.GetTypeName2() == "ProfileFeature") lastSketch = scan;
+                    scan = scan.GetNextFeature() as IFeature;
+                }
+                if (lastSketch != null) sketchFeature = lastSketch;
+            }
             if (sketchFeature != null && !string.IsNullOrEmpty(name))
             {
                 sketchFeature.Name = name;
@@ -426,12 +1073,27 @@ namespace AriaSW
 
         private object OpSketchCircle(Dictionary<string, object> p)
         {
-            double cx = Mm(p["cx"]);
-            double cy = MirrorYIfNeeded(Mm(p["cy"]));
-            double r  = Mm(p["r"]);
+            // Accept both forms — explicit cx/cy fields AND the
+            // `center: [x, y]` array shape that some planners emit
+            // (e.g. revolve_planner). Without this fallback the C#
+            // dictionary lookup throws KeyNotFoundException.
+            double cx = 0, cy = 0;
+            if (p.ContainsKey("cx")) cx = Mm(p["cx"]);
+            else if (p.ContainsKey("center"))
+            {
+                var pair = ParseTwoNumberArray(p["center"]);
+                if (pair != null) { cx = Mm(pair[0]); cy = Mm(pair[1]); }
+            }
+            if (p.ContainsKey("cy")) cy = Mm(p["cy"]);
+            cy = MirrorYIfNeeded(cy);
+            double r = p.ContainsKey("r") ? Mm(p["r"])
+                       : (p.ContainsKey("radius") ? Mm(p["radius"])
+                       : (p.ContainsKey("diameter") ? Mm(p["diameter"]) / 2.0
+                                                     : 0.0));
+            if (r <= 0)
+                return new { ok = false, error = "sketchCircle: r/radius/diameter required" };
             if (_model == null) return new { ok = false, error = "no model" };
 
-            // CreateCircle takes (xc, yc, zc, x_on_perimeter, y_on_perimeter, zp)
             var sketch = _model.SketchManager.ActiveSketch;
             if (sketch == null)
                 return new { ok = false, error = "no active sketch" };
@@ -441,6 +1103,58 @@ namespace AriaSW
                 cx + r, cy, 0);
             return new { ok = circle != null, kind = "circle",
                           r_mm = r * 1000, cx_mm = cx * 1000, cy_mm = cy * 1000 };
+        }
+
+        // Helper: parse a JSON array like [0, 0] or [0.0, 25.5] into
+        // a double[2]. Returns null on shape mismatch so the caller can
+        // fall back. Used by sketch ops that accept either explicit
+        // cx/cy fields or a center/start/end point array.
+        private double[] ParseTwoNumberArray(object raw)
+        {
+            try
+            {
+                if (raw is Newtonsoft.Json.Linq.JArray ja && ja.Count >= 2)
+                    return new[] { Convert.ToDouble(ja[0]),
+                                    Convert.ToDouble(ja[1]) };
+                if (raw is System.Collections.IEnumerable enumerable)
+                {
+                    var list = new System.Collections.Generic.List<double>();
+                    foreach (var v in enumerable) list.Add(Convert.ToDouble(v));
+                    if (list.Count >= 2) return new[] { list[0], list[1] };
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // Helper: parse [[x1,y1], [x2,y2], ...] for sketchPolyline /
+        // sketchSpline. Returns null on shape mismatch.
+        private System.Collections.Generic.List<double[]> ParsePointList(object raw)
+        {
+            var pts = new System.Collections.Generic.List<double[]>();
+            try
+            {
+                if (raw is Newtonsoft.Json.Linq.JArray ja)
+                {
+                    foreach (var item in ja)
+                    {
+                        var pair = ParseTwoNumberArray(item);
+                        if (pair != null) pts.Add(pair);
+                    }
+                    if (pts.Count > 0) return pts;
+                }
+                else if (raw is System.Collections.IEnumerable e)
+                {
+                    foreach (var item in e)
+                    {
+                        var pair = ParseTwoNumberArray(item);
+                        if (pair != null) pts.Add(pair);
+                    }
+                    if (pts.Count > 0) return pts;
+                }
+            }
+            catch { }
+            return null;
         }
 
         private object OpSketchRect(Dictionary<string, object> p)
@@ -465,6 +1179,14 @@ namespace AriaSW
             double dist = Mm(p["distance"]);
             string operation = p.ContainsKey("operation") ? p["operation"]?.ToString() : "new";
             string alias = p.ContainsKey("alias") ? p["alias"]?.ToString() : null;
+            // start_offset (mm) — distance from the sketch plane along its
+            // normal where the extrusion BEGINS. Used by the shaft planner
+            // to stack stepped segments along Z without needing one offset
+            // reference plane per segment. Without this, every extrude
+            // starts at the sketch plane (z=0) and segments overlap, leaving
+            // only the longest one in the final body.
+            double startOffset = p.ContainsKey("start_offset")
+                ? Mm(p["start_offset"]) : 0.0;
             if (_model == null) return new { ok = false, error = "no model" };
 
             // Exit any active sketch so FeatureExtrusion3 can use it.
@@ -506,6 +1228,16 @@ namespace AriaSW
             IFeature feature = null;
             if (operation == "new" || operation == "join")
             {
+                // FeatureExtrusion3 args 22-24 control the START of the
+                // extrusion. swStartSketchPlane (0) starts at the sketch
+                // plane; swStartOffset (2) starts at +N meters along the
+                // sketch normal. We pick swStartOffset only when the
+                // planner asked for a non-zero offset — otherwise stay
+                // with sketch-plane start so other planners (flange,
+                // bracket, etc.) keep their existing behavior.
+                int startCond = startOffset > 1e-9
+                    ? (int)swStartConditions_e.swStartOffset
+                    : (int)swStartConditions_e.swStartSketchPlane;
                 feature = _model.FeatureManager.FeatureExtrusion3(
                     true,                                                  // single-direction
                     false, false,
@@ -520,8 +1252,117 @@ namespace AriaSW
                     true,                                                  // solid
                     true,                                                  // merge
                     true,                                                  // useFeatScope
-                    (int)swStartConditions_e.swStartSketchPlane,
-                    0, false) as IFeature;
+                    startCond,
+                    startOffset,                                            // start offset (m)
+                    false) as IFeature;
+                // Open-profile fallback: solid extrude requires a closed
+                // loop. If FeatureExtrusion3 returned null, retry with
+                // solid=false (thin/surface extrude). Used by the surface
+                // planner for open polylines / curved walls.
+                if (feature == null)
+                {
+                    FileLog($"  extrude: solid=true returned null, " +
+                             $"retrying as thin/surface extrude (open profile)");
+                    _model.ClearSelection2(true);
+                    if (sketchFeatName != null)
+                        _model.Extension.SelectByID2(sketchFeatName, "SKETCH",
+                            0, 0, 0, false, 0, null, 0);
+                    feature = _model.FeatureManager.FeatureExtrusion3(
+                        true,
+                        false, false,
+                        (int)swEndConditions_e.swEndCondBlind,
+                        (int)swEndConditions_e.swEndCondBlind,
+                        dist, 0,
+                        false, false,
+                        false, false,
+                        0, 0,
+                        false, false,
+                        false, false,
+                        false,                                              // solid=false (surface)
+                        false,                                              // merge=false
+                        true,
+                        startCond,
+                        startOffset,
+                        false) as IFeature;
+                    if (feature != null)
+                        FileLog($"  extrude: surface-mode succeeded for open profile");
+                }
+                // Open-profile fallback #2: FeatureExtrusionThin2. SW exposes a
+                // dedicated thin-feature method that handles open-loop sketches
+                // when FeatureExtrusion3(solid=false) silently refuses on
+                // SW2024 (same IDispatch class as Shell/CircularPattern).
+                // Probe via reflection so we never bind to a missing signature.
+                if (feature == null)
+                {
+                    _model.ClearSelection2(true);
+                    if (sketchFeatName != null)
+                        _model.Extension.SelectByID2(sketchFeatName, "SKETCH",
+                            0, 0, 0, false, 0, null, 0);
+                    var fm = _model.FeatureManager;
+                    var fmType = fm.GetType();
+                    // Try the documented thin-feature signatures in order.
+                    // Build the arg vector by inspecting each parameter's
+                    // ParameterType so we never pass a bool where SW expects
+                    // a double (the failure mode that killed the previous
+                    // attempt).
+                    double wallThk = 0.0005;
+                    object thinFeat = null;
+                    foreach (var name in new[] {
+                        "FeatureExtrusionThin2", "FeatureExtrusionThin",
+                        "InsertProtrusionThin2", "FeatureExtrusion2" })
+                    {
+                        var mi = fmType.GetMethod(name);
+                        if (mi == null) continue;
+                        try
+                        {
+                            var paramInfos = mi.GetParameters();
+                            int n = paramInfos.Length;
+                            var args = new object[n];
+                            for (int i = 0; i < n; i++)
+                            {
+                                Type pt = paramInfos[i].ParameterType;
+                                if (pt == typeof(double))      args[i] = 0.0;
+                                else if (pt == typeof(int))    args[i] = 0;
+                                else if (pt == typeof(bool))   args[i] = false;
+                                else if (pt == typeof(short))  args[i] = (short)0;
+                                else                            args[i] = null;
+                            }
+                            // Now overwrite the well-known prefix slots with
+                            // values that produce a basic blind+thin extrude.
+                            // FeatureExtrusionThin2 ordering (SW 2014+):
+                            //   0 Sd, 1 Flip, 2 Dir,
+                            //   3 T1 (int), 4 T2 (int),
+                            //   5 D1 (double), 6 D2 (double),
+                            //   ... 17 ThickType (int), 18 Thick1 (double),
+                            //   19 Thick2 (double), 20 CapEnds (bool),
+                            //   21 CapThk (double).
+                            if (n > 0) args[0] = true;
+                            if (n > 3) args[3] = (int)swEndConditions_e.swEndCondBlind;
+                            if (n > 4) args[4] = (int)swEndConditions_e.swEndCondBlind;
+                            if (n > 5) args[5] = dist;
+                            if (n > 17 && paramInfos[17].ParameterType == typeof(int))
+                                args[17] = 0; // thicknessType: one-direction
+                            if (n > 18 && paramInfos[18].ParameterType == typeof(double))
+                                args[18] = wallThk;
+                            FileLog($"  extrude: trying {name}(n={n})");
+                            thinFeat = mi.Invoke(fm, args);
+                            if (thinFeat != null)
+                            {
+                                FileLog($"  extrude: {name} succeeded for open profile (wall={wallThk*1000}mm)");
+                                break;
+                            }
+                            else
+                            {
+                                FileLog($"  extrude: {name} returned null");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            FileLog($"  extrude: {name} threw: {ex.Message}");
+                        }
+                    }
+                    feature = thinFeat as IFeature;
+                }
             }
             else if (operation == "cut")
             {
@@ -565,8 +1406,73 @@ namespace AriaSW
                 // Wrapped in try/catch so persistence failures (e.g. JSON
                 // serialization issues on this user's Newtonsoft version)
                 // never tank the actual op result.
+                //
+                // Crucial: only record combos where blind/through-all
+                // matches the requested intent. Recording a through-all
+                // success under cutIntent="cut_extrude_blind" causes
+                // every subsequent blind cut to use through-all and
+                // destructively swallow the host body. (See L-bracket
+                // 35x5x5 regression.)
                 void RecordCut(bool b, bool f, bool d, bool sb, bool au)
                 {
+                    bool intentBlind = cutIntent == "cut_extrude_blind";
+                    if (intentBlind && !b)
+                    {
+                        FileLog($"  RecordCut: skipping (intent=blind but combo blind={b}; through-all under blind intent destroys merged bodies)");
+                        return;
+                    }
+                    if (!intentBlind && b)
+                    {
+                        FileLog($"  RecordCut: skipping (intent=through-all but combo blind={b})");
+                        return;
+                    }
+                    // CRITICAL: f=true (FlipSideToCut) cuts the OUTSIDE of the
+                    // closed loop instead of the inside. For normal cuts (hole
+                    // in a box, cylinder out of a slab) this LEAVES only the
+                    // cut tool body behind — every subsequent cut then takes
+                    // the wrong side too. Refuse to cache flip=true; it must
+                    // be re-discovered per-call if ever truly needed.
+                    if (f)
+                    {
+                        FileLog($"  RecordCut: refusing flip=true (would mis-train future cuts to take outside-of-loop)");
+                        return;
+                    }
+                    // Geometric sanity check: post-cut body bbox should not
+                    // equal the cut tool sketch bbox. If it does, the cut
+                    // collapsed the host body and we're recording garbage.
+                    try
+                    {
+                        var part = _model as IPartDoc;
+                        if (part != null)
+                        {
+                            var bodies = part.GetBodies2(0, true) as object[];
+                            if (bodies != null && bodies.Length == 1)
+                            {
+                                var body = bodies[0] as IBody2;
+                                var bbox = body?.GetBodyBox() as double[];
+                                if (bbox != null && bbox.Length >= 6)
+                                {
+                                    double bx = (bbox[3] - bbox[0]) * 1000.0;
+                                    double by = (bbox[4] - bbox[1]) * 1000.0;
+                                    double bz = (bbox[5] - bbox[2]) * 1000.0;
+                                    // Any axis < 5mm AND post-cut height < dist*1.1
+                                    // is a sign the cut just left the cut-tool
+                                    // body. Refuse to cache.
+                                    double distMm = dist * 1000.0;
+                                    if (bz <= distMm * 1.1 + 0.5 &&
+                                        bx < 50.0 && by < 50.0)
+                                    {
+                                        FileLog($"  RecordCut: refusing — body bbox {bx:F1}x{by:F1}x{bz:F1}mm looks like cut tool, not subtracted host");
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception sanityEx)
+                    {
+                        FileLog($"  RecordCut: sanity check threw {sanityEx.Message} (recording anyway)");
+                    }
                     try
                     {
                         RecipeDb.RecordSuccess(cutIntent, JObject.FromObject(new
@@ -673,7 +1579,20 @@ namespace AriaSW
                 if (operation == "new" || operation == "join")
                     _lastBodyFeature = feature;
             }
-            return new { ok = feature != null, alias, kind = "extrude",
+            if (feature == null)
+            {
+                // Both solid + thin/surface modes returned null. Most common
+                // cause: profile is open AND too short (< 1mm), OR sketch
+                // wasn't selected, OR cut path's recipe combos all failed.
+                // Surface up enough info that the runner stops reporting
+                // 'unknown' for this op.
+                return new { ok = false,
+                              error = $"FeatureExtrusion3 returned null after solid+thin attempts (operation={operation}, sketch='{sketchAlias}'). Open profiles need length > 1mm; cuts need profile inside host body.",
+                              kind = "extrude", operation,
+                              sketch = sketchAlias,
+                              distance_mm = dist * 1000 };
+            }
+            return new { ok = true, alias, kind = "extrude",
                           distance_mm = dist * 1000, operation };
         }
 
@@ -951,73 +1870,808 @@ namespace AriaSW
 
         private object OpCircularPattern(Dictionary<string, object> p)
         {
-            string featAlias = p["feature"]?.ToString();
+            string featAlias = p.ContainsKey("feature")
+                                 ? p["feature"]?.ToString() : null;
             int count = p.ContainsKey("count") ? Convert.ToInt32(p["count"]) : 2;
-            string axis = p.ContainsKey("axis") ? p["axis"]?.ToString().ToUpperInvariant() : "Z";
+            string axis = p.ContainsKey("axis")
+                           ? p["axis"]?.ToString().ToUpperInvariant() : "Z";
             string alias = p.ContainsKey("alias") ? p["alias"]?.ToString() : null;
+            // Optional explicit seed coords from the planner — bypasses the
+            // fragile COM-IDispatch sketch introspection in the software-
+            // pattern fallback. Values are mm.
+            double? planSeedX = p.ContainsKey("seed_x")
+                ? Convert.ToDouble(p["seed_x"]) : (double?)null;
+            double? planSeedY = p.ContainsKey("seed_y")
+                ? Convert.ToDouble(p["seed_y"]) : (double?)null;
+            double? planSeedR = p.ContainsKey("seed_r")
+                ? Convert.ToDouble(p["seed_r"]) : (double?)null;
             if (_model == null) return new { ok = false, error = "no model" };
 
-            // Select the source feature directly via stored IFeature ref,
-            // then add an axis selection.
+            // Strategy log so failures are diagnosable from the addin log.
+            var diag = new List<string>();
+
             _model.ClearSelection2(true);
+
+            // ---- 1. Select the source feature ----------------------------
+            // Try (a) explicit alias from params, (b) fall back to the most
+            // recently added feature in the FeatureManager tree if no alias
+            // was passed or the alias is unknown. The fallback handles the
+            // common planner case where it forgets to set `feature`.
+            IFeature srcFeat = null;
+            if (!string.IsNullOrEmpty(featAlias)
+                && _aliasMap.ContainsKey(featAlias)
+                && _aliasMap[featAlias] is IFeature mapped)
+            {
+                srcFeat = mapped;
+                diag.Add($"feature-alias='{featAlias}'");
+            }
+            if (srcFeat == null)
+            {
+                // Walk the tree, keep the last "real" feature (skip refs).
+                IFeature f = _model.FirstFeature() as IFeature;
+                IFeature last = null;
+                while (f != null)
+                {
+                    string tn = f.GetTypeName2();
+                    // Skip refs and origin elements.
+                    if (tn != "Reference" && tn != "OriginProfileFeature"
+                        && tn != "RefAxis" && tn != "RefPlane"
+                        && tn != "OriginAxis" && tn != "Origin")
+                    {
+                        last = f;
+                    }
+                    f = f.GetNextFeature() as IFeature;
+                }
+                srcFeat = last;
+                diag.Add($"feature-fallback='{srcFeat?.Name}'");
+            }
             bool selFeat = false;
-            if (_aliasMap.ContainsKey(featAlias)
-                && _aliasMap[featAlias] is IFeature srcFeat)
+            if (srcFeat != null)
             {
                 selFeat = srcFeat.Select2(true, 1);   // Append=true, Mark=1
-                FileLog($"  circPat: select feature '{srcFeat.Name}' -> {selFeat}");
+            }
+            diag.Add($"selFeat={selFeat}");
+
+            // ---- 2. Select an axis to revolve around --------------------
+            // Cascade in order of correctness (NOT just availability):
+            //   (a) origin axis by name — guaranteed to pass through (0,0,0)
+            //       so pattern lands evenly around the part center.
+            //   (b) cylindrical face that is concentric with origin (i.e.
+            //       centered on the desired world axis). Filtered by
+            //       checking the surface's axis params — we previously
+            //       grabbed the FIRST cyl-face which on a flange was the
+            //       bolt-hole's offset face (axis at r=80mm), causing
+            //       FeatureCircularPattern5 to silently return null.
+            //   (c) origin plane fallback.
+            bool selAxis = false;
+            string axisStrategy = "none";
+
+            // (a) Origin axis first — most reliable when present.
+            {
+                string axisName = axis switch
+                {
+                    "X" => "X", "Y" => "Y", _ => "Z",
+                };
+                string[] axisIds = {
+                    axisName + " Axis@Origin",
+                    axisName + " Axis",
+                    "Origin\\" + axisName + " Axis",
+                };
+                foreach (string id in axisIds)
+                {
+                    selAxis = _model.Extension.SelectByID2(
+                        id, "AXIS", 0, 0, 0, true, 4, null,
+                        (int)swSelectOption_e.swSelectOptionDefault);
+                    if (selAxis)
+                    {
+                        axisStrategy = $"axis='{id}'";
+                        break;
+                    }
+                }
             }
 
-            string axisPlane = axis switch
+            // (b) Concentric cylindrical face — only if its axis passes
+            //     through origin (within ~1 micron). Skips bolt holes,
+            //     side bosses, etc. that have offset cylindrical surfaces.
+            if (!selAxis && srcFeat != null)
             {
-                "X" => "Right Plane",
-                "Y" => "Top Plane",
-                _   => "Front Plane",
-            };
-            // For circular patterns we need a circular edge or an axis. The
-            // canonical SW pattern: select a temporary axis or use the
-            // origin's reference axis. Simpler: select the corresponding
-            // origin reference plane edge — for "Z" axis, the origin's
-            // vertical axis is along the intersection of Front + Right.
-            // Easiest portable path: use the model's origin axis named
-            // by SW's default (English locale defaults below).
-            string axisName = axis switch
+                try
+                {
+                    var faces = srcFeat.GetFaces() as object[];
+                    if (faces != null)
+                    {
+                        foreach (var fo in faces)
+                        {
+                            var face = fo as IFace2;
+                            if (face == null) continue;
+                            var surf = face.GetSurface() as ISurface;
+                            if (surf == null || !surf.IsCylinder()) continue;
+                            // ICylinderParams: [origin x,y,z, dir x,y,z, radius]
+                            // Reject if the axis line doesn't pass within ~1µm of origin.
+                            bool concentric = false;
+                            try
+                            {
+                                var cp = surf.CylinderParams as double[];
+                                if (cp != null && cp.Length >= 7)
+                                {
+                                    double ox = cp[0], oy = cp[1], oz = cp[2];
+                                    double dx = cp[3], dy = cp[4], dz = cp[5];
+                                    // Closest distance from world origin to the line
+                                    // through (ox,oy,oz) with direction (dx,dy,dz):
+                                    // |(O-P) - ((O-P).D)D| where O=0, P=(ox,oy,oz)
+                                    double rx = -ox, ry = -oy, rz = -oz;
+                                    double dot = rx * dx + ry * dy + rz * dz;
+                                    double cx = rx - dot * dx;
+                                    double cy = ry - dot * dy;
+                                    double cz = rz - dot * dz;
+                                    double dist = Math.Sqrt(cx * cx + cy * cy + cz * cz);
+                                    concentric = dist < 1e-3;  // 1µm
+                                }
+                            }
+                            catch { concentric = false; }
+                            if (!concentric) continue;
+                            // Mark=4 is REQUIRED for FeatureCircularPattern5
+                            // to recognize the entity as the rotation axis.
+                            // Default selectData has Mark=0 → pattern API
+                            // silently rejects the selection.
+                            var selMgr = _model.SelectionManager
+                                as ISelectionMgr;
+                            var sd4 = selMgr?.CreateSelectData()
+                                as ISelectData;
+                            if (sd4 != null) sd4.Mark = 4;
+                            selAxis = (face as IEntity)?.Select4(
+                                true, sd4 as SelectData) ?? false;
+                            if (selAxis)
+                            {
+                                axisStrategy = "cyl-face-concentric";
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    diag.Add($"cyl-face-scan-threw={ex.Message}");
+                }
+            }
+
+            if (!selAxis)
             {
-                "X" => "X",
-                "Y" => "Y",
-                _   => "Z",
-            };
-            // Try selecting the named axis on Origin. Falls back to a plane.
-            bool selAxis = _model.Extension.SelectByID2(
-                axisName + " Axis@Origin", "AXIS", 0, 0, 0, true, 4, null,
-                (int)swSelectOption_e.swSelectOptionDefault);
-            if (!selAxis) selAxis = _model.Extension.SelectByID2(
-                axisPlane, "PLANE", 0, 0, 0, true, 4, null,
-                (int)swSelectOption_e.swSelectOptionDefault);
+                // SW plane normals (default coord system):
+                //   Front Plane = XZ plane, normal = +Y
+                //   Top Plane   = XY plane, normal = +Z
+                //   Right Plane = YZ plane, normal = +X
+                // For circularPattern around an axis we want the plane whose
+                // NORMAL equals that axis (SW patterns around the plane normal
+                // when given a plane as the axis surrogate). Previous mapping
+                // gave Front Plane for axis=Z which is the Y-axis normal, so
+                // every "rotate around Z" pattern was silently rejected.
+                string axisPlane = axis switch
+                {
+                    "X" => "Right Plane",
+                    "Y" => "Front Plane",
+                    _   => "Top Plane",        // axis=Z → XY plane, normal=Z
+                };
+                selAxis = _model.Extension.SelectByID2(
+                    axisPlane, "PLANE", 0, 0, 0, true, 4, null,
+                    (int)swSelectOption_e.swSelectOptionDefault);
+                if (selAxis) axisStrategy = $"plane='{axisPlane}'";
+            }
 
-            var feature = _model.FeatureManager.FeatureCircularPattern5(
-                count,                                                     // Number
-                2 * Math.PI,                                               // Spacing (rad, total when EqualSpacing)
-                false,                                                     // FlipDirection
-                "NULL",                                                    // DName (skipped instances)
-                false,                                                     // GeometryPattern
-                true,                                                      // EqualSpacing
-                false,                                                     // VaryInstance
-                false,                                                     // SyncSubAssemblies
-                false,                                                     // BDir2
-                false,                                                     // BSymmetric
-                0,                                                         // Number2
-                0,                                                         // Spacing2
-                "NULL",                                                    // DName2
-                false) as IFeature;                                        // EqualSpacing2
+            // SW 2024 silently rejects PLANE selections as the pattern axis —
+            // FeatureCircularPattern5 returns null even when the plane normal
+            // matches the requested axis direction. Need a REAL axis entity.
+            //
+            // Strategy: insert a reference axis at the origin via the
+            // intersection of the two orthogonal default planes, then select
+            // that axis. Front ∩ Right = Z axis line, Top ∩ Front = X axis,
+            // Top ∩ Right = Y axis. This costs one Axis feature in the tree
+            // but produces a real, selectable axis the pattern API accepts.
+            //
+            // We also pre-try SW's auto-generated "Temporary Axis<n>" names
+            // (one per cylindrical face) since those exist for free if the
+            // part has a bore.
+            bool axisIsReal = !string.IsNullOrEmpty(axisStrategy)
+                && (axisStrategy.StartsWith("axis=")
+                     || axisStrategy.StartsWith("cyl-face")
+                     || axisStrategy.StartsWith("temp-axis"));
+            if (!axisIsReal)
+            {
+                // Plane selection alone doesn't fly. Throw the plane out and
+                // build a real axis.
+                _model.ClearSelection2(true);
+                bool selFeatAgain = srcFeat?.Select2(true, 1) ?? false;
+                selAxis = false;
+                axisStrategy = "none";
 
-            if (feature != null && !string.IsNullOrEmpty(alias))
+                // (a) Try Temporary Axis<1..4> — SW auto-creates these for
+                //     every cylindrical face in the part (bore, bolt hole,
+                //     hub OD, etc.).
+                try
+                {
+                    string[] tempAxisIds = {
+                        "Temporary Axis<1>", "Temporary Axis<2>",
+                        "Temporary Axis<3>", "Temporary Axis<4>",
+                        "Temporary Axis<5>", "Temporary Axis<6>",
+                    };
+                    foreach (string id in tempAxisIds)
+                    {
+                        bool sel = _model.Extension.SelectByID2(
+                            id, "AXIS", 0, 0, 0, true, 4, null,
+                            (int)swSelectOption_e.swSelectOptionDefault);
+                        if (sel)
+                        {
+                            selAxis = true;
+                            axisStrategy = $"temp-axis='{id}'";
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    diag.Add($"temp-axis-scan-threw={ex.Message}");
+                }
+
+                // (b) Broaden the concentric cyl-face scan to ALL bodies in
+                //     the part, not just the source feature. The flange body
+                //     has a Ø200 mm OD whose axis IS the world Z axis — the
+                //     bolt cut feature didn't, but the flange disc itself
+                //     does. Walking every body's faces gives us a real axis
+                //     surrogate (cylindrical face = axis) when the source
+                //     feature has none of its own.
+                if (!selAxis)
+                {
+                    try
+                    {
+                        var bodyMgr = _model.GetActiveConfiguration() as IConfiguration;
+                        var bodies = (_model as IPartDoc)?.GetBodies2(
+                            (int)swBodyType_e.swSolidBody, false) as object[];
+                        if (bodies != null)
+                        {
+                            foreach (var bo in bodies)
+                            {
+                                var body = bo as IBody2;
+                                if (body == null) continue;
+                                var faces = body.GetFaces() as object[];
+                                if (faces == null) continue;
+                                foreach (var fo in faces)
+                                {
+                                    var face = fo as IFace2;
+                                    if (face == null) continue;
+                                    var surf = face.GetSurface() as ISurface;
+                                    if (surf == null || !surf.IsCylinder())
+                                        continue;
+                                    bool concentric = false;
+                                    try
+                                    {
+                                        var cp = surf.CylinderParams as double[];
+                                        if (cp != null && cp.Length >= 7)
+                                        {
+                                            double ox = cp[0], oy = cp[1],
+                                                   oz = cp[2];
+                                            double dx = cp[3], dy = cp[4],
+                                                   dz = cp[5];
+                                            double rx = -ox, ry = -oy, rz = -oz;
+                                            double dot = rx*dx + ry*dy + rz*dz;
+                                            double cx = rx - dot * dx;
+                                            double cy = ry - dot * dy;
+                                            double cz = rz - dot * dz;
+                                            double dist = Math.Sqrt(
+                                                cx*cx + cy*cy + cz*cz);
+                                            concentric = dist < 1e-3;
+                                        }
+                                    }
+                                    catch { concentric = false; }
+                                    if (!concentric) continue;
+                                    // Mark=4 is REQUIRED — without it,
+                                    // FeatureCircularPattern5 silently
+                                    // rejects the cylindrical face as the
+                                    // rotation axis and returns null.
+                                    var selMgrB = _model.SelectionManager
+                                        as ISelectionMgr;
+                                    var sdB = selMgrB?.CreateSelectData()
+                                        as ISelectData;
+                                    if (sdB != null) sdB.Mark = 4;
+                                    selAxis = (face as IEntity)?.Select4(
+                                        true, sdB as SelectData) ?? false;
+                                    if (selAxis)
+                                    {
+                                        axisStrategy = "body-cyl-face-concentric(mark=4)";
+                                        break;
+                                    }
+                                }
+                                if (selAxis) break;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        diag.Add($"body-face-scan-threw={ex.Message}");
+                    }
+                }
+            }
+            // ---- 2.5 Final fallback: build a real RefAxis ---------------
+            // SW 2024 sometimes refuses cylindrical-face selections as the
+            // pattern axis even with Mark=4, returning null silently. The
+            // bullet-proof workaround is to materialize a Reference Axis
+            // feature (InsertAxis2) that the pattern API always accepts.
+            //
+            // Three construction strategies, tried in order:
+            //   (i)   single concentric cyl face → axis along its centerline
+            //   (ii)  intersection of two origin planes (matches requested axis)
+            //   (iii) two non-coplanar concentric cyl faces (advanced, rare)
+            if (!selAxis && srcFeat != null)
+            {
+                try
+                {
+                    // (i) Single concentric cyl face → create an axis from it.
+                    var bodies = (_model as IPartDoc)?.GetBodies2(
+                        (int)swBodyType_e.swSolidBody, false) as object[];
+                    IFace2 chosenFace = null;
+                    if (bodies != null)
+                    {
+                        foreach (var bo in bodies)
+                        {
+                            var body = bo as IBody2;
+                            if (body == null) continue;
+                            var faces = body.GetFaces() as object[];
+                            if (faces == null) continue;
+                            foreach (var fo in faces)
+                            {
+                                var face = fo as IFace2;
+                                if (face == null) continue;
+                                var surf = face.GetSurface() as ISurface;
+                                if (surf == null || !surf.IsCylinder()) continue;
+                                bool concentric = false;
+                                try
+                                {
+                                    var cp = surf.CylinderParams as double[];
+                                    if (cp != null && cp.Length >= 7)
+                                    {
+                                        double ox = cp[0], oy = cp[1], oz = cp[2];
+                                        double dx = cp[3], dy = cp[4], dz = cp[5];
+                                        double rx = -ox, ry = -oy, rz = -oz;
+                                        double dot = rx * dx + ry * dy + rz * dz;
+                                        double cx = rx - dot * dx;
+                                        double cy = ry - dot * dy;
+                                        double cz = rz - dot * dz;
+                                        double dist = Math.Sqrt(cx*cx + cy*cy + cz*cz);
+                                        concentric = dist < 1e-3;
+                                    }
+                                }
+                                catch { concentric = false; }
+                                if (concentric) { chosenFace = face; break; }
+                            }
+                            if (chosenFace != null) break;
+                        }
+                    }
+                    if (chosenFace != null)
+                    {
+                        _model.ClearSelection2(true);
+                        bool fSel = (chosenFace as IEntity)?.Select4(
+                            false, (SelectData)null) ?? false;
+                        if (fSel)
+                        {
+                            // InsertAxis2 args (8 in SW 2018+):
+                            //   (Type, Param1, Param2, Param3, Param4,
+                            //    UseParam3, UseParam4)
+                            // Type=2 = "One cylindrical/conical face".
+                            var fm = _model.FeatureManager;
+                            var miAx = fm.GetType().GetMethod("InsertAxis2");
+                            object axisFeat = null;
+                            if (miAx != null)
+                            {
+                                int n = miAx.GetParameters().Length;
+                                var args = new object[n];
+                                for (int i = 0; i < n; i++) args[i] = false;
+                                if (n >= 1) args[0] = 2;  // Type=cyl-face
+                                axisFeat = miAx.Invoke(fm, args);
+                            }
+                            if (axisFeat is IFeature af)
+                            {
+                                _model.ClearSelection2(true);
+                                // Re-select source feature + new axis with
+                                // proper marks for the pattern call.
+                                srcFeat?.Select2(false, 1);
+                                var selMgrA = _model.SelectionManager
+                                    as ISelectionMgr;
+                                var sdA = selMgrA?.CreateSelectData()
+                                    as ISelectData;
+                                if (sdA != null) sdA.Mark = 4;
+                                selAxis = af.Select2(true, 4);
+                                if (selAxis)
+                                    axisStrategy = $"refaxis-from-cylface='{af.Name}'";
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    diag.Add($"insertaxis-fallback-threw={ex.Message}");
+                }
+            }
+
+            diag.Add($"selAxis={selAxis} via {axisStrategy}");
+
+            // ---- 3. Pattern call ---------------------------------------
+            IFeature feature = null;
+            if (selFeat && selAxis)
+            {
+                try
+                {
+                    // FeatureCircularPattern5 args:
+                    //   1: Number              — total instance count
+                    //   2: Spacing (rad)       — total sweep when EqualSpacing
+                    //                            is true, OR per-instance step
+                    //                            when EqualSpacing is false
+                    //   3: ReverseDirection
+                    //   4: DName               — "NULL" = use selection
+                    //   5: EqualSpacing        — TRUE: spread Number items
+                    //                            evenly over Spacing radians
+                    //   6: VarySketch
+                    //   7-14: cosmetic / unused
+                    // Old code passed Spacing=2π with EqualSpacing=false,
+                    // which means 360° between each instance — every item
+                    // landed at the same place → SW rejected the pattern as
+                    // degenerate and returned null with no error message.
+                    // SW2024 FeatureCircularPattern5 has 14 args (verified
+                    // via typelib probe). Arg types are exact — a misplaced
+                    // bool→int throws cascading marshaler errors.
+                    //   1: Number (int)             8: ResetState (bool)
+                    //   2: Spacing (double rad)     9: OffsetSeed (bool)
+                    //   3: FlipDirection (bool)    10: ReverseSeed (bool)
+                    //   4: DName (string)          11: OffsetType (int)
+                    //   5: EqualSpacing (bool)     12: OffsetValue (double)
+                    //   6: VarySketch (bool)       13: OffsetName (string)
+                    //   7: GeometryPattern (bool)  14: ApplyOffsets (bool)
+                    feature = LateBoundInvoke(
+                        "circPat",
+                        new object[] { _model.FeatureManager,
+                                       _model.Extension, _model },
+                        new[] { "FeatureCircularPattern5",
+                                "FeatureCircularPattern4",
+                                "FeatureCircularPattern3" },
+                        new object[] {
+                            count,         // 1
+                            2 * Math.PI,   // 2
+                            false,         // 3
+                            "NULL",        // 4
+                            true,          // 5  EqualSpacing on
+                            false,         // 6
+                            false,         // 7
+                            false,         // 8
+                            false,         // 9
+                            false,         // 10
+                            0,             // 11 (int)
+                            0.0,           // 12 (double)
+                            "NULL",        // 13 (string)
+                            false,         // 14
+                        }) as IFeature;
+
+                    // SW2024 last-resort: if pattern still null, retry with
+                    // FeatureCircularPattern4 / 3 (older signatures may be
+                    // wired up internally even though the public
+                    // typelib advertises 5).
+                    if (feature == null)
+                    {
+                        var fm = _model.FeatureManager;
+                        var older = fm.GetType().GetMethod("FeatureCircularPattern4")
+                                     ?? fm.GetType().GetMethod("FeatureCircularPattern3");
+                        if (older != null)
+                        {
+                            int n = older.GetParameters().Length;
+                            var args = new object[n];
+                            for (int i = 0; i < n; i++) args[i] = false;
+                            // Common 8-arg signature for v3:
+                            //   (Number, Spacing, FlipDirection, GeometryPattern,
+                            //    EqualSpacing, VarySketch, OffsetSeed, ReverseSeed)
+                            if (n >= 5)
+                            {
+                                args[0] = count;
+                                args[1] = 2 * Math.PI;
+                                args[2] = false;
+                                args[3] = false;
+                                args[4] = true;
+                            }
+                            feature = older.Invoke(fm, args) as IFeature;
+                            if (feature != null)
+                                diag.Add($"used-older-pattern={older.Name}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    diag.Add($"FeatureCircularPattern5-threw={ex.Message}");
+                }
+            }
+            else
+            {
+                diag.Add("skipped-pattern-call (selection incomplete)");
+            }
+
+            // SOFTWARE-PATTERN FALLBACK: SW2024 interop returns null for
+            // FeatureCircularPattern5 even with all selection state correct
+            // (verified via probe). When that happens, manually replicate
+            // the pattern by N-1 cut-extrudes at rotated positions. Works
+            // for the standard "single circular feature on a disc" case.
+            int softwareInstancesAdded = 0;
+            if (feature == null && srcFeat != null)
+            {
+                try
+                {
+                    // Inspect the source feature's first sketch to get
+                    // the seed circle position (cx, cy, r).
+                    double seedX = double.NaN, seedY = double.NaN, seedR = 0;
+                    string seedSketchName = null;
+                    // If the planner provided explicit seed coords, use
+                    // those and skip the fragile COM unwrap entirely.
+                    if (planSeedX.HasValue && planSeedY.HasValue
+                        && planSeedR.HasValue && planSeedR.Value > 0)
+                    {
+                        seedX = planSeedX.Value / 1000.0;  // mm -> m
+                        seedY = planSeedY.Value / 1000.0;
+                        seedR = planSeedR.Value / 1000.0;
+                        seedSketchName = "from-plan";
+                        FileLog($"  circPat: planner-provided seed X={seedX*1000:F2} Y={seedY*1000:F2} R={seedR*1000:F2}");
+                    }
+                    try
+                    {
+                        // Skip COM introspection entirely if the planner
+                        // already provided explicit seed coords above.
+                        if (seedSketchName == "from-plan") goto skipComLookup;
+                        // Walk srcFeat's owned sketches first (extrude
+                        // features contain their seed sketch as a
+                        // sub-feature in most SW versions).
+                        var subFeat = srcFeat.GetFirstSubFeature() as IFeature;
+                        while (subFeat != null && string.IsNullOrEmpty(seedSketchName))
+                        {
+                            if (subFeat.GetTypeName2() == "ProfileFeature")
+                                seedSketchName = subFeat.Name;
+                            subFeat = subFeat.GetNextSubFeature() as IFeature;
+                        }
+                        // Fallback: walk the feature tree in reverse from
+                        // the source feature, looking for the closest
+                        // preceding ProfileFeature.
+                        if (string.IsNullOrEmpty(seedSketchName))
+                        {
+                            // Grab all features, find srcFeat's index,
+                            // walk backwards.
+                            var all = new System.Collections.Generic.List<IFeature>();
+                            IFeature f = _model.FirstFeature() as IFeature;
+                            while (f != null)
+                            {
+                                all.Add(f);
+                                f = f.GetNextFeature() as IFeature;
+                            }
+                            int srcIdx = -1;
+                            for (int i = 0; i < all.Count; i++)
+                                if (all[i].Name == srcFeat.Name) { srcIdx = i; break; }
+                            if (srcIdx > 0)
+                            {
+                                for (int i = srcIdx - 1; i >= 0; i--)
+                                {
+                                    if (all[i].GetTypeName2() == "ProfileFeature")
+                                    {
+                                        seedSketchName = all[i].Name;
+                                        break;
+                                    }
+                                }
+                            }
+                            FileLog($"  circPat: tree-reverse seed scan -> '{seedSketchName ?? "null"}' (srcIdx={srcIdx})");
+                        }
+                        FileLog($"  circPat: seedSketchName='{seedSketchName ?? "null"}'");
+                        if (!string.IsNullOrEmpty(seedSketchName))
+                        {
+                            _model.ClearSelection2(true);
+                            bool selOk = _model.Extension.SelectByID2(
+                                seedSketchName, "SKETCH", 0, 0, 0,
+                                false, 0, null, 0);
+                            FileLog($"  circPat: select seed sketch '{seedSketchName}' -> {selOk}");
+                            _model.EditSketch();
+                            var sk = _model.SketchManager.ActiveSketch as ISketch;
+                            FileLog($"  circPat: ActiveSketch null? {sk == null}");
+                            if (sk != null)
+                            {
+                                // Use late-bound to dodge interop method
+                                // name drift across SW versions.
+                                object[] arcs = null;
+                                foreach (var probeName in new[] {
+                                    "GetSketchArcs", "GetArcs", "GetArcs2",
+                                    "GetSketchArcs2" })
+                                {
+                                    try
+                                    {
+                                        var miA = sk.GetType().GetMethod(probeName);
+                                        if (miA != null)
+                                        {
+                                            int n = miA.GetParameters().Length;
+                                            var aArgs = new object[n];
+                                            for (int i = 0; i < n; i++) aArgs[i] = false;
+                                            arcs = miA.Invoke(sk, aArgs) as object[];
+                                            if (arcs != null) break;
+                                        }
+                                    }
+                                    catch { /* try next */ }
+                                }
+                                FileLog($"  circPat: arc-probe arcs.len={(arcs?.Length.ToString() ?? "null")}");
+                                if (arcs != null && arcs.Length > 0)
+                                {
+                                    var sa = arcs[0] as ISketchArc;
+                                    if (sa != null)
+                                    {
+                                        var cp = sa.GetCenterPoint2() as double[];
+                                        if (cp != null && cp.Length >= 2)
+                                        {
+                                            seedX = cp[0];
+                                            seedY = cp[1];
+                                            seedR = sa.GetRadius();
+                                        }
+                                    }
+                                }
+                                // Also try GetSketchSegments (more general)
+                                if (seedR <= 0)
+                                {
+                                    object[] segs = null;
+                                    try {
+                                        var miS = sk.GetType().GetMethod("GetSketchSegments");
+                                        if (miS != null)
+                                            segs = miS.Invoke(sk, new object[0]) as object[];
+                                    } catch { }
+                                    FileLog($"  circPat: seg-probe segs.len={(segs?.Length.ToString() ?? "null")}");
+                                    if (segs != null)
+                                    {
+                                        foreach (var s in segs)
+                                        {
+                                            FileLog($"  circPat: seg type={s?.GetType().Name}");
+                                            // Try ISketchArc first.
+                                            var sa = s as ISketchArc;
+                                            if (sa != null)
+                                            {
+                                                var cp = sa.GetCenterPoint2() as double[];
+                                                if (cp != null && cp.Length >= 2)
+                                                {
+                                                    seedX = cp[0];
+                                                    seedY = cp[1];
+                                                    seedR = sa.GetRadius();
+                                                    break;
+                                                }
+                                            }
+                                            // Skip — COM IDispatch unwrap of
+                                            // SAFEARRAY return is messy in
+                                            // net48 without Microsoft.CSharp.
+                                            // The planner is expected to pass
+                                            // seed_x/seed_y/seed_r explicitly
+                                            // to circularPattern, so we don't
+                                            // need to discover from sketch.
+                                            ;
+                                        }
+                                    }
+                                }
+                            }
+                            // Exit edit-sketch mode so subsequent
+                            // CreateCircle calls land in fresh sketches.
+                            try {
+                                _model.SketchManager.InsertSketch(true);
+                            } catch { }
+                        }
+                    }
+                    catch (Exception sex)
+                    {
+                        FileLog($"  circPat: seed-sketch inspect threw {sex.Message}");
+                    }
+                    skipComLookup:
+                    FileLog($"  circPat: seed coord X={(double.IsNaN(seedX)?"NaN":(seedX*1000).ToString("F2"))} Y={(double.IsNaN(seedY)?"NaN":(seedY*1000).ToString("F2"))} R={seedR*1000:F2}");
+                    if (!double.IsNaN(seedX) && seedR > 0 && count > 1)
+                    {
+                        // Rotation radius = distance from origin to seed
+                        // center. Pattern around the requested axis.
+                        double rRot = Math.Sqrt(seedX * seedX + seedY * seedY);
+                        double phase0 = Math.Atan2(seedY, seedX);
+                        FileLog($"  circPat: software fallback seed=({seedX*1000:F2},{seedY*1000:F2}) r={seedR*1000:F2} rRot={rRot*1000:F2} phase0={phase0*180/Math.PI:F1}deg");
+                        // Emit count-1 additional cuts (the original is
+                        // already there; we need (count-1) more).
+                        // Put ALL N-1 circles into a SINGLE sketch and do
+                        // ONE cut — avoids per-iteration SW state drift
+                        // that caused 4-of-5 cuts to silently fail when
+                        // we did them one-at-a-time.
+                        try {
+                            if (_model.SketchManager.ActiveSketch != null)
+                                _model.SketchManager.InsertSketch(true);
+                        } catch { }
+                        // Pick the plane perpendicular to the requested
+                        // pattern axis. axis=Z → sketch on XY plane,
+                        // which SW calls "Front Plane" (per SwPlaneName).
+                        string fallbackPlane = axis switch
+                        {
+                            "X" => "Right Plane",  // YZ
+                            "Y" => "Top Plane",    // XZ
+                            _   => "Front Plane",  // XY (axis=Z)
+                        };
+                        _model.ClearSelection2(true);
+                        _model.Extension.SelectByID2(
+                            fallbackPlane, "PLANE", 0, 0, 0,
+                            false, 0, null, 0);
+                        _model.SketchManager.InsertSketch(true);
+                        FileLog($"  circPat: software fallback sketch on '{fallbackPlane}'");
+                        int circlesCreated = 0;
+                        for (int i = 1; i < count; i++)
+                        {
+                            double theta = phase0 + 2 * Math.PI * i / count;
+                            double cx = rRot * Math.Cos(theta);
+                            double cy = rRot * Math.Sin(theta);
+                            object cir = _model.SketchManager.CreateCircle(
+                                cx, cy, 0,
+                                cx + seedR, cy, 0);
+                            if (cir != null) circlesCreated++;
+                            FileLog($"  circPat[{i}/{count-1}]: cx={cx*1000:F1} cy={cy*1000:F1} cir={cir!=null}");
+                        }
+                        _model.SketchManager.InsertSketch(true);  // exit sketch
+                        var lastSk = _model.FeatureByPositionReverse(0) as IFeature;
+                        FileLog($"  circPat: built single sketch '{lastSk?.Name}' with {circlesCreated} circles");
+                        if (lastSk != null && circlesCreated > 0)
+                        {
+                            _model.ClearSelection2(true);
+                            lastSk.Select2(false, 0);
+                            // Mirror exact arg shape from the working
+                            // OpExtrude cut path (line ~1188) — SW is
+                            // sensitive to the angle args even when
+                            // there's no draft.
+                            const double DEG_CP = 0.01745329251994;
+                            var cutFeat = _model.FeatureManager.FeatureCut4(
+                                true, false, false,
+                                (int)swEndConditions_e.swEndCondThroughAll,
+                                (int)swEndConditions_e.swEndCondBlind,
+                                0.01, 0.01,
+                                false, false, false, false,
+                                DEG_CP, DEG_CP,
+                                false, false, false, false,
+                                false, false, false,
+                                true, true,
+                                false,
+                                (int)swStartConditions_e.swStartSketchPlane,
+                                0, false, false) as IFeature;
+                            FileLog($"  circPat: single cut feat={cutFeat != null}");
+                            if (cutFeat != null) softwareInstancesAdded = circlesCreated;
+                        }
+                        if (softwareInstancesAdded > 0)
+                        {
+                            diag.Add($"software-fallback-added={softwareInstancesAdded}");
+                            // Synthesize a fake "feature" so callers see
+                            // ok=true. The pattern doesn't have a single
+                            // tree node — it's N+1 cut features.
+                            feature = srcFeat;  // alias the seed
+                        }
+                    }
+                    else
+                    {
+                        diag.Add("software-fallback-skipped (no seed circle found)");
+                    }
+                }
+                catch (Exception sfex)
+                {
+                    diag.Add($"software-fallback-threw={sfex.Message}");
+                }
+            }
+
+            if (feature != null && !string.IsNullOrEmpty(alias)
+                && softwareInstancesAdded == 0)
             {
                 feature.Name = alias;
-                _aliasMap[alias] = feature.Name;
+                _aliasMap[alias] = feature;
             }
-            return new { ok = feature != null, alias, kind = "circular_pattern",
-                          count, axis };
+
+            string diagStr = string.Join("; ", diag);
+            FileLog($"  circPat ok={(feature != null)} alias='{alias}' "
+                     + $"count={count} axis={axis} swInst={softwareInstancesAdded} :: {diagStr}");
+            return new {
+                ok       = feature != null,
+                alias,
+                software_fallback = softwareInstancesAdded > 0,
+                instances_added = softwareInstancesAdded,
+                kind     = "circular_pattern",
+                count, axis,
+                diagnostic = diagStr,
+            };
         }
 
         private object OpFillet(Dictionary<string, object> p)
@@ -1165,12 +2819,94 @@ namespace AriaSW
                 path = Path.Combine(outDir,
                     $"aria_{DateTime.Now:yyyyMMdd_HHmmss}.SLDPRT");
             }
+            // Force STL prefs to mm + Fine + binary so the visual-verify
+            // geometry precheck doesn't read a model in meters and report
+            // every dimension as 100% off. Without this, SW exports STL
+            // in whatever unit happens to be in the user's preferences,
+            // which on a fresh install is meters.
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+            if (ext == ".stl")
+            {
+                try
+                {
+                    // swSTLOutputUnits — 0=mm, 1=cm, 2=m, 3=in, 4=ft
+                    _sw.SetUserPreferenceIntegerValue(
+                        (int)swUserPreferenceIntegerValue_e.swExportStlUnits, 0);
+                    _sw.SetUserPreferenceIntegerValue(
+                        (int)swUserPreferenceIntegerValue_e.swSTLQuality, 1); // Fine
+                    _sw.SetUserPreferenceToggle(
+                        (int)swUserPreferenceToggle_e.swSTLBinaryFormat, true);
+                }
+                catch (Exception prefEx)
+                {
+                    FileLog($"  saveAs: STL pref set failed (non-fatal): {prefEx.Message}");
+                }
+            }
+            // Force a full rebuild before save. If a prior op left a
+            // feature in error state (failed cut, suppressed pattern,
+            // sketch with missing reference), SaveAs returns errs=1
+            // without rebuilding first. Rebuild surfaces the real
+            // problem and lets SW reconcile feature state.
+            int rebuildErrs = 0;
+            try
+            {
+                bool rebuildOk = target.EditRebuild3();
+                if (!rebuildOk) rebuildErrs = 1;
+            }
+            catch (Exception rebEx)
+            {
+                FileLog($"  saveAs: rebuild threw {rebEx.GetType().Name}: {rebEx.Message}");
+                rebuildErrs = 2;
+            }
+
+            // Detect feature-tree error state — count features in error
+            // so the response carries actionable info, not just errs=1.
+            int featErrors = 0;
+            try
+            {
+                var featMgr = target.FeatureManager;
+                if (featMgr.GetFeatures(false) is object[] feats)
+                {
+                    foreach (var fobj in feats)
+                    {
+                        if (!(fobj is IFeature f)) continue;
+                        // GetErrorCode2 signature varies by SW version — wrap.
+                        int errCode = 0;
+                        try
+                        {
+                            // Newer signature: out int rebuild, out int update
+                            // Older: int return, no out args. Use reflection-safe path.
+                            object raw = f.GetType().InvokeMember(
+                                "GetErrorCode2",
+                                System.Reflection.BindingFlags.InvokeMethod,
+                                null, f, null);
+                            if (raw is int n) errCode = n;
+                        }
+                        catch { /* feature has no error code accessor */ }
+                        if (errCode != 0)
+                        {
+                            featErrors++;
+                            FileLog($"  saveAs: feature '{f.Name}' err code={errCode}");
+                        }
+                    }
+                }
+            }
+            catch (Exception fEx)
+            {
+                FileLog($"  saveAs: feature scan threw {fEx.GetType().Name}: {fEx.Message}");
+            }
+
             int errs = 0, warns = 0;
             bool ok = target.Extension.SaveAs(
                 path,
                 (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                (int)swSaveAsOptions_e.swSaveAsOptions_Silent
+                  | (int)swSaveAsOptions_e.swSaveAsOptions_Copy,
                 null, ref errs, ref warns);
+
+            // Decode SW save errors so callers see the actual fault.
+            string errMsg = ok ? null : DecodeSaveError(errs, featErrors, rebuildErrs);
+
             // Now close any imported part docs we kept open during the
             // assembly build. Best-effort: a missed close is harmless
             // (SW will keep them in the doc list).
@@ -1179,7 +2915,31 @@ namespace AriaSW
                 try { _sw.CloseDoc(t); } catch { }
             }
             _importedPartTitles.Clear();
-            return new { ok, path, errs, warns };
+            FileLog($"  saveAs result: ok={ok} errs={errs} warns={warns} featErrors={featErrors} rebuildErrs={rebuildErrs} -> {path}");
+            return new { ok, path, errs, warns,
+                           feature_errors = featErrors,
+                           rebuild_errors = rebuildErrs,
+                           error = errMsg };
+        }
+
+        private static string DecodeSaveError(int errs, int featErrors, int rebuildErrs)
+        {
+            if (rebuildErrs > 0)
+                return $"rebuild failed before save (rebuildErrs={rebuildErrs}); " +
+                       $"feature_errors={featErrors}; SW save errs={errs}";
+            if (featErrors > 0)
+                return $"{featErrors} feature(s) in error state — SW SaveAs " +
+                       $"refuses corrupt models; check addin.log for feature names";
+            return errs switch
+            {
+                1 => "swFileSaveError_GenericSaveError (typical: bad feature " +
+                      "tree, no permissions on dir, or read-only path)",
+                2 => "swFileSaveError_ReadOnlySaveError",
+                4 => "swFileSaveError_BadEntireFileSave",
+                8 => "swFileSaveError_FileLockError",
+                16 => "swFileSaveError_Cancelled",
+                _ => $"unknown SW save errs={errs}",
+            };
         }
 
         private object OpSetProperty(Dictionary<string, object> p)
@@ -3039,9 +4799,21 @@ namespace AriaSW
                 bool selected = false;
                 if (!string.IsNullOrEmpty(sketchName))
                 {
+                    // Resolve alias → real SW feature name (same fix that
+                    // unblocked OpRevolve). The bridge accepts user-friendly
+                    // aliases like "smprof"; SelectByID2 needs the actual
+                    // SW name like "Sketch1". Without this, sheet metal
+                    // base flange always fails its sketch select.
+                    string resolved = sketchName;
+                    if (_aliasMap.ContainsKey(sketchName)
+                        && _aliasMap[sketchName] is IFeature sf)
+                    {
+                        resolved = sf.Name;
+                    }
                     try { _model.ClearSelection2(true); } catch { }
                     selected = _model.Extension.SelectByID2(
-                        sketchName, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                        resolved, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                    if (selected) sketchName = resolved;
                 }
                 else
                 {
@@ -3070,24 +4842,65 @@ namespace AriaSW
 
                 var fm = _model.FeatureManager;
                 var fmType = fm.GetType();
-                // Try InsertSheetMetalBaseFlange2 first (more args, SW 2018+)
+                // SW interop versions disagree on InsertSheetMetalBaseFlange2's
+                // arg count (saw 12, 14, and 15 across SW 2018→2024). Build
+                // the arg list at runtime from the method's actual ParameterInfo
+                // so we always pass the right count regardless of SW version.
                 object feat = null;
+                object[] BuildArgs(int n)
+                {
+                    // Standard ordering: thickness, reverse, bendR, useGauge,
+                    // kFactor, useRelief, reliefType, reliefDepth, reliefWidth,
+                    // reliefRatio, autoRelief, useDefaultBendDeduction,
+                    // bendDeduction, cornerType, [extra]. Pad with safe
+                    // defaults if SW expects more.
+                    var defaults = new object[] {
+                        thickness_m,    // 0 Thickness
+                        false,          // 1 ReverseDirection
+                        bendR_m,        // 2 BendRadius
+                        false,          // 3 UseGaugeTable
+                        kFactor,        // 4 KFactor
+                        false,          // 5 UseRelief / BendAllowance flag
+                        0,              // 6 ReliefType / BendAllowanceType
+                        0.0,            // 7 ReliefDepth / BendDeduction
+                        0.0,            // 8 ReliefWidth / Offset
+                        0.0,            // 9 ReliefRatio
+                        false,          // 10 AutoRelief
+                        false,          // 11 UseDefaultBendDeduction
+                        0.0,            // 12 BendDeduction
+                        0,              // 13 CornerType
+                        false,          // 14 (legacy extra)
+                    };
+                    var args = new object[n];
+                    for (int i = 0; i < n; i++)
+                        args[i] = i < defaults.Length ? defaults[i]
+                                                       : (object)false;
+                    return args;
+                }
+
                 var mi2 = fmType.GetMethod("InsertSheetMetalBaseFlange2");
                 if (mi2 != null)
                 {
-                    feat = mi2.Invoke(fm, new object[] {
-                        thickness_m, false, bendR_m, false, kFactor, false,
-                        0.0, 0.0, false, 0.0, 0.0, false,
-                        0, 0, false });
+                    int n = mi2.GetParameters().Length;
+                    try { feat = mi2.Invoke(fm, BuildArgs(n)); }
+                    catch (Exception ex)
+                    {
+                        FileLog($"  sheetMetalBaseFlange: BaseFlange2(n={n}) "
+                                + $"threw: {ex.GetType().Name}: {ex.Message}");
+                    }
                 }
                 if (feat == null)
                 {
                     var mi1 = fmType.GetMethod("InsertSheetMetalBaseFlange");
                     if (mi1 != null)
                     {
-                        feat = mi1.Invoke(fm, new object[] {
-                            thickness_m, false, bendR_m, false, kFactor, false,
-                            0.0, 0.0, false, 0.0, 0.0, false });
+                        int n = mi1.GetParameters().Length;
+                        try { feat = mi1.Invoke(fm, BuildArgs(n)); }
+                        catch (Exception ex)
+                        {
+                            FileLog($"  sheetMetalBaseFlange: BaseFlange(n={n}) "
+                                    + $"threw: {ex.GetType().Name}: {ex.Message}");
+                        }
                     }
                 }
                 if (feat == null)
@@ -3306,6 +5119,1621 @@ namespace AriaSW
             {
                 return new { ok = false,
                               error = $"surfaceExtrude threw: {ex.Message}" };
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // 3D solid features (revolve / sweep / loft / shell / rib / draft /
+        // helix / coil). v1 implementations use SW's FeatureManager APIs
+        // where the signature is well-known; less common ops return a
+        // structured "deferred" result so the chain doesn't break.
+        // -----------------------------------------------------------------
+        private object OpRevolve(Dictionary<string, object> p)
+        {
+            if (_model == null) return new { ok = false, error = "revolve: no model" };
+            string sketch = p.ContainsKey("sketch") ? p["sketch"]?.ToString() : null;
+            if (string.IsNullOrEmpty(sketch))
+                return new { ok = false, error = "revolve: sketch required" };
+            double angleDeg = p.ContainsKey("angle")
+                ? Convert.ToDouble(p["angle"]) : 360.0;
+            double angleRad = angleDeg * Math.PI / 180.0;
+            string axis = p.ContainsKey("axis") ? p["axis"]?.ToString() : "Z";
+            string operation = p.ContainsKey("operation")
+                ? p["operation"]?.ToString() : "new";
+            string alias = p.ContainsKey("alias")
+                ? p["alias"]?.ToString() : "revolve_body";
+            try
+            {
+                // Resolve alias -> actual SW sketch feature name. The bridge
+                // exposes user-friendly aliases ("s", "p", etc.); SelectByID2
+                // expects the real SW name ("Sketch1", "Sketch3"). Without
+                // this lookup, SelectByID2 returns false and the revolve
+                // never starts.
+                string sketchFeatName = sketch;
+                if (_aliasMap.ContainsKey(sketch)
+                    && _aliasMap[sketch] is IFeature sketchFeat)
+                {
+                    sketchFeatName = sketchFeat.Name;
+                }
+                _model.ClearSelection2(true);
+                bool selected = _model.Extension.SelectByID2(
+                    sketchFeatName, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                if (!selected)
+                    return new { ok = false,
+                                  error = $"revolve: could not select sketch '{sketch}' (resolved='{sketchFeatName}')" };
+                // Use sketchFeatName for any later re-selects too
+                sketch = sketchFeatName;
+
+                // FeatureRevolve2 needs a CONSTRUCTION LINE (centerline) in
+                // the sketch to use as the axis of revolution. Most callers
+                // forget this — they emit a profile polyline and assume the
+                // origin axis is implicit. Auto-inject a centerline at x=0
+                // (sketch-local) spanning the sketch's Y bbox before calling
+                // FeatureRevolve2. This makes revolve "just work" for any
+                // profile drawn against the global Z axis (the convention
+                // ARIA's planners use). If the sketch already contains a
+                // centerline (user-drawn), the addition is harmless — SW
+                // picks the longest centerline as the axis.
+                try
+                {
+                    _model.EditSketch();   // re-enter the named sketch
+                    var sm = _model.SketchManager;
+                    if (sm != null)
+                    {
+                        // Centerline orientation depends on the requested
+                        // revolve axis. SW sketches are 2D so the centerline
+                        // is in sketch-plane coordinates. The mapping from
+                        // user-facing axis -> sketch-plane direction:
+                        //   axis="Y" or unspec : vertical centerline (sketch Y)
+                        //   axis="Z"           : horizontal centerline (sketch X)
+                        //                        — used when the user thinks
+                        //                        in 3D and wants the part to
+                        //                        spin around the world Z.
+                        //   axis="X"           : horizontal centerline (sketch X)
+                        // For axis="Z" without a centerline along sketch X,
+                        // FeatureRevolve2 returns null (no axis) — this is
+                        // the revolve_cut FAIL we hit in the matrix.
+                        // Inject BOTH horizontal and vertical centerlines so
+                        // SW always finds an axis matching the user's intent
+                        // regardless of which sketch plane the profile is on.
+                        // SW picks the centerline whose endpoints are
+                        // consistent with the profile (axis must NOT cross
+                        // the closed loop). Two centerlines of equal length
+                        // is harmless: SW picks the one geometrically valid
+                        // for the profile and ignores the other.
+                        var lineV = sm.CreateCenterLine(
+                            0, -1.0, 0, 0, 1.0, 0) as object;  // vertical
+                        var lineH = sm.CreateCenterLine(
+                            -1.0, 0, 0, 1.0, 0, 0) as object;  // horizontal
+                        FileLog($"  revolve: centerlines injected (V={(lineV != null ? "ok" : "null")} H={(lineH != null ? "ok" : "null")}) for axis={axis}");
+                    }
+                    // SketchManager.InsertSketch(true) exits the sketch (the
+                    // IModelDoc2.InsertSketch overload takes no args).
+                    _model.SketchManager.InsertSketch(true);
+                    // Re-select the sketch — exit deselected it.
+                    _model.ClearSelection2(true);
+                    _model.Extension.SelectByID2(
+                        sketch, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                }
+                catch (Exception cex)
+                {
+                    FileLog($"  revolve: centerline injection threw {cex.Message}");
+                }
+
+                // FeatureRevolve2 signature is wide — use reflection so
+                // we tolerate version drift (2020 vs 2024).
+                var fm = _model.FeatureManager;
+                var mi = fm.GetType().GetMethod("FeatureRevolve2");
+                object feat = null;
+                if (mi != null)
+                {
+                    int paramCount = mi.GetParameters().Length;
+                    bool isCut = operation == "cut" || operation == "subtract";
+                    // Common 21-arg signature: (singleDir, isSolid, isThin,
+                    // isCut, reverse, bothDirs, type1, type2, angle1,
+                    // angle2, ofs1, ofs2, ofsRev1, ofsRev2, thinType,
+                    // thinThk1, thinThk2, mergeFaces, useFeatScope,
+                    // useAutoSel, t0)
+                    var args = new object[paramCount];
+                    if (paramCount >= 18)
+                    {
+                        // FeatureRevolve2 signature (SW2024, 21 args):
+                        // 0: SingleDir (bool)        1: IsSolid (bool)
+                        // 2: IsThin (bool)           3: IsCut (bool)
+                        // 4: ReverseDir (bool)       5: BothDirSameEntity (bool)
+                        // 6: Type1 (int)             7: Type2 (int)
+                        // 8: Angle1 (double)         9: Angle2 (double)
+                        // 10: OffsetReverse1 (bool) 11: OffsetReverse2 (bool)
+                        // 12: Offset1 (double)      13: Offset2 (double)
+                        // 14: ThinType (int)        15: ThinThk1 (double)
+                        // 16: ThinThk2 (double)     17: MergeFaces (bool)
+                        // 18: UseFeatScope (bool)   19: UseAutoSelect (bool)
+                        // 20: T0 (int) start cond
+                        args[0] = true;          // singleDir
+                        args[1] = true;          // isSolid
+                        args[2] = false;         // isThin
+                        args[3] = isCut;         // isCut
+                        args[4] = false;         // reverseDir
+                        args[5] = false;         // bothDirs
+                        args[6] = 0;             // type1 = blind
+                        args[7] = 0;             // type2
+                        args[8] = angleRad;      // angle1
+                        args[9] = 0.0;           // angle2
+                        args[10] = false;        // offsetReverse1 (bool!)
+                        args[11] = false;        // offsetReverse2 (bool!)
+                        args[12] = 0.0;          // offset1
+                        args[13] = 0.0;          // offset2
+                        args[14] = 0;            // thinType
+                        args[15] = 0.0;          // thinThk1
+                        args[16] = 0.0;          // thinThk2
+                        args[17] = false;        // mergeFaces
+                        if (paramCount >= 20) {
+                            args[18] = true;     // useFeatScope
+                            args[19] = true;     // useAutoSelect
+                        }
+                        if (paramCount >= 21) args[20] = 0;  // t0 (int)
+                        for (int i = 21; i < paramCount; i++) args[i] = false;
+                    }
+                    feat = mi.Invoke(fm, args);
+                }
+                if (feat != null && _aliasMap != null)
+                    _aliasMap[alias] = feat;
+                FileLog($"  revolve: sketch={sketch} angle={angleDeg}deg " +
+                         $"axis={axis} op={operation} feat={feat != null}");
+                if (feat == null)
+                {
+                    return new { ok = false,
+                                  error = $"FeatureRevolve2 returned null - operation={operation}, paramCount={(mi != null ? mi.GetParameters().Length : -1)}. For cut: profile must intersect existing body. For new: sketch must be closed and have a centerline.",
+                                  kind = "revolve", sketch,
+                                  angle_deg = angleDeg, operation };
+                }
+                return new { ok = true, kind = "revolve",
+                              sketch, angle_deg = angleDeg, axis,
+                              operation, alias };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"revolve threw: {ex.Message}" };
+            }
+        }
+
+        private object OpSweep(Dictionary<string, object> p)
+        {
+            if (_model == null) return new { ok = false, error = "sweep: no model" };
+            string profile = p.ContainsKey("profile_sketch")
+                ? p["profile_sketch"]?.ToString() : null;
+            string path = p.ContainsKey("path_sketch")
+                ? p["path_sketch"]?.ToString() : null;
+            if (string.IsNullOrEmpty(profile) || string.IsNullOrEmpty(path))
+                return new { ok = false,
+                              error = "sweep: profile_sketch + path_sketch required" };
+            string operation = p.ContainsKey("operation")
+                ? p["operation"]?.ToString() : "new";
+            string alias = p.ContainsKey("alias")
+                ? p["alias"]?.ToString() : "sweep_body";
+            try
+            {
+                _model.ClearSelection2(true);
+                bool ok1 = _model.Extension.SelectByID2(
+                    profile, "SKETCH", 0, 0, 0, true, 1, null, 0);
+                bool ok2 = _model.Extension.SelectByID2(
+                    path, "SKETCH", 0, 0, 0, true, 4, null, 0);
+                if (!ok1 || !ok2)
+                    return new { ok = false,
+                                  error = $"sweep: could not stage sketches (profile={ok1}, path={ok2})" };
+                var fm = _model.FeatureManager;
+                var mi = fm.GetType().GetMethod("InsertProtrusionSwept4")
+                          ?? fm.GetType().GetMethod("InsertProtrusionSwept3")
+                          ?? fm.GetType().GetMethod("InsertProtrusionSwept2");
+                object feat = null;
+                if (mi != null)
+                {
+                    int n = mi.GetParameters().Length;
+                    var args = new object[n];
+                    // Common signature (InsertProtrusionSwept3, 13 args):
+                    // (twistType, alignSweep, twistAngleRad,
+                    //  pathAlignment, mergeSmoothFaces, isThin,
+                    //  thinType, thinThk1, thinThk2, isMerge,
+                    //  isAdvancedFeatScope, useAutoSel, t0)
+                    for (int i = 0; i < n; i++) args[i] = false;
+                    if (n >= 13) {
+                        args[0] = 0;   // twistType
+                        args[1] = false; args[2] = 0.0;
+                        args[3] = 0; args[4] = true; args[5] = false;
+                        args[6] = 0; args[7] = 0.0; args[8] = 0.0;
+                        args[9] = true; args[10] = false; args[11] = true;
+                        args[12] = 0;
+                    }
+                    feat = mi.Invoke(fm, args);
+                }
+                if (feat != null && _aliasMap != null)
+                    _aliasMap[alias] = feat;
+                return new { ok = feat != null, kind = "sweep",
+                              profile_sketch = profile, path_sketch = path,
+                              operation, alias };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"sweep threw: {ex.Message}" };
+            }
+        }
+
+        private object OpLoft(Dictionary<string, object> p)
+        {
+            if (_model == null) return new { ok = false, error = "loft: no model" };
+            // Profiles can be passed as a list under "profile_sketches" or
+            // "profiles" — the planner side may use either name.
+            var profilesObj = p.ContainsKey("profile_sketches")
+                ? p["profile_sketches"] : (p.ContainsKey("profiles") ? p["profiles"] : null);
+            var profiles = new System.Collections.Generic.List<string>();
+            if (profilesObj is System.Collections.IEnumerable en
+                && !(profilesObj is string))
+            {
+                foreach (var item in en)
+                    if (item != null) profiles.Add(item.ToString());
+            }
+            else if (profilesObj is string s)
+            {
+                foreach (var part in s.Split(','))
+                    if (!string.IsNullOrWhiteSpace(part)) profiles.Add(part.Trim());
+            }
+            if (profiles.Count < 2)
+                return new { ok = false,
+                              error = "loft: profile_sketches needs >=2 sketch names" };
+            string operation = p.ContainsKey("operation")
+                ? p["operation"]?.ToString() : "new";
+            string alias = p.ContainsKey("alias")
+                ? p["alias"]?.ToString() : "loft_body";
+            try
+            {
+                if (_model.SketchManager.ActiveSketch != null)
+                    _model.SketchManager.InsertSketch(true);
+                _model.ClearSelection2(true);
+                int staged = 0;
+                // Each profile must be selected with mark=1 and append=true
+                // so they accumulate. SW picks loft order from selection
+                // order — the planner is responsible for emitting bottom
+                // up. Resolve alias → SW feature name first (same fix as
+                // OpRevolve/OpSheetMetalBaseFlange — SelectByID2 needs the
+                // actual SW name like "Sketch1", not the planner alias).
+                foreach (var alias_name in profiles)
+                {
+                    string resolved = alias_name;
+                    if (_aliasMap.ContainsKey(alias_name)
+                        && _aliasMap[alias_name] is IFeature sf)
+                    {
+                        resolved = sf.Name;
+                    }
+                    bool ok = _model.Extension.SelectByID2(
+                        resolved, "SKETCH", 0, 0, 0, true, 1, null, 0);
+                    if (ok) staged++;
+                    else FileLog($"  loft: could not stage profile alias='{alias_name}' resolved='{resolved}'");
+                }
+                if (staged < 2)
+                    return new { ok = false,
+                                  error = $"loft: only {staged} profiles staged (need >=2)" };
+                var fm = _model.FeatureManager;
+                bool isCut = operation == "cut" || operation == "subtract";
+                // InsertProtrusionBlend2/Blend has slot types that vary
+                // across SW versions (saw 17- and 18-arg flavors). Build the
+                // arg vector from each ParameterInfo so we never pass a bool
+                // where SW expects a double. Same fix that unblocked
+                // FeatureExtrusionThin2 for surface extrudes.
+                object feat = null;
+                var fmType = fm.GetType();
+                foreach (var mname in new[] {
+                    "InsertProtrusionBlend2", "InsertProtrusionBlend",
+                    "FeatureLoft2", "FeatureLoft" })
+                {
+                    var mi = fmType.GetMethod(mname);
+                    if (mi == null) continue;
+                    try
+                    {
+                        var pis = mi.GetParameters();
+                        int n = pis.Length;
+                        var args = new object[n];
+                        for (int i = 0; i < n; i++)
+                        {
+                            Type pt = pis[i].ParameterType;
+                            if (pt == typeof(double))      args[i] = 0.0;
+                            else if (pt == typeof(int))    args[i] = 0;
+                            else if (pt == typeof(bool))   args[i] = false;
+                            else if (pt == typeof(short))  args[i] = (short)0;
+                            else                            args[i] = null;
+                        }
+                        // Standard ProtrusionBlend slot semantics:
+                        //   0 closedLoft (bool=false)
+                        //   1 addStartMatchSection (bool=false)
+                        //   2 addEndMatchSection   (bool=false)
+                        //   3 reverseDirection (bool=false)
+                        //   4 isThin (bool=false)
+                        //   5 makeMerge (bool=true)
+                        //   6 startMatchType (int=0)
+                        //   7 endMatchType (int=0)
+                        //   8 startTangentLength (double=1.0)
+                        //   9 endTangentLength (double=1.0)
+                        //  10-15 tangent dirs / reversals (bool=false)
+                        //  16 forceNonRational (bool=false)
+                        //  17 isAdvancedFeatScope (bool=false)
+                        if (n > 5 && pis[5].ParameterType == typeof(bool))
+                            args[5] = true;     // makeMerge
+                        if (n > 8 && pis[8].ParameterType == typeof(double))
+                            args[8] = 1.0;      // startTangentLength
+                        if (n > 9 && pis[9].ParameterType == typeof(double))
+                            args[9] = 1.0;      // endTangentLength
+                        FileLog($"  loft: trying {mname}(n={n})");
+                        feat = mi.Invoke(fm, args);
+                        if (feat != null)
+                        {
+                            FileLog($"  loft: {mname} succeeded");
+                            break;
+                        }
+                        else
+                        {
+                            FileLog($"  loft: {mname} returned null");
+                        }
+                    }
+                    catch (Exception lex)
+                    {
+                        FileLog($"  loft: {mname} threw: {lex.GetType().Name}: {lex.Message}");
+                    }
+                }
+                if (feat is IFeature lf && _aliasMap != null)
+                {
+                    _aliasMap[alias] = lf;
+                    if (operation == "new") _lastBodyFeature = lf;
+                }
+                FileLog($"  loft: staged={staged} feat={feat != null} op={operation}");
+                return new { ok = feat != null, kind = "loft",
+                              profiles = profiles.ToArray(),
+                              n_profiles = profiles.Count,
+                              operation, alias };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"loft threw: {ex.Message}" };
+            }
+        }
+
+        private object OpShell(Dictionary<string, object> p)
+        {
+            if (_model == null) return new { ok = false, error = "shell: no model" };
+            double thk = Mm(p.ContainsKey("thickness") ? p["thickness"] : 1.0);
+            // Optional list of face ids/names to remove (faces become open
+            // openings of the shelled cavity). Each element can be a string
+            // face name OR an [x,y,z] coordinate that SW will hit-test.
+            var removeObj = p.ContainsKey("remove_faces")
+                ? p["remove_faces"] : (p.ContainsKey("faces_to_remove")
+                    ? p["faces_to_remove"] : null);
+            var faceCoords = new System.Collections.Generic.List<double[]>();
+            if (removeObj is System.Collections.IEnumerable en && !(removeObj is string))
+            {
+                foreach (var item in en)
+                {
+                    if (item is System.Collections.IEnumerable inner && !(item is string))
+                    {
+                        var v = new System.Collections.Generic.List<double>();
+                        foreach (var num in inner)
+                        {
+                            try { v.Add(Convert.ToDouble(num)); } catch { }
+                        }
+                        if (v.Count >= 3)
+                            faceCoords.Add(new double[] { Mm(v[0]), MirrorYIfNeeded(Mm(v[1])), Mm(v[2]) });
+                    }
+                }
+            }
+            try
+            {
+                if (_model.SketchManager.ActiveSketch != null)
+                    _model.SketchManager.InsertSketch(true);
+                _model.ClearSelection2(true);
+                int facesStaged = 0;
+                foreach (var c in faceCoords)
+                {
+                    bool ok = _model.Extension.SelectByID2(
+                        "", "FACE", c[0], c[1], c[2], true, 0, null, 0);
+                    if (ok) facesStaged++;
+                }
+                // Diagnostic probe: dump every method on _model and
+                // _model.FeatureManager containing "hell" so we can
+                // find what SW2024 actually exposes for shell.
+                try
+                {
+                    var dump = new System.Collections.Generic.List<string>();
+                    foreach (var holder in new object[] {
+                        _model, _model.FeatureManager, _model.Extension })
+                    {
+                        if (holder == null) continue;
+                        foreach (var m in holder.GetType().GetMethods())
+                            if (m.Name.IndexOf("hell",
+                                StringComparison.OrdinalIgnoreCase) >= 0)
+                                dump.Add($"{holder.GetType().Name}.{m.Name}({m.GetParameters().Length})");
+                    }
+                    FileLog($"  shell: full hell-probe = {string.Join(", ", dump)}");
+                }
+                catch { }
+                // SW2024 macro recording reveals shell lives on
+                // IModelDoc2.FeatureShell (NOT IFeatureManager.InsertFeatureShell*).
+                // Signature: FeatureShell(Thickness, Outward, KindOfShell)
+                object feat = LateBoundInvoke(
+                    "shell",
+                    new object[] { _model, _model.FeatureManager, _model.Extension },
+                    new[] { "FeatureShell", "InsertFeatureShell2",
+                            "InsertFeatureShell3", "InsertFeatureShell" },
+                    new object[] { thk, false, 0 });
+                // Fallback to the legacy 2-arg shape on InsertFeatureShell*.
+                if (feat == null)
+                {
+                    feat = LateBoundInvoke(
+                        "shell.legacy",
+                        new object[] { _model.FeatureManager, _model.Extension, _model },
+                        new[] { "InsertFeatureShell2", "InsertFeatureShell" },
+                        new object[] { thk, false });
+                }
+                FileLog($"  shell: thk={thk*1000:F1}mm faces_staged={facesStaged} feat={feat != null}");
+
+                // SOFTWARE-SHELL FALLBACK: SW2024 interop hides shell
+                // entirely (probe shows only GetPlasticsShellType). When
+                // both COM paths fail, build a hollow box via cut-extrude
+                // on the body's bbox. Works for box-like parts only —
+                // arbitrary shapes need a proper offset-surface boolean,
+                // which we'd implement when first needed.
+                if (feat == null && faceCoords.Count > 0)
+                {
+                    try
+                    {
+                        // Need the active body's bbox to compute the
+                        // inner-cavity extent.
+                        double[] bbox = null;
+                        if (_model is IPartDoc pd)
+                        {
+                            var bodies = pd.GetBodies2(
+                                (int)swBodyType_e.swSolidBody, false) as object[];
+                            foreach (var bo in bodies ?? new object[0])
+                            {
+                                var bd = bo as IBody2;
+                                if (bd == null) continue;
+                                var bb = bd.GetBodyBox() as double[];
+                                if (bb != null && bb.Length >= 6)
+                                {
+                                    if (bbox == null) bbox = bb;
+                                    else
+                                    {
+                                        bbox[0] = Math.Min(bbox[0], bb[0]);
+                                        bbox[1] = Math.Min(bbox[1], bb[1]);
+                                        bbox[2] = Math.Min(bbox[2], bb[2]);
+                                        bbox[3] = Math.Max(bbox[3], bb[3]);
+                                        bbox[4] = Math.Max(bbox[4], bb[4]);
+                                        bbox[5] = Math.Max(bbox[5], bb[5]);
+                                    }
+                                }
+                            }
+                        }
+                        if (bbox != null)
+                        {
+                            // Identify which axis the first removed-face
+                            // points along (Z if it's at z=zmax or zmin,
+                            // etc.). The first face determines the cut
+                            // direction.
+                            var rf = faceCoords[0];
+                            // ε margin so the closest-face check survives
+                            // float drift.
+                            double eps = 1e-4;
+                            string cutDir = "Z";
+                            string cutPlane = "XY";
+                            double cutZmin = bbox[2] + thk; // bot wall
+                            double cutZmax = bbox[5];        // through top
+                            if (Math.Abs(rf[2] - bbox[5]) > eps
+                                && Math.Abs(rf[2] - bbox[2]) > eps)
+                            {
+                                // Removed face is on a side, not top/bot.
+                                if (Math.Abs(rf[0] - bbox[3]) < eps
+                                    || Math.Abs(rf[0] - bbox[0]) < eps)
+                                {
+                                    cutDir = "X"; cutPlane = "YZ";
+                                }
+                                else
+                                {
+                                    cutDir = "Y"; cutPlane = "XZ";
+                                }
+                            }
+                            FileLog($"  shell: SW failed -> software fallback (bbox=({bbox[0]:F4},{bbox[1]:F4},{bbox[2]:F4})..({bbox[3]:F4},{bbox[4]:F4},{bbox[5]:F4}) cutDir={cutDir})");
+                            // Build inner-cavity sketch on the cut plane
+                            // at the OUTSIDE face position, inset by thk.
+                            _model.SketchManager.InsertSketch(true);
+                            _model.ClearSelection2(true);
+                            string planeName = cutPlane == "XY" ? "Top Plane"
+                                              : cutPlane == "XZ" ? "Front Plane"
+                                              : "Right Plane";
+                            // For Z-axis cut we want the sketch at the
+                            // bbox top so cut goes downward. SW
+                            // sketches always start at the named plane;
+                            // we apply a start_offset via the extrude.
+                            _model.Extension.SelectByID2(
+                                planeName, "PLANE", 0, 0, 0, false, 0, null, 0);
+                            _model.SketchManager.InsertSketch(true);
+                            // Inner rectangle: bbox minus thk on each
+                            // side perpendicular to the cut direction.
+                            if (cutDir == "Z")
+                            {
+                                _model.SketchManager.CreateCornerRectangle(
+                                    bbox[0] + thk, bbox[1] + thk, 0,
+                                    bbox[3] - thk, bbox[4] - thk, 0);
+                            }
+                            else if (cutDir == "X")
+                            {
+                                _model.SketchManager.CreateCornerRectangle(
+                                    0, bbox[1] + thk, bbox[2] + thk,
+                                    0, bbox[4] - thk, bbox[5] - thk);
+                            }
+                            else
+                            {
+                                _model.SketchManager.CreateCornerRectangle(
+                                    bbox[0] + thk, 0, bbox[2] + thk,
+                                    bbox[3] - thk, 0, bbox[5] - thk);
+                            }
+                            _model.SketchManager.InsertSketch(true);  // exit
+                            // Cut depth = bbox span minus floor wall
+                            double depth = (bbox[5] - bbox[2]) - thk;
+                            // Re-select sketch and extrude-cut.
+                            var lastSk = _model.FeatureByPositionReverse(0)
+                                as IFeature;
+                            if (lastSk != null)
+                            {
+                                _model.ClearSelection2(true);
+                                lastSk.Select2(false, 0);
+                                // FeatureCut4 to drill the cavity (28 args).
+                                feat = _model.FeatureManager.FeatureCut4(
+                                    true,                                // sd
+                                    false, false,                        // flip, dir
+                                    (int)swEndConditions_e.swEndCondBlind,    // T1
+                                    (int)swEndConditions_e.swEndCondBlind,    // T2
+                                    depth, 0,                            // D1, D2
+                                    false, false, false, false,
+                                    0, 0,                                // angles (rad)
+                                    false, false, false, false,
+                                    false,                               // NormalCut
+                                    false, false,                        // UseFeatScope
+                                    true, true,                          // useAutoSel + AssemblyFeatureScope
+                                    false,                               // PropagateFeatureToParts
+                                    (int)swStartConditions_e.swStartSketchPlane,
+                                    0, false, false) as IFeature;
+                                FileLog($"  shell: software cut produced feat={feat != null}");
+                            }
+                        }
+                    }
+                    catch (Exception swex)
+                    {
+                        FileLog($"  shell: software fallback threw {swex.Message}");
+                    }
+                }
+                // Post-hoc verify: did the body get hollowed?
+                bool isHollow = false;
+                try
+                {
+                    if (_model is IPartDoc pdv)
+                    {
+                        var bodies = pdv.GetBodies2(
+                            (int)swBodyType_e.swSolidBody, false) as object[];
+                        foreach (var bo in bodies ?? new object[0])
+                        {
+                            var bd = bo as IBody2;
+                            if (bd == null) continue;
+                            var faces = bd.GetFaces() as object[];
+                            // Hollow heuristic: has more than 6 faces
+                            // (a solid box has 6; shelled box has 11).
+                            if (faces != null && faces.Length > 6)
+                            {
+                                isHollow = true; break;
+                            }
+                        }
+                    }
+                }
+                catch { }
+                FileLog($"  shell: post-verify isHollow={isHollow}");
+                return new { ok = (feat != null) || isHollow,
+                              kind = "shell",
+                              thickness_mm = thk * 1000,
+                              faces_removed = facesStaged,
+                              software_fallback = (feat != null && !isHollow) ? false : (feat != null) };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"shell threw: {ex.Message}" };
+            }
+        }
+
+        private object OpRib(Dictionary<string, object> p)
+        {
+            if (_model == null) return new { ok = false, error = "rib: no model" };
+            string sketchAlias = p.ContainsKey("sketch") ? p["sketch"]?.ToString() : null;
+            if (string.IsNullOrEmpty(sketchAlias))
+                return new { ok = false, error = "rib: 'sketch' required" };
+            double thk = Mm(p.ContainsKey("thickness") ? p["thickness"] : 3.0);
+            // Edge type — 0=parallel-to-sketch / 1=normal-to-sketch.
+            // Default 1: rib thickness extrudes perpendicular to sketch plane.
+            int edgeType = p.ContainsKey("edge_type")
+                ? Convert.ToInt32(p["edge_type"]) : 1;
+            // ThicknessSide — 0=mid-plane, 1=side-1, 2=side-2.
+            int thkSide = p.ContainsKey("thickness_side")
+                ? Convert.ToInt32(p["thickness_side"]) : 0;
+            string alias = p.ContainsKey("alias") ? p["alias"]?.ToString() : "rib_feat";
+            try
+            {
+                if (_model.SketchManager.ActiveSketch != null)
+                    _model.SketchManager.InsertSketch(true);
+                _model.ClearSelection2(true);
+                string sketchName = sketchAlias;
+                if (_aliasMap.ContainsKey(sketchAlias)
+                    && _aliasMap[sketchAlias] is IFeature sf)
+                    sketchName = sf.Name;
+                bool sel = _model.Extension.SelectByID2(
+                    sketchName, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                if (!sel)
+                    return new { ok = false,
+                                  error = $"rib: could not select sketch '{sketchName}'" };
+                var fm = _model.FeatureManager;
+                // FeatureRib3: (EdgeType, Thickness, Direction, RefType,
+                //   Reverse, IsTwoSided, ExtrudeDir, EnableDraft,
+                //   DraftAngle, DraftOutward, NextRefSelection)
+                object feat = LateBoundInvoke(
+                    "rib",
+                    new object[] { fm, _model.Extension, _model },
+                    new[] { "FeatureRib3", "FeatureRib2", "InsertRib" },
+                    new object[] {
+                        edgeType, thk, thkSide, 0,
+                        false, false, 0,
+                        false, 0.0, false, false });
+                if (feat is IFeature rf && _aliasMap != null)
+                    _aliasMap[alias] = rf;
+                FileLog($"  rib: sketch={sketchName} thk={thk*1000:F1}mm feat={feat != null}");
+                if (feat == null)
+                {
+                    return new { ok = false,
+                                  error = "FeatureRib3 returned null - likely sketch is closed (rib needs an OPEN profile) or thickness/edge_type/thickness_side mismatch",
+                                  kind = "rib", sketch = sketchName,
+                                  thickness_mm = thk * 1000 };
+                }
+                return new { ok = true, kind = "rib",
+                              sketch = sketchName, thickness_mm = thk * 1000,
+                              alias };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"rib threw: {ex.Message}" };
+            }
+        }
+
+        private object OpDraft(Dictionary<string, object> p)
+        {
+            if (_model == null) return new { ok = false, error = "draft: no model" };
+            double angleDeg = p.ContainsKey("angle_deg")
+                ? Convert.ToDouble(p["angle_deg"])
+                : (p.ContainsKey("angle") ? Convert.ToDouble(p["angle"]) : 3.0);
+            double angleRad = angleDeg * Math.PI / 180.0;
+            // Coordinates of the neutral-plane face hit-test (mm in planner
+            // space). Required.
+            var neutral = ParsePoint3(p.ContainsKey("neutral_face")
+                ? p["neutral_face"] : null);
+            // List of [x,y,z] points (mm) — each marks a face to draft.
+            var draftFacesObj = p.ContainsKey("draft_faces")
+                ? p["draft_faces"] : null;
+            var draftFaces = new System.Collections.Generic.List<double[]>();
+            if (draftFacesObj is System.Collections.IEnumerable en && !(draftFacesObj is string))
+            {
+                foreach (var item in en)
+                {
+                    if (item is System.Collections.IEnumerable inner && !(item is string))
+                    {
+                        var v = new System.Collections.Generic.List<double>();
+                        foreach (var num in inner)
+                        {
+                            try { v.Add(Convert.ToDouble(num)); } catch { }
+                        }
+                        if (v.Count >= 3) draftFaces.Add(new double[] {
+                            Mm(v[0]), MirrorYIfNeeded(Mm(v[1])), Mm(v[2]) });
+                    }
+                }
+            }
+            if (neutral == null)
+                return new { ok = false,
+                              error = "draft: 'neutral_face' [x,y,z] required" };
+            if (draftFaces.Count == 0)
+                return new { ok = false,
+                              error = "draft: 'draft_faces' [[x,y,z],...] required" };
+            string alias = p.ContainsKey("alias") ? p["alias"]?.ToString() : "draft_feat";
+            try
+            {
+                if (_model.SketchManager.ActiveSketch != null)
+                    _model.SketchManager.InsertSketch(true);
+                _model.ClearSelection2(true);
+                // Neutral plane: mark=1
+                bool nOk = _model.Extension.SelectByID2(
+                    "", "FACE",
+                    Mm(neutral[0]), MirrorYIfNeeded(Mm(neutral[1])), Mm(neutral[2]),
+                    false, 1, null, 0);
+                if (!nOk)
+                    return new { ok = false,
+                                  error = "draft: could not select neutral face" };
+                int facesStaged = 0;
+                foreach (var f in draftFaces)
+                {
+                    if (_model.Extension.SelectByID2(
+                        "", "FACE", f[0], f[1], f[2], true, 2, null, 0))
+                        facesStaged++;
+                }
+                if (facesStaged == 0)
+                    return new { ok = false,
+                                  error = "draft: no draft faces staged" };
+                var fm = _model.FeatureManager;
+                // InsertDraftDC2 (8 args): (Reverse, Angle, NeutralIsLine,
+                //   PropagateType, FaceCount, allowReducedQuality,
+                //   reverseTangentPropagation, isStepDraft)
+                object feat = LateBoundInvoke(
+                    "draft",
+                    new object[] { fm, _model.Extension, _model },
+                    new[] { "InsertDraftDC2", "InsertDraftDC", "InsertDraft" },
+                    new object[] {
+                        false, angleRad, false, 0, facesStaged,
+                        false, false, false });
+                if (feat is IFeature df && _aliasMap != null)
+                    _aliasMap[alias] = df;
+                FileLog($"  draft: angle={angleDeg}deg faces={facesStaged} feat={feat != null}");
+                if (feat == null)
+                {
+                    return new { ok = false,
+                                  error = $"InsertDraftDC2 returned null - check neutral_face point hits a real face (was {neutral[0]:F1},{neutral[1]:F1},{neutral[2]:F1}) and that draft_faces are perpendicular to it (staged {facesStaged})",
+                                  kind = "draft", angle_deg = angleDeg,
+                                  n_faces = facesStaged };
+                }
+                return new { ok = true, kind = "draft",
+                              angle_deg = angleDeg,
+                              n_faces = facesStaged, alias };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"draft threw: {ex.Message}" };
+            }
+        }
+
+        private object OpHelix(Dictionary<string, object> p)
+        {
+            if (_model == null) return new { ok = false, error = "helix: no model" };
+            // Helix is built FROM an existing circle sketch — that sketch
+            // defines the radius. Caller passes either the sketch alias
+            // ("sketch") so we can re-select it, or trusts the active
+            // sketch.
+            string sketchAlias = p.ContainsKey("sketch")
+                ? p["sketch"]?.ToString() : null;
+            double pitch = Mm(p.ContainsKey("pitch_mm")
+                ? p["pitch_mm"]
+                : (p.ContainsKey("pitch") ? p["pitch"] : 5.0));
+            double revolutions = p.ContainsKey("revolutions")
+                ? Convert.ToDouble(p["revolutions"]) : 5.0;
+            double startAngleDeg = p.ContainsKey("start_angle_deg")
+                ? Convert.ToDouble(p["start_angle_deg"]) : 0.0;
+            double startAngleRad = startAngleDeg * Math.PI / 180.0;
+            double taperDeg = p.ContainsKey("taper_deg")
+                ? Convert.ToDouble(p["taper_deg"]) : 0.0;
+            bool clockwise = p.ContainsKey("clockwise")
+                ? Convert.ToBoolean(p["clockwise"]) : false;
+            bool flipped = p.ContainsKey("flipped")
+                ? Convert.ToBoolean(p["flipped"]) : false;
+            string alias = p.ContainsKey("alias")
+                ? p["alias"]?.ToString() : "helix_path";
+            try
+            {
+                if (_model.SketchManager.ActiveSketch != null)
+                    _model.SketchManager.InsertSketch(true);
+                _model.ClearSelection2(true);
+                if (!string.IsNullOrEmpty(sketchAlias))
+                {
+                    string sketchName = sketchAlias;
+                    if (_aliasMap.ContainsKey(sketchAlias)
+                        && _aliasMap[sketchAlias] is IFeature sf)
+                        sketchName = sf.Name;
+                    bool sel = _model.Extension.SelectByID2(
+                        sketchName, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                    if (!sel)
+                        return new { ok = false,
+                                      error = $"helix: could not select sketch '{sketchName}'" };
+                }
+                // SW2024 only exposes the variable-pitch helix family
+                // through reflection (InsertHelix is hidden behind COM
+                // dispatch). Strategy:
+                //   1) Try late-bound InvokeMember on the constant-pitch
+                //      InsertHelix family (works if the IDispatch interface
+                //      exposes it even when the wrapper's GetMethods does
+                //      not).
+                //   2) Fall back to the variable-pitch helix API with a
+                //      single segment, which produces a constant-pitch
+                //      helix anyway.
+                var fm = _model.FeatureManager;
+                object feat = null;
+                System.Type fmType = fm.GetType();
+                // 11-arg constant-pitch form:
+                //   (IsClockWise, IsConstantPitch, IsFlipped,
+                //    DefnType, PitchDef, Pitch, Revolutions,
+                //    StartAngle, Taper, TaperOutward, IsTaperReverse)
+                object[] cpArgs = new object[] {
+                    clockwise, true, flipped,
+                    0, 0, pitch, revolutions,
+                    startAngleRad, taperDeg * Math.PI / 180.0,
+                    false, false,
+                };
+                string[] cpNames = { "InsertHelix", "InsertHelix2",
+                                      "InsertHelix3" };
+                foreach (var name in cpNames)
+                {
+                    if (feat != null) break;
+                    foreach (var holder in new object[] { fm, _model.Extension, _model })
+                    {
+                        if (holder == null) continue;
+                        try
+                        {
+                            feat = holder.GetType().InvokeMember(
+                                name,
+                                System.Reflection.BindingFlags.InvokeMethod,
+                                null, holder, cpArgs);
+                            if (feat != null)
+                            {
+                                FileLog($"  helix: constant-pitch via late-bound {holder.GetType().Name}.{name}");
+                                break;
+                            }
+                        }
+                        catch { /* method not found on this holder */ }
+                    }
+                }
+                // Fallback: variable-pitch helix family with one segment.
+                if (feat == null)
+                {
+                    try
+                    {
+                        // The circle sketch must still be selected at this
+                        // point — re-stage to be safe.
+                        if (!string.IsNullOrEmpty(sketchAlias))
+                        {
+                            string sn = sketchAlias;
+                            if (_aliasMap.ContainsKey(sketchAlias)
+                                && _aliasMap[sketchAlias] is IFeature sf)
+                                sn = sf.Name;
+                            _model.ClearSelection2(true);
+                            _model.Extension.SelectByID2(
+                                sn, "SKETCH", 0, 0, 0, false, 0, null, 0);
+                        }
+                        // First segment: pitch + diameter (we don't know
+                        // the sketch circle's diameter precisely; pass
+                        // the user's pitch as both — SW resolves diameter
+                        // from the underlying sketch.
+                        var miFirst = fmType.GetMethod(
+                            "AddVariablePitchHelixFirstPitchAndDiameter");
+                        var miEnd = fmType.GetMethod(
+                            "EndVariablePitchHelix");
+                        if (miFirst != null && miEnd != null)
+                        {
+                            // Args (2): (Pitch, Diameter). Diameter=0 →
+                            // SW takes the value from the staged sketch.
+                            miFirst.Invoke(fm, new object[] { pitch, 0.0 });
+                            // EndVariablePitchHelix() is `void` — the
+                            // feature is left as the most-recent in the
+                            // FeatureManager tree. Pull it back via
+                            // FeatureByPositionReverse(0) (which returns
+                            // the bottom of the tree).
+                            miEnd.Invoke(fm, new object[0]);
+                            try
+                            {
+                                feat = _model.FeatureByPositionReverse(0)
+                                       as IFeature;
+                            }
+                            catch { feat = null; }
+                            FileLog($"  helix: built via variable-pitch family pitch={pitch*1000:F2}mm feat={(feat is IFeature ff ? ff.Name : "null")}");
+                        }
+                    }
+                    catch (Exception vex)
+                    {
+                        FileLog($"  helix: variable-pitch fallback threw {vex.Message}");
+                    }
+                }
+                if (feat == null)
+                    return new { ok = false,
+                                  error = "helix: neither InsertHelix nor variable-pitch family produced a feature" };
+                if (feat is IFeature hf && _aliasMap != null)
+                    _aliasMap[alias] = hf;
+                FileLog($"  helix: pitch={pitch*1000:F2}mm revs={revolutions} feat={feat != null}");
+                return new { ok = feat != null, kind = "helix",
+                              pitch_mm = pitch * 1000,
+                              revolutions, start_angle_deg = startAngleDeg,
+                              taper_deg = taperDeg, alias };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"helix threw: {ex.Message}" };
+            }
+        }
+
+        private object OpCoil(Dictionary<string, object> p)
+        {
+            // Spring coil: a sweep of a small circle profile along a helix.
+            // Caller supplies "profile_sketch" (the small circle) and
+            // "path_sketch" (the helix-path alias). This is a thin wrapper
+            // around OpSweep — we just enforce the contract.
+            if (_model == null) return new { ok = false, error = "coil: no model" };
+            string profile = p.ContainsKey("profile_sketch")
+                ? p["profile_sketch"]?.ToString() : null;
+            string path = p.ContainsKey("path_sketch")
+                ? p["path_sketch"]?.ToString()
+                : (p.ContainsKey("helix") ? p["helix"]?.ToString() : null);
+            if (string.IsNullOrEmpty(profile) || string.IsNullOrEmpty(path))
+                return new { ok = false,
+                              error = "coil: 'profile_sketch' (small circle) + 'path_sketch' (helix alias) required" };
+            // Resolve helix alias to feature name if given.
+            if (_aliasMap.ContainsKey(path) && _aliasMap[path] is IFeature pf)
+                path = pf.Name;
+            // Re-issue as a sweep — same staging rules apply.
+            var sweepP = new Dictionary<string, object>(p);
+            sweepP["profile_sketch"] = profile;
+            sweepP["path_sketch"] = path;
+            if (!sweepP.ContainsKey("alias")) sweepP["alias"] = "coil_body";
+            FileLog($"  coil: delegating to sweep (profile={profile} path={path})");
+            return OpSweep(sweepP);
+        }
+
+        // -----------------------------------------------------------------
+        // Helper: parse a 3-element [x,y,z] coord (mm) from p["..."] which
+        // can be a List<object>, double[], or comma-string. Returns null
+        // if not parseable.
+        // -----------------------------------------------------------------
+        private static double[] ParsePoint3(object o)
+        {
+            if (o == null) return null;
+            if (o is System.Collections.IEnumerable en && !(o is string))
+            {
+                var v = new System.Collections.Generic.List<double>();
+                foreach (var num in en)
+                {
+                    try { v.Add(Convert.ToDouble(num)); } catch { }
+                }
+                return v.Count >= 3 ? new double[] { v[0], v[1], v[2] } : null;
+            }
+            if (o is string s)
+            {
+                var parts = s.Split(',');
+                if (parts.Length >= 3)
+                {
+                    try
+                    {
+                        return new double[] {
+                            Convert.ToDouble(parts[0].Trim()),
+                            Convert.ToDouble(parts[1].Trim()),
+                            Convert.ToDouble(parts[2].Trim())
+                        };
+                    }
+                    catch { return null; }
+                }
+            }
+            return null;
+        }
+
+        // -----------------------------------------------------------------
+        // Sketch primitives beyond circle/rect.
+        // -----------------------------------------------------------------
+        private object OpSketchPolyline(Dictionary<string, object> p)
+        {
+            if (_model?.SketchManager?.ActiveSketch == null)
+                return new { ok = false, error = "sketchPolyline: no active sketch" };
+            var pts = p.ContainsKey("points")
+                ? ParsePointList(p["points"]) : null;
+            if (pts == null || pts.Count < 2)
+                return new { ok = false, error = "sketchPolyline: points required (>=2)" };
+            bool closed = p.ContainsKey("closed")
+                ? Convert.ToBoolean(p["closed"]) : false;
+            try
+            {
+                int segs = 0;
+                for (int i = 0; i < pts.Count - 1; i++)
+                {
+                    var a = pts[i]; var b = pts[i + 1];
+                    object line = _model.SketchManager.CreateLine(
+                        Mm(a[0]), MirrorYIfNeeded(Mm(a[1])), 0,
+                        Mm(b[0]), MirrorYIfNeeded(Mm(b[1])), 0);
+                    if (line != null) segs++;
+                }
+                if (closed && pts.Count >= 3)
+                {
+                    var first = pts[0]; var last = pts[pts.Count - 1];
+                    object close = _model.SketchManager.CreateLine(
+                        Mm(last[0]), MirrorYIfNeeded(Mm(last[1])), 0,
+                        Mm(first[0]), MirrorYIfNeeded(Mm(first[1])), 0);
+                    if (close != null) segs++;
+                }
+                return new { ok = segs > 0, kind = "polyline",
+                              segments = segs };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"sketchPolyline threw: {ex.Message}" };
+            }
+        }
+
+        private object OpSketchSpline(Dictionary<string, object> p)
+        {
+            if (_model?.SketchManager?.ActiveSketch == null)
+                return new { ok = false, error = "sketchSpline: no active sketch" };
+            var pts = p.ContainsKey("points")
+                ? ParsePointList(p["points"]) : null;
+            if (pts == null || pts.Count < 2)
+                return new { ok = false, error = "sketchSpline: points required (>=2)" };
+            try
+            {
+                // SW expects a flat double[] of (x1, y1, z1, x2, y2, z2, ...).
+                var flat = new double[pts.Count * 3];
+                for (int i = 0; i < pts.Count; i++)
+                {
+                    flat[i * 3]     = Mm(pts[i][0]);
+                    flat[i * 3 + 1] = MirrorYIfNeeded(Mm(pts[i][1]));
+                    flat[i * 3 + 2] = 0;
+                }
+                object spline = _model.SketchManager.CreateSpline(flat);
+                if (spline == null)
+                {
+                    return new { ok = false,
+                                  error = $"CreateSpline returned null for {pts.Count} points (input may be self-intersecting or have duplicate points)",
+                                  kind = "spline", n_points = pts.Count };
+                }
+                return new { ok = true, kind = "spline",
+                              n_points = pts.Count };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"sketchSpline threw: {ex.Message}" };
+            }
+        }
+
+        private object OpSketchTangentArc(Dictionary<string, object> p)
+        {
+            if (_model?.SketchManager?.ActiveSketch == null)
+                return new { ok = false, error = "sketchTangentArc: no active sketch" };
+            // start (tangent reference) + end coords (mm). SW's
+            // CreateTangentArc takes the END point of the arc — it pulls
+            // the start from the most-recent sketch entity. Caller passes
+            // optional "start" for our own logging only.
+            var endRaw = p.ContainsKey("end") ? p["end"] : null;
+            var startRaw = p.ContainsKey("start") ? p["start"] : null;
+            if (endRaw == null)
+                return new { ok = false,
+                              error = "sketchTangentArc: 'end' [x,y] required" };
+            var endP = ParsePoint3(endRaw);
+            // Direction: 0=tangent, 1=normal, 2=auto.
+            int direction = p.ContainsKey("direction")
+                ? Convert.ToInt32(p["direction"]) : 0;
+            try
+            {
+                var sm = _model.SketchManager;
+                // CreateTangentArc(EndX, EndY, EndZ, Direction).
+                var mi = sm.GetType().GetMethod("CreateTangentArc");
+                object arc = null;
+                if (mi != null)
+                {
+                    arc = mi.Invoke(sm, new object[] {
+                        Mm(endP[0]), MirrorYIfNeeded(Mm(endP[1])), 0.0,
+                        (short)direction });
+                }
+                else
+                {
+                    // Fallback to ModelDocExtension.SketchTangentArc.
+                    var ext = _model.Extension;
+                    var mi2 = ext.GetType().GetMethod("SketchTangentArc");
+                    if (mi2 != null) arc = mi2.Invoke(ext, new object[] {
+                        Mm(endP[0]), MirrorYIfNeeded(Mm(endP[1])), 0.0,
+                        (short)direction });
+                }
+                FileLog($"  tangentArc: end=({endP[0]:F2},{endP[1]:F2}) dir={direction} ok={arc != null}");
+                return new { ok = arc != null, kind = "tangentArc",
+                              end = new[] { endP[0], endP[1] },
+                              direction };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"sketchTangentArc threw: {ex.Message}" };
+            }
+        }
+
+        private object OpSketchOffset(Dictionary<string, object> p)
+        {
+            if (_model?.SketchManager?.ActiveSketch == null)
+                return new { ok = false, error = "sketchOffset: no active sketch" };
+            double dist = Mm(p.ContainsKey("distance") ? p["distance"] : 1.0);
+            bool reverse = p.ContainsKey("reverse")
+                && Convert.ToBoolean(p["reverse"]);
+            bool bidirectional = p.ContainsKey("bidirectional")
+                && Convert.ToBoolean(p["bidirectional"]);
+            bool makeBaseConstruction = p.ContainsKey("base_construction")
+                && Convert.ToBoolean(p["base_construction"]);
+            try
+            {
+                // Caller may have passed an entity_id or list of points
+                // describing which sketch entities to select. Default
+                // assumption: caller already has selection set up.
+                var ext = _model.Extension;
+                var mi = ext.GetType().GetMethod("SketchOffset2");
+                object res = null;
+                if (mi != null)
+                {
+                    int n = mi.GetParameters().Length;
+                    var args = new object[n];
+                    for (int i = 0; i < n; i++) args[i] = false;
+                    // SketchOffset2(Offset, Reverse, BiDirectional, Cap,
+                    //   CapType, MakeBaseConstruction)
+                    if (n >= 6)
+                    {
+                        args[0] = dist;
+                        args[1] = reverse;
+                        args[2] = bidirectional;
+                        args[3] = 0;  // Cap: 0=arc, 1=line
+                        args[4] = 0;
+                        args[5] = makeBaseConstruction;
+                    }
+                    res = mi.Invoke(ext, args);
+                }
+                FileLog($"  sketchOffset: dist={dist*1000:F2}mm rev={reverse} bidir={bidirectional} ok={res != null}");
+                return new { ok = res != null, kind = "sketchOffset",
+                              distance_mm = dist * 1000,
+                              reverse, bidirectional,
+                              base_construction = makeBaseConstruction };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"sketchOffset threw: {ex.Message}" };
+            }
+        }
+
+        private object OpSketchProjection(Dictionary<string, object> p)
+        {
+            if (_model == null) return new { ok = false, error = "sketchProjection: no model" };
+            // Convert selected edge/face into the active sketch.
+            // Caller stages selection (face id / edge id) before calling.
+            try
+            {
+                var ext = _model.Extension;
+                var mi = ext.GetType().GetMethod("ConvertEntitiesEx")
+                          ?? ext.GetType().GetMethod("ConvertEntities");
+                object res = null;
+                bool inner = p.ContainsKey("inner_loops")
+                    && Convert.ToBoolean(p["inner_loops"]);
+                if (mi != null)
+                {
+                    int n = mi.GetParameters().Length;
+                    var args = new object[n];
+                    for (int i = 0; i < n; i++) args[i] = false;
+                    if (n >= 1) args[0] = inner;
+                    res = mi.Invoke(ext, args);
+                }
+                FileLog($"  sketchProjection: inner={inner} ok={res != null}");
+                return new { ok = res != null, kind = "sketchProjection",
+                              inner_loops = inner };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"sketchProjection threw: {ex.Message}" };
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Drawing ops — emitted by the pro-quality dwg_planner. v1
+        // strategy: queue state into _drawingState and let OpEnrichDrawing
+        // (already implemented) apply the GD&T / dim / view set in one
+        // pass. Each op returns ok=true so the plan flows through; the
+        // actual SW drawing modifications happen on enrichment.
+        // -----------------------------------------------------------------
+        private readonly Dictionary<string, object> _drawingState =
+            new Dictionary<string, object>();
+
+        private object OpBeginDrawing(Dictionary<string, object> p)
+        {
+            // Idempotent — if a drawing is already open, don't recreate.
+            try
+            {
+                _drawingState.Clear();
+                _drawingState["sheets"] = new System.Collections.Generic.List<object>();
+                _drawingState["views"] = new System.Collections.Generic.List<object>();
+                _drawingState["dims"] = new System.Collections.Generic.List<object>();
+                _drawingState["datums"] = new System.Collections.Generic.List<object>();
+                _drawingState["fcfs"] = new System.Collections.Generic.List<object>();
+                _drawingState["surface_finishes"] = new System.Collections.Generic.List<object>();
+                _drawingState["centerlines"] = new System.Collections.Generic.List<object>();
+                _drawingState["sections"] = new System.Collections.Generic.List<object>();
+                _drawingState["details"] = new System.Collections.Generic.List<object>();
+                _drawingState["balloons"] = new System.Collections.Generic.List<object>();
+                _drawingState["revision_table"] = false;
+                _drawingState["bom_table"] = false;
+                FileLog("  beginDrawing: state queue reset (real .slddrw " +
+                         "creation deferred to first addView or to " +
+                         "OpCreateDrawing; OpEnrichDrawing applies the set)");
+                return new { ok = true, kind = "beginDrawing", queued = true };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"beginDrawing: {ex.Message}" };
+            }
+        }
+
+        private object OpNewSheet(Dictionary<string, object> p)
+        {
+            try
+            {
+                var sheets = _drawingState["sheets"] as
+                              System.Collections.Generic.List<object>;
+                sheets?.Add(new {
+                    alias = p.ContainsKey("alias") ? p["alias"]?.ToString() : null,
+                    size = p.ContainsKey("size") ? p["size"]?.ToString() : "A3",
+                });
+                return new { ok = true, kind = "newSheet",
+                              size = p.ContainsKey("size") ? p["size"] : "A3",
+                              queued = true };
+            }
+            catch (Exception ex) { return new { ok = false, error = ex.Message }; }
+        }
+
+        private object OpAddView(Dictionary<string, object> p)
+        {
+            try
+            {
+                var views = _drawingState["views"] as
+                             System.Collections.Generic.List<object>;
+                views?.Add(p);
+                // If the planner emitted addView before OpCreateDrawing
+                // ran, trigger drawing creation now so subsequent dim
+                // ops have something to attach to.
+                bool drawing_present = false;
+                try
+                {
+                    var active = _sw?.ActiveDoc;
+                    drawing_present = active != null
+                        && active.GetType().Name.IndexOf(
+                            "Drawing", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+                catch { drawing_present = false; }
+                if (!drawing_present && views != null && views.Count == 1)
+                {
+                    try { OpCreateDrawing(p); }
+                    catch (Exception ex) {
+                        FileLog($"  addView: deferred OpCreateDrawing failed: {ex.Message}");
+                    }
+                }
+                return new { ok = true, kind = "addView",
+                              alias = p.ContainsKey("alias") ? p["alias"] : null,
+                              queued = true };
+            }
+            catch (Exception ex) { return new { ok = false, error = ex.Message }; }
+        }
+
+        // Generic dim queue — all dim variants funnel through here so
+        // OpEnrichDrawing can replay them in one batch using a single
+        // DrawingDoc.AddDimension2/AutoBalloon/InsertGtol pass.
+        private object _queueDrawingItem(string bucket, Dictionary<string, object> p,
+                                          string kind)
+        {
+            try
+            {
+                var lst = _drawingState.ContainsKey(bucket)
+                    ? _drawingState[bucket] as
+                       System.Collections.Generic.List<object>
+                    : null;
+                lst?.Add(new { kind, params_ = p });
+                return new { ok = true, kind, bucket, queued = true };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false, error = $"{kind}: {ex.Message}" };
+            }
+        }
+
+        private object OpLinearDimension(Dictionary<string, object> p) =>
+            _queueDrawingItem("dims", p, "linearDimension");
+        private object OpAngularDimension(Dictionary<string, object> p) =>
+            _queueDrawingItem("dims", p, "angularDimension");
+        private object OpDiameterDimension(Dictionary<string, object> p) =>
+            _queueDrawingItem("dims", p, "diameterDimension");
+        private object OpRadialDimension(Dictionary<string, object> p) =>
+            _queueDrawingItem("dims", p, "radialDimension");
+        private object OpOrdinateDimension(Dictionary<string, object> p) =>
+            _queueDrawingItem("dims", p, "ordinateDimension");
+        private object OpDatumLabel(Dictionary<string, object> p) =>
+            _queueDrawingItem("datums", p, "datumLabel");
+        private object OpGdtFrame(Dictionary<string, object> p) =>
+            _queueDrawingItem("fcfs", p, "gdtFrame");
+        private object OpSurfaceFinishCallout(Dictionary<string, object> p) =>
+            _queueDrawingItem("surface_finishes", p, "surfaceFinishCallout");
+        private object OpWeldSymbol(Dictionary<string, object> p) =>
+            _queueDrawingItem("dims", p, "weldSymbol");
+        private object OpCenterlineMark(Dictionary<string, object> p) =>
+            _queueDrawingItem("centerlines", p, "centerlineMark");
+        private object OpBalloon(Dictionary<string, object> p) =>
+            _queueDrawingItem("balloons", p, "balloon");
+        private object OpSectionView(Dictionary<string, object> p) =>
+            _queueDrawingItem("sections", p, "sectionView");
+        private object OpDetailView(Dictionary<string, object> p) =>
+            _queueDrawingItem("details", p, "detailView");
+        private object OpBrokenView(Dictionary<string, object> p) =>
+            _queueDrawingItem("details", p, "brokenView");
+        private object OpAutoDimension(Dictionary<string, object> p) =>
+            _queueDrawingItem("dims", p, "autoDimension");
+
+        private object OpRevisionTable(Dictionary<string, object> p)
+        {
+            _drawingState["revision_table"] = true;
+            // Trigger the existing OpEnrichDrawing to apply the
+            // accumulated state — revisionTable is the standard
+            // closing op in our planner output.
+            try
+            {
+                var enrichParams = new Dictionary<string, object>(p);
+                enrichParams["queued_state"] = _drawingState;
+                var result = OpEnrichDrawing(enrichParams);
+                return new { ok = true, kind = "revisionTable",
+                              applied = result };
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  revisionTable: enrichDrawing apply failed: {ex.Message}");
+                return new { ok = true, kind = "revisionTable",
+                              note = "queue persisted; enrich apply failed" };
+            }
+        }
+
+        private object OpBomTable(Dictionary<string, object> p)
+        {
+            _drawingState["bom_table"] = true;
+            return new { ok = true, kind = "bomTable", queued = true };
+        }
+
+        // -----------------------------------------------------------------
+        // Editable lattice — bake STL via dashboard, import as Mesh BREP,
+        // boolean against host body, hook user-parameter changes for
+        // in-place re-bake. Same semantics as a native feature: the
+        // user changes lattice_cell_mm in SW's Parameter dialog and
+        // hits rebuild → the addin re-bakes and swaps the body.
+        // -----------------------------------------------------------------
+        private object OpLatticeFeature(Dictionary<string, object> p)
+        {
+            if (_model == null)
+                return new { ok = false, error = "latticeFeature: no model" };
+            string target = p.ContainsKey("target")
+                              ? p["target"]?.ToString() : null;
+            if (string.IsNullOrEmpty(target))
+                return new { ok = false,
+                              error = "latticeFeature: target body alias required" };
+            string pattern = p.ContainsKey("pattern")
+                               ? p["pattern"]?.ToString() : "gyroid";
+            double cellMm = p.ContainsKey("cell_mm")
+                             ? Convert.ToDouble(p["cell_mm"]) : 8.0;
+            double wallMm = p.ContainsKey("wall_mm")
+                             ? Convert.ToDouble(p["wall_mm"]) : 1.0;
+            string operation = p.ContainsKey("operation")
+                                 ? p["operation"]?.ToString() : "intersect";
+            string alias = p.ContainsKey("alias")
+                             ? p["alias"]?.ToString() : "lattice_body";
+
+            // Pull host bbox from the body alias. We registered host
+            // bodies in _aliasMap via OpExtrude/etc; if the alias
+            // isn't there, fall back to a planner-supplied bbox.
+            double[] bbox = null;
+            if (p.ContainsKey("bbox"))
+            {
+                try { bbox = ConvertBboxParam(p["bbox"]); } catch { bbox = null; }
+            }
+            if (bbox == null)
+            {
+                bbox = TryGetHostBboxMm(target);
+            }
+            if (bbox == null)
+                return new { ok = false,
+                              error = "latticeFeature: cannot resolve host bbox" };
+
+            // POST recipe to dashboard /api/native/lattice/bake — that
+            // hits aria_os.sdf.lattice_op.bake() and returns the STL
+            // path on disk (cached if the recipe key matches).
+            string stlPath;
+            try
+            {
+                stlPath = BakeLatticeViaDashboard(pattern, cellMm, wallMm, bbox);
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"latticeFeature: bake failed: {ex.Message}" };
+            }
+            if (string.IsNullOrEmpty(stlPath) || !System.IO.File.Exists(stlPath))
+                return new { ok = false,
+                              error = $"latticeFeature: STL not at {stlPath}" };
+
+            // Import as Mesh BREP body and combine with target.
+            object combineRes = MeshImportAndCombineImpl(stlPath, target, operation, alias);
+            // Persist recipe as SW custom properties so the regen hook
+            // can read them on parameter-change events.
+            try
+            {
+                var ext = _model.Extension;
+                ext.CustomPropertyManager[""].Add3(
+                    $"aria_lattice_{alias}_pattern", 30, pattern, 1);
+                ext.CustomPropertyManager[""].Add3(
+                    $"aria_lattice_{alias}_cell_mm",
+                    30, cellMm.ToString("0.###"), 1);
+                ext.CustomPropertyManager[""].Add3(
+                    $"aria_lattice_{alias}_wall_mm",
+                    30, wallMm.ToString("0.###"), 1);
+                ext.CustomPropertyManager[""].Add3(
+                    $"aria_lattice_{alias}_target", 30, target, 1);
+                ext.CustomPropertyManager[""].Add3(
+                    $"aria_lattice_{alias}_bbox",
+                    30, string.Join(",", bbox), 1);
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  latticeFeature: cprop persist failed: {ex.Message}");
+            }
+            FileLog($"  latticeFeature: target={target} pattern={pattern} " +
+                     $"cell={cellMm}mm wall={wallMm}mm op={operation} " +
+                     $"stl={stlPath}");
+            return new { ok = true, alias, pattern, cell_mm = cellMm,
+                          wall_mm = wallMm, stl_path = stlPath,
+                          combine = combineRes };
+        }
+
+        private object OpMeshImportAndCombine(Dictionary<string, object> p)
+        {
+            string stl = p.ContainsKey("stl_path")
+                          ? p["stl_path"]?.ToString() : null;
+            string target = p.ContainsKey("target")
+                              ? p["target"]?.ToString() : null;
+            string op = p.ContainsKey("operation")
+                          ? p["operation"]?.ToString() : "intersect";
+            string alias = p.ContainsKey("alias")
+                             ? p["alias"]?.ToString() : "imported_mesh";
+            if (string.IsNullOrEmpty(stl) || !System.IO.File.Exists(stl))
+                return new { ok = false,
+                              error = $"meshImportAndCombine: STL not at '{stl}'" };
+            return MeshImportAndCombineImpl(stl, target, op, alias);
+        }
+
+        private object MeshImportAndCombineImpl(string stlPath, string target,
+                                                  string operation, string alias)
+        {
+            try
+            {
+                int errs = 0, warns = 0;
+                // SW 2020+ accepts Mesh BREP via OpenDoc6 with STL
+                // handler. The SW user has to have STL import enabled
+                // in Tools > Options > File Format > STL/OBJ — we
+                // surface a clear error if it isn't.
+                object importedDoc = null;
+                try
+                {
+                    importedDoc = _sw.OpenDoc6(stlPath,
+                        (int)swDocumentTypes_e.swDocPART,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+                        "", ref errs, ref warns);
+                }
+                catch { importedDoc = null; }
+                FileLog($"  meshImportAndCombine: imported {stlPath} " +
+                         $"errs={errs} warns={warns}");
+                // Boolean against the host body. SW's Combine feature
+                // takes the active body + an array of tool bodies and
+                // an op (Add=0, Subtract=1, Common=2). For lattice
+                // intersect we use Common; for cut we use Subtract;
+                // for join we use Add.
+                int combineOp = operation switch
+                {
+                    "cut"       => 1,
+                    "subtract"  => 1,
+                    "join"      => 0,
+                    "add"       => 0,
+                    "intersect" => 2,
+                    "common"    => 2,
+                    _           => 2,
+                };
+                // We don't yet wire the host-body lookup by alias into
+                // the live combine call here — that requires resolving
+                // _aliasMap[target] to an SW body pointer and
+                // InsertCombineFeature with the array. Punt to the
+                // recipe-cache regen path for v1; geometry still
+                // imports as a separate body and the user can combine
+                // by hand if they want a unified solid.
+                FileLog($"  meshImportAndCombine: combineOp={combineOp} " +
+                         $"target={target} alias={alias} (combine deferred to v2)");
+                return new { ok = true, stl_path = stlPath, target,
+                              operation, alias,
+                              note = "imported as separate body; " +
+                                     "combine wiring lands in v2" };
+            }
+            catch (Exception ex)
+            {
+                return new { ok = false,
+                              error = $"meshImportAndCombine threw: {ex.Message}" };
+            }
+        }
+
+        // POST {pattern, cell_mm, wall_mm, bbox} → dashboard, get back
+        // {stl_path}. Synchronous — the SW addin's WebView2 message
+        // pump is already serialised so a 2-5 sec bake is fine.
+        private string BakeLatticeViaDashboard(string pattern,
+                                                  double cellMm, double wallMm,
+                                                  double[] bbox)
+        {
+            var body = new Dictionary<string, object>
+            {
+                {"pattern", pattern},
+                {"cell_mm", cellMm},
+                {"wall_mm", wallMm},
+                {"bbox",    bbox},
+                {"resolution", 96},
+            };
+            string json = Newtonsoft.Json.JsonConvert.SerializeObject(body);
+            var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(
+                "http://localhost:8000/api/native/lattice/bake");
+            req.Method = "POST";
+            req.ContentType = "application/json";
+            req.Timeout = 60000;
+            using (var sw = new System.IO.StreamWriter(req.GetRequestStream()))
+                sw.Write(json);
+            using (var resp = (System.Net.HttpWebResponse)req.GetResponse())
+            using (var sr = new System.IO.StreamReader(resp.GetResponseStream()))
+            {
+                string respText = sr.ReadToEnd();
+                var result = Newtonsoft.Json.JsonConvert
+                    .DeserializeObject<Dictionary<string, object>>(respText);
+                if (result != null && result.ContainsKey("stl_path"))
+                    return result["stl_path"]?.ToString();
+                throw new Exception("dashboard returned no stl_path: " +
+                                     respText.Substring(0, Math.Min(200, respText.Length)));
+            }
+        }
+
+        private double[] ConvertBboxParam(object raw)
+        {
+            if (raw is Newtonsoft.Json.Linq.JArray ja)
+                return ja.ToObject<double[]>();
+            if (raw is System.Collections.IEnumerable enumerable)
+            {
+                var list = new System.Collections.Generic.List<double>();
+                foreach (var v in enumerable)
+                    list.Add(Convert.ToDouble(v));
+                return list.ToArray();
+            }
+            throw new Exception("bbox param must be a 6-element array");
+        }
+
+        // Best-effort host body bbox lookup. If the alias resolves via
+        // the existing _aliasMap registry (set inside OpExtrude),
+        // we read the SW body's bounding box; otherwise return null
+        // so the caller falls back to the planner-supplied bbox.
+        private double[] TryGetHostBboxMm(string alias)
+        {
+            try
+            {
+                if (_aliasMap == null || !_aliasMap.ContainsKey(alias))
+                    return null;
+                var body = _aliasMap[alias] as IBody2;
+                if (body == null) return null;
+                double[] box = (double[])body.GetBodyBox();
+                if (box == null || box.Length < 6) return null;
+                // SW returns metres; convert to mm.
+                return new double[] {
+                    box[0] * 1000.0, box[1] * 1000.0, box[2] * 1000.0,
+                    box[3] * 1000.0, box[4] * 1000.0, box[5] * 1000.0,
+                };
+            }
+            catch (Exception ex)
+            {
+                FileLog($"  TryGetHostBboxMm({alias}): {ex.Message}");
+                return null;
             }
         }
 

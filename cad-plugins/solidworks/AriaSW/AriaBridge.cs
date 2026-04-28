@@ -110,7 +110,9 @@ namespace AriaSW
                         break;
 
                     case "exportCurrent":
-                        ReplyError(id, "not implemented");
+                        string fmt = msg["format"]?.ToString() ?? "stl";
+                        var exportResult = await ExportCurrentAsync(fmt);
+                        Reply(id, exportResult);
                         break;
 
                     case "showNotification":
@@ -278,6 +280,110 @@ namespace AriaSW
                 errors,
                 warnings,
             };
+        }
+
+        // -----------------------------------------------------------------
+        // exportCurrent — SaveAs the active part/asm/dwg to STL/STEP/etc.
+        // Returns { url, path, bytes, format } so the panel can hand the
+        // file off to /api/native_eval for visual verification.
+        // -----------------------------------------------------------------
+
+        private Task<object> ExportCurrentAsync(string format)
+        {
+            return Task.Run<object>(() =>
+            {
+                var sw = AriaSwAddin.Current?.SwApp
+                    ?? throw new InvalidOperationException("SolidWorks not connected");
+                var model = sw.IActiveDoc2 as IModelDoc2;
+                if (model == null)
+                    throw new InvalidOperationException("No active SolidWorks document");
+
+                string ext = (format ?? "stl").Trim().ToLowerInvariant().TrimStart('.');
+                // Map drawings to PDF, assemblies/parts to whatever was asked.
+                int docType = model.GetType();
+                if (docType == (int)swDocumentTypes_e.swDocDRAWING && ext == "stl")
+                    ext = "pdf";
+
+                string outDir = Path.Combine(Path.GetTempPath(), "aria-exports");
+                Directory.CreateDirectory(outDir);
+                string baseName = Path.GetFileNameWithoutExtension(model.GetTitle()) ?? "part";
+                if (string.IsNullOrWhiteSpace(baseName)) baseName = "part";
+                string outPath = Path.Combine(outDir,
+                    $"{baseName}_{DateTime.UtcNow:yyyyMMddHHmmss}_{Guid.NewGuid():N}.{ext}");
+
+                // STL quality knobs — Fine + binary + mm. Without these the
+                // default STL is so coarse the verifier reads it as a stub.
+                if (ext == "stl")
+                {
+                    try
+                    {
+                        // swSTLQuality (Fine = 1)
+                        sw.SetUserPreferenceIntegerValue(
+                            (int)swUserPreferenceIntegerValue_e.swSTLQuality, 1);
+                        // Binary STL (true). swExportFileSTLAsBinary may not
+                        // exist on older interop — use the toggle instead.
+                        sw.SetUserPreferenceToggle(
+                            (int)swUserPreferenceToggle_e.swSTLBinaryFormat, true);
+                    }
+                    catch (Exception prefEx)
+                    {
+                        AriaSwAddin.FileLog($"  exportCurrent: prefs set failed (non-fatal): {prefEx.Message}");
+                    }
+                }
+
+                // SaveAs via the doc Extension — modern, returns errors out.
+                int errors = 0, warnings = 0;
+                bool ok = false;
+                try
+                {
+                    ok = model.Extension.SaveAs(outPath,
+                        (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                        (int)swSaveAsOptions_e.swSaveAsOptions_Silent
+                          | (int)swSaveAsOptions_e.swSaveAsOptions_Copy,
+                        null, ref errors, ref warnings);
+                }
+                catch (Exception saveEx)
+                {
+                    AriaSwAddin.FileLog($"  exportCurrent: Extension.SaveAs threw: {saveEx.Message}");
+                    // Last-ditch: model.SaveAs3 (older API). Returns int
+                    // error code on this interop; treat 0 as success.
+                    try
+                    {
+                        int rc = model.SaveAs3(outPath,
+                            (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                            (int)swSaveAsOptions_e.swSaveAsOptions_Silent);
+                        ok = rc == 0;
+                    }
+                    catch (Exception saveEx2)
+                    {
+                        throw new InvalidOperationException(
+                            $"SaveAs failed for '{outPath}': {saveEx.Message} / {saveEx2.Message}");
+                    }
+                }
+
+                if (!File.Exists(outPath) || new FileInfo(outPath).Length < 100)
+                {
+                    throw new InvalidOperationException(
+                        $"SaveAs produced no/tiny file (errors={errors}, warnings={warnings}, path={outPath})");
+                }
+
+                long bytes = new FileInfo(outPath).Length;
+                // file:// URL with forward slashes so JS URL parsing works.
+                string fileUrl = "file:///" + outPath.Replace('\\', '/');
+                AriaSwAddin.FileLog(
+                    $"  exportCurrent: wrote {bytes} bytes to {outPath} (errors={errors}, warnings={warnings})");
+
+                return (object)new
+                {
+                    ok = true,
+                    url = fileUrl,
+                    path = outPath,
+                    bytes,
+                    format = ext,
+                    errors,
+                    warnings,
+                };
+            });
         }
 
         // -----------------------------------------------------------------

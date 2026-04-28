@@ -239,13 +239,18 @@ class TextToPartRequest(BaseModel):
 
 
 # Per-CAD HTTP listener URL. Each plugin's AriaHttpListener binds to
-# its own well-known port. Adding fusion/onshape later means another
-# entry here + listener in that plugin.
-_CAD_BASE_URL = {
-    "solidworks": "http://localhost:7501",
-    "sw":         "http://localhost:7501",
-    "rhino":      "http://localhost:7502",
-}
+# its own well-known port. Imports from dashboard.cad_registry so
+# adding a new bridge means one file (the registry) — no edits here.
+try:
+    from dashboard.cad_registry import get_cad_base_urls as _get_cad_base_urls
+    _CAD_BASE_URL = _get_cad_base_urls()
+except Exception:
+    _CAD_BASE_URL = {
+        "solidworks": "http://localhost:7501",
+        "sw":         "http://localhost:7501",
+        "rhino":      "http://localhost:7502",
+        "autocad":    "http://localhost:7503",
+    }
 
 
 def _run_text_to_part_inproc(goal: str, cad: str = "solidworks",
@@ -282,11 +287,18 @@ def _run_text_to_part_inproc(goal: str, cad: str = "solidworks",
                   "error": f"{cad} listener at {base} unreachable: "
                             f"{type(exc).__name__}: {exc}"}
 
-    # Plan via the LLM planner
-    from aria_os.native_planner.llm_planner import plan_from_llm
+    # Plan via the dispatcher: hardcoded planners (L-bracket, flange,
+    # impeller, shaft, etc.) take priority — they emit deterministic,
+    # validated ops. The LLM is only used for parts the catalogue
+    # doesn't cover. Going straight to plan_from_llm here was bypassing
+    # plan_simple_bracket and emitting circularPattern for rectangular
+    # bolt grids, which doesn't render right.
+    from aria_os.native_planner.dispatcher import make_plan
+    from aria_os.spec_extractor import extract_spec
+    spec = extract_spec(goal) or {}
     try:
-        ops = plan_from_llm(goal, {}, quality=quality_tier,
-                              repo_root=REPO_ROOT)
+        ops = make_plan(goal, spec, quality=quality_tier,
+                         repo_root=REPO_ROOT, allow_llm=True)
     except Exception as exc:
         return {"ok": False,
                   "error": f"planner failed: {type(exc).__name__}: {exc}"}
@@ -1913,16 +1925,47 @@ def full_build(req: FullBuildRequest):
 # Pipeline runner (runs in background thread to keep FastAPI responsive)
 # --------------------------------------------------------------------------- #
 
+_MCAD_MARKERS = (
+    "enclosure", "housing", "bracket", "frame", "chassis",
+    "case", "shell", "mount", "mounts", "boss", "bosses",
+    "stand-off", "standoff", "stand-offs", "standoffs",
+    "lid", "cover", "panel", "plate", "shaft", "flange",
+    "gear", "impeller", "nozzle", "ring", "wheel",
+    "heatsink", "heat sink", "tube", "spacer", "rod",
+    "knob", "handle", "lever", "arm", "leg", "fork",
+    "machined", "cnc", "3d print", "3d-print", "3d printed", "printed",
+    "aluminium", "aluminum", "steel", "titanium", "abs", "petg", "nylon",
+    "carbon fibre", "carbon fiber",
+)
+_ECAD_MARKERS = (
+    "kicad", "gerber", "schematic", "circuit board",
+    "footprint", "netlist", "esp32", "esp8266", "atmega", "rp2040", "stm32",
+    "pi pico", "raspberry pi pico", "dev board", "devboard", "breakout board", "breakout",
+    "microcontroller", "mcu", "header", "headers",
+    "usb-c", "usb c", "micro-usb", "micro usb",
+    "buck converter", "linear regulator", "buck", "ldo",
+    "sensor breakout",
+)
+_ECAD_ELECTRONICS_COOCCURRENCE = {
+    "layer", "kicad", "schematic", "trace", "pad", "footprint", "gerber",
+    "smd", "tht", "smt", "via", "net", "bms", "battery", "esp32", "mcu",
+    "controller", "imu", "barometer",
+}
+
+
 def _auto_detect_mode(goal: str) -> str:
     """Pick a pipeline mode by scanning the goal text using word-boundary
     regex matches so we don't get substring false positives (e.g.
     'mate' inside 'material' → assembly, 'pcb' inside 'upcbomb', etc.).
 
-    Routing (first hit wins):
-      - PCB / KiCad / gerber / schematic     → kicad
-      - drawing / dimensions / GD&T / sheet  → dwg
-      - assembly / mate / joint / mount X to → asm
-      - otherwise                             → native (mechanical Part)
+    Routing (first hit wins, except the combined-domain check which runs
+    BEFORE single-domain matches):
+      - MCAD + ECAD markers both present     → system   (drives full-build)
+      - sheet metal phrasing                  → sheetmetal
+      - PCB / KiCad / gerber / schematic      → kicad
+      - drawing / dimensions / GD&T / sheet   → dwg
+      - assembly / mate / joint / mount X to  → asm
+      - otherwise                              → native (mechanical Part)
     """
     import re as _re
     g = (goal or "").lower()
@@ -1934,14 +1977,52 @@ def _auto_detect_mode(goal: str) -> str:
                 return True
         return False
 
+    def _has_pcb_with_electronics() -> bool:
+        """Check if 'pcb' appears with electronics co-occurrence markers.
+
+        Prevents false positives like 'PCB drill bit holder' (mechanical part
+        named after a fixture, not an electronics part). Returns True only if:
+        - 'pcb' is word-bounded, AND
+        - At least one electronics term (layer, kicad, trace, pad, etc.)
+          also appears in the goal.
+        """
+        if not _re.search(r"\bpcb\b", g):
+            return False
+        # Check for co-occurrence with electronics vocabulary
+        return any(_re.search(rf"\b{_re.escape(term)}\b", g)
+                   for term in _ECAD_ELECTRONICS_COOCCURRENCE)
+
+    # AutoCAD-specific industries (civil / structural / MEP / 2D
+    # drafting / architecture). Runs FIRST so a "site plan" or
+    # "building elevation drawing" prompt doesn't get pulled into
+    # the dwg path (which targets SW drawing docs).
+    try:
+        from dashboard.autocad_routing import is_autocad_goal
+        if is_autocad_goal(goal or ""):
+            return "autocad"
+    except Exception:
+        pass
+
+    has_mcad = _any_word(_MCAD_MARKERS)
+    has_ecad = _any_word(_ECAD_MARKERS) or _has_pcb_with_electronics()
+    # Combined MCAD+ECAD prompt → drive the full electromechanical build
+    # so SW + KiCad both run. Without this short-circuit, a single ECAD
+    # marker (e.g. "PCB" inside an enclosure prompt) wins via first-hit
+    # routing and the MCAD half is silently skipped.
+    if has_mcad and has_ecad:
+        return "system"
+
     # Sheet metal FIRST — otherwise "sheet" keywords collide with DWG.
     if _any_word(("sheet metal", "sheet-metal", "bracket with bend",
                    "bent plate", "formed sheet", "enclosure with bends",
                    "bends", "bend radius", "flanged enclosure",
                    "folded plate", "formed bracket")):
         return "sheetmetal"
-    if _any_word(("pcb", "kicad", "gerber", "schematic",
-                   "circuit board", "footprint", "netlist")):
+    if _has_pcb_with_electronics() or _any_word(("kicad", "gerber", "schematic",
+                   "circuit board", "footprint", "netlist",
+                   "esp32", "esp8266", "atmega", "rp2040", "stm32",
+                   "pi pico", "raspberry pi pico", "dev board", "devboard",
+                   "breakout board", "breakout")):
         return "kicad"
     if _any_word(("drawing", "dimensions", "gd&t", "gdt",
                    "drawing sheet", "technical drawing",
@@ -1978,6 +2059,59 @@ def _run_pipeline(goal: str, max_attempts: int,
 
         event_bus.emit("step", f"Mode: {mode} · tier: {quality_tier}",
                         {"mode": mode, "quality_tier": quality_tier})
+
+        if mode == "autocad":
+            # AutoCAD bridge — civil/structural/MEP/2D drafting. The
+            # listener is a separate Python process on port 7503 (see
+            # cad-plugins/autocad/aria_autocad_server.py). We pick the
+            # AutoCAD-flavored drawing planner so GD&T frames map to
+            # AutoCAD's TOLERANCE command and dimensioning to DIM*.
+            try:
+                from aria_os.native_planner.dwg_planner_autocad import (
+                    plan_autocad_drawing)
+                from aria_os.spec_extractor import extract_spec
+                spec = extract_spec(goal) or {}
+                plan = plan_autocad_drawing(spec, goal=goal)
+                event_bus.emit("agent",
+                                f"AutoCAD plan ready — {len(plan)} ops",
+                                {"n_ops": len(plan), "domain": "autocad"})
+                base = _CAD_BASE_URL.get("autocad",
+                                            "http://localhost:7503")
+                import httpx as _httpx
+                with _httpx.Client(timeout=60.0) as c:
+                    for i, op in enumerate(plan):
+                        event_bus.emit("native_op",
+                                        op.get("label") or op["kind"],
+                                        {"seq": i + 1, "total": len(plan),
+                                         "kind": op["kind"],
+                                         "params": op.get("params", {}),
+                                         "domain": "autocad"})
+                        try:
+                            r = c.post(f"{base}/op", json={
+                                "kind":   op["kind"],
+                                "params": op.get("params", {}),
+                            })
+                            event_bus.emit("native_result",
+                                            f"✓ {op['kind']}",
+                                            {"kind": op["kind"],
+                                             "reply": r.json(),
+                                             "seq": i + 1})
+                        except Exception as _ae:
+                            event_bus.emit("error",
+                                f"AutoCAD op failed: {op['kind']} — {_ae}",
+                                {"kind": op["kind"], "seq": i + 1})
+                            break
+                event_bus.emit("complete",
+                                f"AutoCAD pipeline complete for {goal[:60]}",
+                                {"goal": goal, "mode": "autocad",
+                                 "n_ops": len(plan)})
+                return
+            except Exception as _aE:
+                event_bus.emit("error",
+                                f"AutoCAD pipeline error: {_aE}",
+                                {"goal": goal, "mode": mode})
+                return
+
         if mode == "sheetmetal":
             # Fusion Sheet Metal workspace — uses flange/bend commands
             try:
@@ -2706,9 +2840,27 @@ async def native_eval(req: NativeEvalRequest):
                 (i.get("message") or str(i))[:120]
                 for i in (dfm_report.get("issues") or [])
             ]
+            # Filter out spurious "STEP file could not be loaded" criticals —
+            # the DFM agent prefers STEP but we only have STL from /api/cad/
+            # text-to-part. Treating "no STEP" as a critical fault means
+            # every visual-verify call false-fails on geometrically perfect
+            # parts. Real DFM criticals (thin walls, undercuts, sharp internal
+            # corners) still surface.
+            def _is_real_critical(issue: dict) -> bool:
+                sev = (issue.get("severity") or "").lower()
+                if sev not in ("critical", "high"):
+                    return False
+                text = " ".join(str(issue.get(k) or "") for k in
+                                 ("category", "description", "message",
+                                  "suggestion")).lower()
+                if ("step file" in text and
+                    ("could not be loaded" in text or "cannot" in text
+                     or "failed" in text or "missing" in text)):
+                    return False
+                return True
             n_critical = sum(
                 1 for i in (dfm_report.get("issues") or [])
-                if (i.get("severity") or "").lower() in ("critical", "high"))
+                if _is_real_critical(i))
             if dfm_issues:
                 event_bus.emit("warning",
                                 f"DFM: {len(dfm_issues)} issue(s) "
@@ -2816,6 +2968,13 @@ async def native_eval(req: NativeEvalRequest):
 from fastapi import UploadFile, File  # noqa: E402
 
 
+@app.post("/api/transcribe", response_model=None)
+async def transcribe_alias(audio: UploadFile = File(...)):
+    """Alias for /api/stt/transcribe — used by StructSight's voice
+    refine. Same body and response."""
+    return await stt_transcribe(audio)
+
+
 @app.post("/api/stt/transcribe", response_model=None)
 async def stt_transcribe(audio: UploadFile = File(...)):
     """Transcribe an audio upload via Groq Whisper.
@@ -2885,15 +3044,17 @@ async def image_to_cad(image: UploadFile = File(...),
     event_bus.emit("agent", "Image uploaded — running vision analysis",
                     {"image": image.filename, "bytes": len(data)})
 
-    # Use the existing analyze_image_for_cad helper to extract a goal
+    # Use the existing analyze_image_for_cad helper to extract a goal.
+    # Helper signature: analyze_image_for_cad(image_path, hint="", *, repo_root=None) -> str | None
+    # Returns a goal string (not a dict). Treat None as no-vision-available.
     try:
         from aria_os.llm_client import analyze_image_for_cad
-        features = analyze_image_for_cad(
-            str(tmp_path), user_prompt=prompt, repo_root=REPO_ROOT)
-        derived_goal = features.get("description") or prompt or "imported part"
+        derived_goal_raw = analyze_image_for_cad(
+            str(tmp_path), hint=prompt or "", repo_root=REPO_ROOT)
+        derived_goal = derived_goal_raw or prompt or "imported part"
         event_bus.emit("agent",
                         f"Vision extracted: {derived_goal[:80]}",
-                        {"features": features})
+                        {"goal": derived_goal})
     except Exception as exc:
         event_bus.emit("error", f"Vision analysis failed: {exc}")
         raise HTTPException(500, f"Vision analysis failed: {exc}")
@@ -2931,6 +3092,104 @@ class NativeImageRequest(BaseModel):
     quality_tier:     str = "balanced"
 
 
+# --------------------------------------------------------------------------- #
+# Lightweight cancel + event-tail endpoints used by the CAD GUI panels.
+# - GET  /api/events/tail?last=50  → backfill the panel's chat log on
+#   reconnect (the GUI agent's SSE-reconnect work needs this).
+# - POST /api/cancel               → set a soft-cancel flag the pipeline
+#   runner polls between ops; ops in flight finish, then the runner
+#   bails out and emits a `cancelled` event.
+# Both are intentionally minimal — no per-run-id tracking yet because the
+# pipeline runner is already single-flight per panel session.
+# --------------------------------------------------------------------------- #
+import threading as _cancel_threading
+_cancel_flag = _cancel_threading.Event()
+
+
+def _check_cancel_and_raise(stage: str) -> None:
+    """Pipeline-runner helpers can call this between ops. Raises a
+    plain RuntimeError that the per-mode try/except converts to an
+    `error` event with stage info."""
+    if _cancel_flag.is_set():
+        _cancel_flag.clear()
+        raise RuntimeError(f"pipeline cancelled by user at stage {stage!r}")
+
+
+@app.get("/api/events/tail")
+def events_tail(last: int = 50):
+    """Return the last N events without touching any subscriber cursor.
+    Backs the GUI panels' on-reconnect backfill so a dropped SSE
+    connection (e.g. dashboard hot-reload, browser tab sleep) doesn't
+    leave the chat log empty when the panel reattaches."""
+    n = max(1, min(500, int(last or 50)))
+    try:
+        return {"ok": True, "events": event_bus.get_history(n), "n": n}
+    except Exception as exc:
+        raise HTTPException(500, f"events_tail: {exc}")
+
+
+@app.post("/api/cancel")
+def cancel_pipeline():
+    """User clicked the cancel button in a CAD panel. Set the soft-cancel
+    flag; the pipeline runner picks it up at the next op boundary."""
+    _cancel_flag.set()
+    event_bus.emit("agent",
+                    "Cancel requested — pipeline will stop at next op",
+                    {"requested_at": "panel"})
+    return {"ok": True, "cancel_set": True}
+
+
+class LatticeBakeRequest(BaseModel):
+    """Body schema for the SW addin's `OpLatticeFeature` regen call.
+
+    The addin POSTs this whenever the user changes one of the SW
+    user-parameters that map to a lattice recipe (cell size, wall
+    thickness, pattern). Returns the path to the cached/freshly-baked
+    STL on disk so the addin can swap the imported Mesh BREP body
+    without re-running the rest of the plan.
+    """
+    pattern: str = "gyroid"
+    cell_mm: float = 8.0
+    wall_mm: float = 1.0
+    bbox: list[float] = [-25, -25, -25, 25, 25, 25]
+    resolution: int = 96
+    force: bool = False
+
+
+@app.post("/api/native/lattice/bake")
+def native_lattice_bake(req: LatticeBakeRequest):
+    """Bake (or look up cached) lattice STL from a recipe.
+
+    Backed by `aria_os.sdf.lattice_op.bake` — keyed on a sha256 of the
+    normalised recipe so repeat hits with the same params are O(1).
+    Catches any kernel exception and returns a structured 500 the
+    addin can display in its activity rail.
+    """
+    try:
+        from aria_os.sdf.lattice_op import bake as _bake
+    except Exception as exc:
+        raise HTTPException(500,
+            f"lattice_op import failed: {type(exc).__name__}: {exc}")
+    try:
+        stl_path, recipe_used = _bake({
+            "pattern":    req.pattern,
+            "cell_mm":    req.cell_mm,
+            "wall_mm":    req.wall_mm,
+            "bbox":       list(req.bbox),
+            "resolution": req.resolution,
+        }, force=req.force)
+    except Exception as exc:
+        raise HTTPException(500,
+            f"lattice bake failed: {type(exc).__name__}: {exc}")
+    return {
+        "ok":          True,
+        "stl_path":    str(stl_path),
+        "size_bytes":  stl_path.stat().st_size if stl_path.is_file() else 0,
+        "recipe_used": recipe_used,
+        "cached":      not req.force,
+    }
+
+
 @app.post("/api/native/image_to_cad")
 def native_image_to_cad(req: NativeImageRequest):
     """Sync: image → STEP path. Blocks until the planner produces a STEP."""
@@ -2955,23 +3214,23 @@ def native_image_to_cad(req: NativeImageRequest):
     else:
         raise HTTPException(400, "file_path or file_base64 required")
 
-    # 1. Vision analysis → goal text
+    # 1. Vision analysis → goal text. analyze_image_for_cad returns a
+    # plain goal string (not a dict). Fall back to the user prompt or
+    # a generic placeholder when vision is unavailable.
     try:
         from aria_os.llm_client import analyze_image_for_cad
-        features = analyze_image_for_cad(
-            str(src), user_prompt=req.prompt, repo_root=REPO_ROOT)
+        goal_raw = analyze_image_for_cad(
+            str(src), hint=req.prompt or "", repo_root=REPO_ROOT)
     except Exception as exc:
         raise HTTPException(500, f"vision analysis failed: {exc}")
-    goal = features.get("description") or req.prompt or "imported part"
+    goal = goal_raw or req.prompt or "imported part"
 
     # 2. Run the standard text-to-part pipeline IN-PROCESS (mode=native)
     #    and pull the resulting STEP path from the run manifest. We do
     #    NOT use _run_pipeline (async, event-bus) — we want the path back.
     try:
         from aria_os.orchestrator import run as _orch_run
-        artifact = _orch_run(goal=goal, max_attempts=2,
-                              mode="native",
-                              quality_tier=req.quality_tier)
+        artifact = _orch_run(goal=goal, max_attempts=2, repo_root=REPO_ROOT)
     except Exception as exc:
         raise HTTPException(500, f"pipeline failed: {exc}")
 
@@ -3041,12 +3300,12 @@ def native_scan_to_cad(req: NativeScanRequest):
     except Exception as exc:
         raise HTTPException(500, f"scan pipeline failed: {exc}")
 
-    # The scan pipeline always produces a cleaned STL; STEP is best-effort
-    # via the optional reconstructor if the topology fits primitives.
+    # The scan pipeline produces a cleaned STL; STEP is optional and best-effort.
+    # If the CAD plugin gets an STL path, it can import it as a graphics body.
     stl_path = getattr(entry, "stl_path", None) or str(src)
     step_path = getattr(entry, "step_path", None)
-    # If no STEP, attempt a quick conversion via cadquery (mesh→solid is
-    # only meaningful if primitives were detected; fall back to STL-only).
+
+    # Fallback: check if STEP was generated alongside STL
     if not step_path:
         try:
             from pathlib import Path as _P
@@ -3057,13 +3316,26 @@ def native_scan_to_cad(req: NativeScanRequest):
         except Exception:
             pass
 
+    # Final validation: ensure paths exist and are readable
+    bbox = None
+    if getattr(entry, "bounding_box", None):
+        try:
+            bb = entry.bounding_box
+            bbox = {
+                "x": float(bb.x) if hasattr(bb, 'x') else None,
+                "y": float(bb.y) if hasattr(bb, 'y') else None,
+                "z": float(bb.z) if hasattr(bb, 'z') else None,
+            }
+        except Exception:
+            pass
+
     return {
         "ok":         True,
-        "stl_path":   stl_path,
-        "step_path":  step_path,    # may be null — caller imports STL
+        "stl_path":   stl_path if Path(stl_path).is_file() else None,
+        "step_path":  step_path if (step_path and Path(step_path).is_file()) else None,
         "topology":   getattr(entry, "topology", None),
-        "bbox":       getattr(entry, "bounding_box", None),
-        "confidence": getattr(entry, "confidence", 0.0),
+        "bbox":       bbox,
+        "confidence": float(getattr(entry, "confidence", 0.0)),
         "source":     "native_scan_to_cad",
     }
 
@@ -3292,6 +3564,229 @@ async def download_artifact(path: str):
         ".glb":  "model/gltf-binary",
     }.get(ext, "application/octet-stream")
     return FileResponse(resolved, media_type=media, filename=Path(resolved).name)
+
+
+# --------------------------------------------------------------------------
+# StructSight viewer endpoints — list runs, fetch a manifest, serve any
+# file under outputs/runs/<run_id>/. The manifest endpoint also projects
+# the raw run_manifest.json into a {mcad, ecad, dwg, assembly, ar} shape
+# the universal viewer in visualize-it/apps/engineering reads directly.
+# --------------------------------------------------------------------------
+
+_VIEWER_EXT_TO_KIND = {
+    ".stl":  "mcad",
+    ".step": "mcad",
+    ".stp":  "mcad",
+    ".glb":  "ar",
+    ".gltf": "ar",
+    ".kicad_pcb": "ecad",
+    ".pdf":  "dwg",
+    ".dxf":  "dwg",
+    ".dwg":  "dwg",
+    ".sldasm": "assembly",
+}
+
+
+def _scan_run_dir_for_viewer(run_dir: Path) -> dict[str, Any]:
+    """Group every file under run_dir by viewer-tab kind. Picks the most
+    browser-friendly artifact per tab when multiple exist (e.g. prefer
+    .stl over .step for MCAD; prefer .pdf over .dxf for DWG)."""
+    if not run_dir.is_dir():
+        return {}
+    by_kind: dict[str, list[str]] = {
+        "mcad": [], "ecad": [], "dwg": [], "assembly": [], "ar": [],
+    }
+    all_files: list[str] = []
+    for p in run_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(run_dir).as_posix()
+        all_files.append(rel)
+        kind = _VIEWER_EXT_TO_KIND.get(p.suffix.lower())
+        if kind:
+            by_kind[kind].append(rel)
+
+    def _pick(kind: str, prefer_exts: list[str]) -> str | None:
+        files = by_kind[kind]
+        for ext in prefer_exts:
+            for f in files:
+                if f.lower().endswith(ext):
+                    return f
+        return files[0] if files else None
+
+    return {
+        "mcad":     _pick("mcad",     [".stl", ".step", ".stp"]),
+        "ecad":     _pick("ecad",     [".kicad_pcb"]),
+        "dwg":      _pick("dwg",      [".pdf", ".dxf", ".dwg"]),
+        "assembly": _pick("assembly", [".sldasm"]),
+        "ar":       _pick("ar",       [".glb", ".gltf"]),
+        "all_files": all_files,
+    }
+
+
+@app.get("/api/runs")
+async def list_runs(limit: int = 25):
+    """List recent run_ids, newest first. Used by the StructSight landing
+    page when the user has no run_id in the URL hash."""
+    runs_dir = REPO_ROOT / "outputs" / "runs"
+    if not runs_dir.is_dir():
+        return {"runs": []}
+    entries = []
+    for d in runs_dir.iterdir():
+        if not d.is_dir():
+            continue
+        manifest_path = d / "run_manifest.json"
+        goal = ""
+        ts = ""
+        if manifest_path.is_file():
+            try:
+                m = json.loads(manifest_path.read_text(encoding="utf-8"))
+                goal = (m.get("goal") or "")[:200]
+                ts = m.get("timestamp_utc") or ""
+            except Exception:
+                pass
+        entries.append({
+            "run_id": d.name,
+            "goal": goal,
+            "timestamp_utc": ts,
+            "mtime": d.stat().st_mtime,
+        })
+    entries.sort(key=lambda e: e["mtime"], reverse=True)
+    return {"runs": entries[: max(1, min(200, limit))]}
+
+
+@app.get("/api/runs/{run_id}/manifest.json")
+async def run_manifest(run_id: str):
+    """Return the run's manifest plus a viewer-friendly projection.
+
+    StructSight's universal viewer reads `mcad`, `ecad`, `dwg`,
+    `assembly`, `ar` keys at the top level (each is a run-relative
+    path). We return both the raw manifest (under `manifest`) and the
+    projection at top level so the same response works for the GUI's
+    detailed view too.
+    """
+    if "/" in run_id or ".." in run_id:
+        raise HTTPException(400, "Invalid run_id")
+    run_dir = REPO_ROOT / "outputs" / "runs" / run_id
+    if not run_dir.is_dir():
+        raise HTTPException(404, f"Run not found: {run_id}")
+    raw: dict[str, Any] = {}
+    mp = run_dir / "run_manifest.json"
+    if mp.is_file():
+        try:
+            raw = json.loads(mp.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise HTTPException(500, f"Failed to read manifest: {exc}")
+    projection = _scan_run_dir_for_viewer(run_dir)
+    return {
+        "run_id": run_id,
+        "goal": raw.get("goal", ""),
+        "timestamp_utc": raw.get("timestamp_utc", ""),
+        **{k: v for k, v in projection.items() if k != "all_files"},
+        "all_files": projection.get("all_files", []),
+        "manifest": raw,
+    }
+
+
+@app.get("/api/files/{run_id}/{file_path:path}")
+async def serve_run_file(run_id: str, file_path: str):
+    """Serve any file under outputs/runs/<run_id>/<file_path>. Used by
+    StructSight viewers to fetch STL/PDF/.kicad_pcb/.glb directly.
+
+    Path traversal protected: real-resolves both inputs and confirms the
+    file lives inside the run dir before serving.
+    """
+    import os as _os
+    if "/" in run_id or ".." in run_id:
+        raise HTTPException(400, "Invalid run_id")
+    run_dir = REPO_ROOT / "outputs" / "runs" / run_id
+    if not run_dir.is_dir():
+        raise HTTPException(404, f"Run not found: {run_id}")
+    target = (run_dir / file_path).resolve()
+    run_real = run_dir.resolve()
+    try:
+        target.relative_to(run_real)
+    except ValueError:
+        raise HTTPException(403, "Path traversal blocked")
+    if not target.is_file():
+        raise HTTPException(404, f"File not found: {file_path}")
+    ext = target.suffix.lower()
+    media = {
+        ".step": "application/step",
+        ".stp":  "application/step",
+        ".stl":  "model/stl",
+        ".dxf":  "application/dxf",
+        ".dwg":  "application/acad",
+        ".pdf":  "application/pdf",
+        ".png":  "image/png",
+        ".jpg":  "image/jpeg",
+        ".gltf": "model/gltf+json",
+        ".glb":  "model/gltf-binary",
+        ".kicad_pcb": "application/x-kicad-pcb",
+        ".sldasm": "application/octet-stream",
+        ".sldprt": "application/octet-stream",
+        ".slddrw": "application/octet-stream",
+        ".json": "application/json",
+        ".md":   "text/markdown",
+    }.get(ext, "application/octet-stream")
+    return FileResponse(str(target), media_type=media,
+                        filename=target.name)
+
+
+# --------------------------------------------------------------------------
+# /api/build/{native|system} — thin aliases the StructSight refine flow
+# POSTs to. Wraps the existing native and full-build entry points so the
+# universal viewer doesn't need to know which underlying endpoint to call.
+# --------------------------------------------------------------------------
+
+class BuildRequest(BaseModel):
+    text: str
+    run_id: str | None = None
+    quality_tier: str = "balanced"
+
+
+@app.post("/api/build/native")
+async def build_native_alias(req: BuildRequest):
+    """Wrap /api/cad/text-to-part for StructSight refine. Returns
+    {ok, run_id, n_ops} after streaming ops on the event bus."""
+    from aria_os.native_planner.llm_planner import plan_from_llm
+    spec: dict[str, Any] = {}
+    try:
+        plan = plan_from_llm(req.text, spec, quality=req.quality_tier,
+                             repo_root=REPO_ROOT)
+    except Exception as exc:
+        raise HTTPException(500, f"plan_from_llm failed: {exc}")
+    for i, op in enumerate(plan):
+        event_bus.emit(
+            "native_op", op.get("label") or op["kind"],
+            {"seq": i + 1, "total": len(plan),
+             "kind": op["kind"], "params": op.get("params", {}),
+             "goal": req.text, "run_id": req.run_id})
+    event_bus.emit("complete",
+                    f"Pipeline complete for {req.text[:80]}",
+                    {"goal": req.text, "mode": "native",
+                     "n_ops": len(plan), "run_id": req.run_id})
+    return {"ok": True, "run_id": req.run_id, "n_ops": len(plan),
+            "mode": "native"}
+
+
+@app.post("/api/build/system")
+async def build_system_alias(req: BuildRequest):
+    """Alias to /api/system/full-build for StructSight."""
+    import urllib.request as _u
+    import urllib.error as _ue
+    body = json.dumps({"goal": req.text}).encode("utf-8")
+    full_url = f"http://127.0.0.1:8000/api/system/full-build"
+    try:
+        rq = _u.Request(full_url, data=body,
+                        headers={"Content-Type": "application/json"},
+                        method="POST")
+        with _u.urlopen(rq, timeout=600) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except _ue.HTTPError as he:
+        raise HTTPException(he.code, he.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        raise HTTPException(500, f"build_system_alias: {exc}")
 
 
 class ExportGltfRequest(BaseModel):
@@ -4045,6 +4540,142 @@ async def gui_git_push():
             break
     r["pr_url"] = pr_url
     return r
+
+
+# --------------------------------------------------------------------------- #
+# OpenClaw / VR-projection endpoints
+#
+# StructSight VR polls /api/openclaw/projection/<machine_id> while the
+# user is looking at a machine fiducial. The manifest tells the renderer
+# WHERE the build plate is, WHICH .glb to drop on it, and HOW MUCH of
+# the part is finished so layers can fade in as the print progresses.
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/openclaw/projection/{machine_id}")
+async def openclaw_projection(machine_id: str):
+    """Return the VR-projection manifest for the named machine.
+
+    Cheap to call (~2ms when bridge is local). VR client polls this at
+    1-2Hz; on no calibration / no active job, returns a "skeleton" so
+    the client can still draw a calibration prompt or idle state.
+    """
+    try:
+        from aria_os.openclaw import projection as _proj
+        manifest = _proj.build(machine_id)
+        return _proj.to_dict(manifest)
+    except Exception as exc:
+        raise HTTPException(500, f"openclaw_projection: {exc}")
+
+
+@app.get("/api/openclaw/calibrations")
+async def openclaw_calibrations_list():
+    try:
+        from aria_os.openclaw import machine_calibration as _cal
+        from dataclasses import asdict
+        return {"ok": True,
+                "calibrations": [asdict(c) for c in _cal.list_all()]}
+    except Exception as exc:
+        raise HTTPException(500, f"openclaw_calibrations_list: {exc}")
+
+
+class OpenClawCalibrationUpsert(BaseModel):
+    machine_id: str
+    fiducial_id: str
+    fiducial_pose_in_machine: list = [0, 0, 0, 0, 0, 0, 1]
+    build_plate_origin_offset_mm: tuple = (0.0, 0.0, 0.0)
+    build_volume_mm: tuple = (220.0, 220.0, 250.0)
+    build_plate_quat: list = [0, 0, 0, 1]
+    notes: str = ""
+
+
+@app.post("/api/openclaw/calibrations")
+async def openclaw_calibrations_upsert(req: OpenClawCalibrationUpsert):
+    """Upsert one machine calibration. Called by StructSight VR after the
+    user completes the in-headset calibration ritual (look at AprilTag,
+    confirm pose).
+    """
+    try:
+        from aria_os.openclaw import machine_calibration as _cal
+        cal = _cal.MachineCalibration(
+            machine_id=req.machine_id,
+            fiducial_id=req.fiducial_id,
+            fiducial_pose_in_machine=list(req.fiducial_pose_in_machine),
+            build_plate_origin_offset_mm=tuple(req.build_plate_origin_offset_mm),
+            build_volume_mm=tuple(req.build_volume_mm),
+            build_plate_quat=list(req.build_plate_quat),
+            notes=req.notes,
+        )
+        _cal.upsert(cal)
+        return {"ok": True, "machine_id": req.machine_id}
+    except Exception as exc:
+        raise HTTPException(500, f"openclaw_calibrations_upsert: {exc}")
+
+
+# --------------------------------------------------------------------------- #
+# CAD feature learning ledger - what the feature-matrix runs have discovered.
+# Frontend uses this to render the live feature support matrix on the
+# StructSight Jarvis panel. The ledger updates every time
+# scripts/run_sw_feature_matrix.py finishes.
+# --------------------------------------------------------------------------- #
+
+
+def _load_cad_ledger(cad: str) -> dict:
+    name = ("sw_learning_ledger.json" if cad == "sw"
+            else f"{cad}_learning_ledger.json")
+    p = REPO_ROOT / "outputs" / name
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+@app.get("/api/cad/feature-ledger")
+async def cad_feature_ledger(cad: str = "sw"):
+    """Per-CAD feature support ledger."""
+    led = _load_cad_ledger(cad)
+    if not led:
+        return {"ok": False, "cad": cad, "ledger": {},
+                "msg": "no ledger - run scripts/run_sw_feature_matrix.py"}
+    counts: dict[str, int] = {}
+    for e in led.values():
+        counts[e.get("status", "unknown")] = (
+            counts.get(e.get("status", "unknown"), 0) + 1)
+    return {"ok": True, "cad": cad, "total": len(led),
+            "by_status": counts, "ledger": led}
+
+
+@app.get("/api/cad/feature-ledger/all")
+async def cad_feature_ledger_all():
+    """Cross-CAD support matrix: which features each CAD bridge supports."""
+    cads = ["sw", "rhino", "fusion", "onshape", "autocad"]
+    ledgers = {c: _load_cad_ledger(c) for c in cads}
+    all_feats: set[str] = set()
+    for led in ledgers.values():
+        all_feats.update(led.keys())
+    matrix: dict = {}
+    for f in sorted(all_feats):
+        matrix[f] = {c: (ledgers[c].get(f, {}).get("status", "untested")
+                        if ledgers[c] else "untested") for c in cads}
+    return {"ok": True, "cads": cads,
+            "feature_count": len(all_feats), "matrix": matrix}
+
+
+@app.get("/api/cad/feature-matrix-report")
+async def cad_feature_matrix_report():
+    """Latest matrix run report (markdown + json rows + contact sheet path)."""
+    base = REPO_ROOT / "outputs" / "feature_matrix"
+    md = base / "report.md"
+    js = base / "report.json"
+    cs = base / "contact_sheet.png"
+    return {
+        "ok": md.exists() or js.exists(),
+        "report_md_path": str(md) if md.exists() else None,
+        "report_json_path": str(js) if js.exists() else None,
+        "contact_sheet_path": str(cs) if cs.exists() else None,
+        "view_dirs": [str(p) for p in base.glob("*_views") if p.is_dir()],
+    }
 
 
 # --------------------------------------------------------------------------- #

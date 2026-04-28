@@ -105,7 +105,16 @@ namespace AriaPanel
                         break;
 
                     case "exportCurrent":
-                        ReplyError(id, "not implemented");
+                        string fmt = msg["format"]?.ToString() ?? "stl";
+                        try
+                        {
+                            var exportResult = ExportCurrent(fmt);
+                            Reply(id, exportResult);
+                        }
+                        catch (Exception exExp)
+                        {
+                            ReplyError(id, $"exportCurrent: {exExp.Message}");
+                        }
                         break;
 
                     case "showNotification":
@@ -248,6 +257,62 @@ namespace AriaPanel
                 objectCount = added,
                 format = ext.TrimStart('.'),
                 path = tmpPath
+            };
+        }
+
+        // -----------------------------------------------------------------
+        // exportCurrent — write the active doc to a temp file in the
+        // requested format. Mirrors AriaSW's exportCurrent so the visual-
+        // verify loop in /api/native_eval works against Rhino too.
+        // -----------------------------------------------------------------
+
+        private object ExportCurrent(string format)
+        {
+            var doc = RhinoDoc.ActiveDoc
+                ?? throw new InvalidOperationException("No active Rhino document");
+
+            string ext = (format ?? "stl").Trim().ToLowerInvariant().TrimStart('.');
+            // Whitelist Rhino-supported export extensions
+            if (!(ext is "stl" or "step" or "stp" or "iges" or "igs"
+                   or "obj" or "3dm" or "dxf" or "dwg"
+                   or "fbx" or "ply" or "x_t"))
+            {
+                ext = "stl";
+            }
+
+            string outDir = Path.Combine(Path.GetTempPath(), "aria-exports");
+            Directory.CreateDirectory(outDir);
+            string baseName = Path.GetFileNameWithoutExtension(doc.Name) ?? "part";
+            if (string.IsNullOrWhiteSpace(baseName)) baseName = "part";
+            string outPath = Path.Combine(outDir,
+                $"{baseName}_{DateTime.UtcNow:yyyyMMddHHmmss}_{Guid.NewGuid():N}.{ext}");
+
+            // Select all objects so the scripted -_Export pulls everything.
+            // RunScript with `_-` prefix runs in scripted mode with no
+            // dialogs; trailing _Enter accepts default options.
+            RhinoApp.RunScript("_-SelAll", false);
+            string quoted = outPath.Replace("\\", "/");
+            // -_Export with the path; some formats (.stl, .obj) need an
+            // extra _Enter to dismiss their option dialog.
+            RhinoApp.RunScript($"-_Export \"{quoted}\" _Enter _Enter _Enter", false);
+            RhinoApp.RunScript("_-SelNone", false);
+
+            if (!File.Exists(outPath))
+                throw new InvalidOperationException(
+                    $"Export produced no file at {outPath}");
+            long bytes = new FileInfo(outPath).Length;
+            if (bytes < 100)
+                throw new InvalidOperationException(
+                    $"Export file too small ({bytes} bytes) at {outPath}");
+
+            string fileUrl = "file:///" + outPath.Replace('\\', '/');
+            return new
+            {
+                ok = true,
+                url = fileUrl,
+                path = outPath,
+                bytes,
+                format = ext,
             };
         }
 

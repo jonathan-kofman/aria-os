@@ -173,18 +173,34 @@ def clarify(goal: str, spec: dict | None = None,
              repo_root: Path | None = None) -> dict:
     """Ask the LLM to review the prompt and list critical missing fields.
 
+    Fast-path: if the prompt already carries enough design/manufacturing
+    intent for THIS prompt's domain (per
+    `aria_os.clarify.clarify._is_already_specific`), return ready
+    immediately without invoking the LLM. The LLM tends to invent
+    checklist questions ("indoor or outdoor", "regulatory scope") that
+    the user has explicitly told us NOT to ask when intent is clear.
+
     Returns a dict with:
         enough_info: bool
         part_family: str
         summary: str
         clarifications: list[dict]
-
-    Self-healing: if the LLM bails out OR returns a list missing the
-    "always cover" axes (chiefly indoor/outdoor), we merge in the
-    deterministic baseline so the user is never silently shipped a
-    half-defined prompt. Per the autonomy-first rule the recovery is
-    invisible to the caller.
     """
+    # Intent-based fast-path — bypass LLM and the env-injection block
+    # below for prompts that have purpose / dense specs / PCB context.
+    try:
+        from aria_os.clarify.clarify import _is_already_specific
+        if _is_already_specific(goal):
+            return {
+                "enough_info":    True,
+                "part_family":    (spec or {}).get("part_type") or "specific",
+                "summary":        goal[:200],
+                "clarifications": [],
+                "skipped_reason": "intent + dims/material — no clarify needed",
+            }
+    except Exception:
+        pass
+
     prompt = (
         f"## User's part description\n{goal.strip()}\n\n"
         f"## Already-extracted spec\n"

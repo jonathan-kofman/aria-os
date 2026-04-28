@@ -18,20 +18,56 @@ from __future__ import annotations
 from pathlib import Path
 
 from .flange_planner import plan_flange
+from .gear_planner import plan_gear
+from .heat_sink_planner import plan_heat_sink
 from .impeller_planner import plan_impeller
+from .lattice_planner import plan_lattice
 from .llm_planner import plan_from_llm
+from .revolve_planner import plan_revolve
+from .shaft_planner import plan_shaft
 from .sheetmetal_planner import plan_simple_bracket
 from .validator import validate_plan
 
 
 # Keyword → planner fn. First match wins.
 # Order matters: put multi-word matches BEFORE single-word ones.
+# Lattice MUST come before l-bracket / shaft / etc. so a goal like
+# "L-bracket with gyroid infill" hits the editable-lattice path
+# instead of the plain sheetmetal bracket planner.
 _KEYWORD_TO_PLANNER = [
+    # Editable TPMS / strut lattice — host body + bake recipe stored
+    # on SW user-parameters for in-place edit.
+    (["gyroid infill", "tpms infill",
+      "schwarz", "schwarz-p", "schwarz-w", "diamond tpms",
+      "diamond lattice", "iwp lattice", "neovius lattice",
+      "octet truss", "octet-truss",
+      "bcc lattice", "fcc lattice", "kagome lattice",
+      "honeycomb infill",
+      "with gyroid", "with octet",
+      "lattice infill", "tpms lattice"],                     plan_lattice),
     (["impeller", "fan rotor", "centrifugal rotor",
       "turbine rotor", "blower wheel"],                       plan_impeller),
+    # Heat sinks — base + parallel fins. Must come before "fin rotor"
+    # variants if any are added later.
+    (["heat sink", "heatsink", "heat-sink",
+      "cpu cooler", "finned plate", "cooling fin"],           plan_heat_sink),
+    # Spur / helical / sprocket gears — all share the disc + N-tooth
+    # circular-pattern shape, so route them through plan_gear.
+    (["spur gear", "helical gear", "sprocket",
+      "gear blank", "spur-gear",
+      "gear ", " gear,"],                                     plan_gear),
     (["flange"],                                              plan_flange),
     (["sheet metal bracket", "l-bracket", "formed bracket",
       "sheet-metal bracket"],                                 plan_simple_bracket),
+    # Shaft / axle / spindle — covers single + stepped diameters with
+    # optional keyway. Parsing in shaft_planner is goal-text-aware so
+    # multi-segment phrasing ("12mm dia ends, 20mm dia centre") works.
+    (["stepped shaft", "shaft", "axle", "spindle", "drive shaft"],
+                                                                 plan_shaft),
+    # Axisymmetric revolved profiles — nozzles, wine glasses, flasks, etc.
+    (["rocket nozzle", "bell nozzle", "lre nozzle", "axisymmetric",
+      "wine glass", "flask", "lampshade", "vase profile", "revolved profile"],
+                                                                 plan_revolve),
 ]
 
 

@@ -77,6 +77,15 @@ _ui = None
 _palette = None
 _handlers: list = []
 
+# HTTP bridge state - serves localhost:7504 with the same /op contract as
+# SW (7501) / Rhino (7502) so cross_cad_matrix.py can target Fusion
+# identically. Calls into _FEATURE_HANDLERS marshalled through a queue
+# because Fusion's adsk.fusion API is NOT thread-safe - the HTTP request
+# thread must hand off to the main thread via a custom event.
+_http_server = None
+_http_thread = None
+_http_port = 7504
+
 
 # --------------------------------------------------------------------
 # Bridge implementations
@@ -99,7 +108,19 @@ def _reply(id_: str, result=None, error: str | None = None) -> None:
     if _palette is not None:
         try:
             _palette.sendInfoToHTML("ariaReply", json.dumps(payload))
-        except Exception:
+        except Exception as ex:
+            # Log failures so they can be debugged; don't silently drop errors.
+            try:
+                adsk.core.Application.get().log(
+                    f"[ARIA] _reply failed: {id_} → {type(ex).__name__}: {str(ex)[:80]}")
+            except:
+                pass  # Even logging failed; give up gracefully
+    else:
+        # Palette not initialized (add-in unloaded or early in startup)
+        try:
+            adsk.core.Application.get().log(
+                f"[ARIA] _reply dropped (palette is None): {id_}")
+        except:
             pass
 
 
@@ -107,8 +128,14 @@ def _get_current_document() -> dict:
     doc = _app.activeDocument
     product = _app.activeProduct
     units = "mm"
+    workspace = "unknown"
     try:
         units = product.unitsManager.defaultLengthUnits
+    except Exception:
+        pass
+    try:
+        # For Fusion Design, workspace is "Design"; other workspaces may lack Design API.
+        workspace = "Design" if isinstance(product, adsk.fusion.Design) else type(product).__name__
     except Exception:
         pass
     return {
@@ -116,6 +143,7 @@ def _get_current_document() -> dict:
         "id": getattr(doc, "id", ""),
         "units": units,
         "type": type(product).__name__,
+        "workspace": workspace,
     }
 
 
@@ -2238,6 +2266,155 @@ class _CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 # Add-in lifecycle
 # --------------------------------------------------------------------
 
+# --------------------------------------------------------------------
+# HTTP bridge - localhost:7504 /op endpoint
+#
+# Identical contract to SW (7501) and Rhino (7502): POST /op with
+# {kind, params}. The request thread queues the op and blocks on a
+# Fusion custom event that runs the handler on the main thread (Fusion
+# API is NOT thread-safe - calling adsk.fusion from a non-main thread
+# crashes the host).
+# --------------------------------------------------------------------
+import threading
+import queue
+import http.server
+
+
+_OP_QUEUE: "queue.Queue" = queue.Queue()
+_RESULT_DICT: dict = {}
+_EVENT_ID = "AriaHttpDispatchEvent"
+
+
+def _http_handler_factory():
+    class AriaHttpHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass  # suppress default access log to Fusion stdout
+
+        def _send(self, code, body_obj):
+            body = json.dumps(body_obj).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/status":
+                self._send(200, {"ok": True, "bridge": "fusion",
+                                  "port": _http_port,
+                                  "ops_count": len(_FEATURE_HANDLERS)})
+            else:
+                self._send(404, {"ok": False,
+                                  "error": f"unknown route GET {self.path}"})
+
+        def do_POST(self):
+            if self.path != "/op":
+                self._send(404, {"ok": False,
+                                  "error": f"unknown route POST {self.path}"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length).decode("utf-8") if length else "{}"
+                req = json.loads(raw)
+                kind = req.get("kind", "")
+                params = req.get("params", {})
+                # Marshal to Fusion main thread via custom event.
+                req_id = id(req) ^ int(_time.time() * 1000)
+                _OP_QUEUE.put((req_id, kind, params))
+                # Fire the custom event - Fusion will dispatch on main thread
+                if _app is not None:
+                    _app.fireCustomEvent(_EVENT_ID, str(req_id))
+                # Wait up to 30s for the handler to populate _RESULT_DICT
+                deadline = _time.time() + 30
+                while _time.time() < deadline:
+                    if req_id in _RESULT_DICT:
+                        result = _RESULT_DICT.pop(req_id)
+                        self._send(200, {"ok": True, "kind": kind,
+                                          "result": result})
+                        return
+                    _time.sleep(0.05)
+                self._send(504, {"ok": False, "kind": kind,
+                                  "error": "timeout waiting for main thread"})
+            except Exception as ex:
+                self._send(500, {"ok": False,
+                                  "error": f"{type(ex).__name__}: {ex}"})
+    return AriaHttpHandler
+
+
+class _AriaCustomEventHandler(adsk.core.CustomEventHandler):
+    """Runs on Fusion's main thread when fireCustomEvent triggers."""
+    def notify(self, args):
+        try:
+            while not _OP_QUEUE.empty():
+                req_id, kind, params = _OP_QUEUE.get_nowait()
+                handler = _FEATURE_HANDLERS.get(kind)
+                if handler is None:
+                    _RESULT_DICT[req_id] = {
+                        "ok": False,
+                        "error": f"Unknown kind: {kind}"}
+                    continue
+                try:
+                    res = handler(params or {})
+                    if isinstance(res, dict):
+                        _RESULT_DICT[req_id] = res
+                    else:
+                        _RESULT_DICT[req_id] = {"ok": True, "value": str(res)}
+                except Exception as ex:
+                    _RESULT_DICT[req_id] = {
+                        "ok": False,
+                        "error": f"{type(ex).__name__}: {ex}",
+                        "traceback": traceback.format_exc()[:500]}
+        except Exception:
+            pass
+
+
+def _start_http_bridge():
+    """Start the HTTP server thread + register the custom event handler."""
+    global _http_server, _http_thread
+    if _http_server is not None:
+        return  # already running
+    try:
+        # Custom event for marshalling HTTP work to main thread
+        evt = _app.registerCustomEvent(_EVENT_ID)
+        on_evt = _AriaCustomEventHandler()
+        evt.add(on_evt)
+        _handlers.append(on_evt)
+
+        # HTTP server - bind both 127.0.0.1 and localhost (per memory note,
+        # HTTP.sys returns 400 Bad Hostname if only one is bound)
+        _http_server = http.server.HTTPServer(
+            ("127.0.0.1", _http_port), _http_handler_factory())
+        _http_thread = threading.Thread(
+            target=_http_server.serve_forever, daemon=True,
+            name="AriaFusionHttpBridge")
+        _http_thread.start()
+    except Exception:
+        if _ui:
+            _ui.messageBox(
+                f"ARIA HTTP bridge failed to start on port {_http_port}:\n"
+                + traceback.format_exc())
+
+
+def _stop_http_bridge():
+    global _http_server, _http_thread
+    try:
+        if _http_server is not None:
+            _http_server.shutdown()
+            _http_server.server_close()
+            _http_server = None
+        if _http_thread is not None:
+            _http_thread.join(timeout=2)
+            _http_thread = None
+        if _app is not None:
+            try:
+                _app.unregisterCustomEvent(_EVENT_ID)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def run(_context):
     global _app, _ui
     try:
@@ -2249,6 +2426,15 @@ def run(_context):
             recipe_db.init()
         except Exception:
             pass  # cache is best-effort; addin still works without it
+
+        # Start HTTP bridge on localhost:7504 so cross_cad_matrix.py
+        # and the rest of the ARIA pipeline can drive Fusion identically
+        # to SW (7501) and Rhino (7502). Best-effort - failure here
+        # doesn't break the palette.
+        try:
+            _start_http_bridge()
+        except Exception:
+            pass
 
         cmd_defs = _ui.commandDefinitions
         existing = cmd_defs.itemById(_CMD_ID)
@@ -2274,6 +2460,11 @@ def run(_context):
 def stop(_context):
     global _palette
     try:
+        # Stop HTTP bridge first - frees port 7504 cleanly
+        try:
+            _stop_http_bridge()
+        except Exception:
+            pass
         if _palette:
             _palette.deleteMe()
             _palette = None

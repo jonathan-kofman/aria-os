@@ -84,7 +84,12 @@ def plan_simple_bracket(spec: dict, goal: str = "") -> list[dict]:
                      "params": {"sketch": "sk_base", "distance": t,
                                  "operation": "new", "alias": "sm_body"},
                      "label": f"Extrude base plate {t:g}mm"})
-    # Add the vertical leg if leg_h > 0 (makes it an actual L-bracket)
+    # Add the vertical leg if leg_h > 0 (makes it an actual L-bracket).
+    # SW addin mirrors sketch-y on XZ plane (per MirrorYIfNeeded), so a
+    # planner emitting cy=+leg_h/2 ends up with the leg at world Z=-leg_h..0
+    # — below the base, no overlap, no boolean join. Compensate by
+    # emitting cy=-leg_h/2 so the mirror lands the leg at Z=0..+leg_h
+    # where it shares volume with the base and joins cleanly.
     if leg_h > 0:
         plan.extend([
             {"kind": "newSketch",
@@ -93,7 +98,7 @@ def plan_simple_bracket(spec: dict, goal: str = "") -> list[dict]:
              "label": "Sketch on XZ plane for vertical leg"},
             {"kind": "sketchRect",
              "params": {"sketch": "sk_leg",
-                        "cx": 0, "cy": leg_h / 2,
+                        "cx": 0, "cy": -leg_h / 2,
                         "w": w, "h": leg_h},
              "label": f"Leg profile {w:g}×{leg_h:g}mm"},
             {"kind": "extrude",
@@ -136,8 +141,10 @@ def plan_simple_bracket(spec: dict, goal: str = "") -> list[dict]:
                      "params": {"plane": "XZ", "alias": "sk_leg_holes",
                                  "name": "ARIA Leg Mounting Holes"},
                      "label": f"Sketch for {n_leg} leg mounting hole(s)"})
-        # Near the top of the leg so the mounted item hangs below
-        z_off = leg_h - edge_off
+        # Near the top of the leg so the mounted item hangs below.
+        # World Z=+leg_h-edge_off, but the addin's XZ mirror flips
+        # sketch-y → world-Z, so we emit -(leg_h-edge_off) here.
+        z_off = -(leg_h - edge_off)
         usable_w = w - 2 * edge_off
         for i in range(n_leg):
             x_off = (-usable_w / 2 +
@@ -149,7 +156,7 @@ def plan_simple_bracket(spec: dict, goal: str = "") -> list[dict]:
                             "r": bolt_dia / 2.0},
                 "label": (f"Leg hole {i+1}/{n_leg}: "
                            f"Ø{bolt_dia:g}mm{thread_label} "
-                           f"at ({x_off:.1f}, z={z_off:.1f}mm)"),
+                           f"at ({x_off:.1f}, z={abs(z_off):.1f}mm)"),
             })
         plan.append({
             "kind": "extrude",

@@ -52,6 +52,8 @@ namespace AriaSW
         internal WebView2 WebView { get; private set; }
         private AriaBridge _bridge;
         private bool _webViewReady;
+        private System.Collections.Generic.Queue<string> _replyQueue =
+            new System.Collections.Generic.Queue<string>();
 
         // Most-recently-constructed instance — used by AriaReload to find
         // the live WebView2 without going through SW's Task Pane registry.
@@ -328,7 +330,13 @@ namespace AriaSW
 
         internal void PostReply(string json)
         {
-            if (!_webViewReady) return;
+            // If not ready, queue the message to send when WebView is initialized.
+            if (!_webViewReady)
+            {
+                _replyQueue.Enqueue(json);
+                AriaSwAddin.FileLog($"PostReply queued (not ready yet); queue depth={_replyQueue.Count}");
+                return;
+            }
             // CoreWebView2 throws "can only be accessed from the UI thread"
             // even on null-check. Marshal to UI thread BEFORE touching it.
             if (InvokeRequired)
@@ -346,14 +354,26 @@ namespace AriaSW
                 var core = WebView?.CoreWebView2;
                 if (core == null)
                 {
-                    AriaSwAddin.FileLog("PostReply DROPPED — CoreWebView2 null on UI thread");
+                    AriaSwAddin.FileLog("PostReply QUEUED — CoreWebView2 null on UI thread");
+                    _replyQueue.Enqueue(json);
                     return;
+                }
+                // Flush any queued messages first, then send the current one.
+                while (_replyQueue.Count > 0)
+                {
+                    string queued = _replyQueue.Dequeue();
+                    try { core.PostWebMessageAsJson(queued); }
+                    catch (Exception ex2)
+                    {
+                        AriaSwAddin.FileLog($"PostReply (queued) failed: {ex2.GetType().Name}: {ex2.Message}");
+                    }
                 }
                 core.PostWebMessageAsJson(json);
             }
             catch (Exception ex)
             {
                 AriaSwAddin.FileLog($"PostReply failed: {ex.GetType().Name}: {ex.Message}");
+                _replyQueue.Enqueue(json);
             }
         }
 

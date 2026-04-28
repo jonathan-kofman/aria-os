@@ -411,11 +411,42 @@ def extract_spec(description: str) -> dict[str, Any]:
         spec["height_mm"] = thick
 
     # --- Width ---
-    width = _find([
-        r"(\d+(?:\.\d+)?)\s*mm\s+wide",
-        r"width\s*[=:]\s*(\d+(?:\.\d+)?)\s*mm",
-        r"(\d+(?:\.\d+)?)\s*mm\s+width",
-    ])
+    # "5mm wide" matches both body width AND feature widths (keyway, slot,
+    # groove, slit, notch). The naked regex would conflate "5mm wide DIN6885
+    # keyway" with body width, causing the visual-verify gate to compare a
+    # 5mm keyway dim against the 30mm shaft bbox and fail spuriously. Filter
+    # out matches that are immediately followed by a feature noun, and stash
+    # those into `feature_width_mm` so a downstream consumer can still see
+    # them if it cares.
+    feature_width_re = re.compile(
+        r"(\d+(?:\.\d+)?)\s*mm\s+wide\s+(?:[A-Za-z0-9_-]+\s+){0,3}"
+        r"(?:keyway|keyed|key\b|slot|groove|slit|notch|fillet|chamfer|"
+        r"channel|rib|fin|tab|tenon|mortise|hole|cutout|recess)",
+        re.IGNORECASE,
+    )
+    fw_m = feature_width_re.search(description)
+    if fw_m:
+        try:
+            spec["feature_width_mm"] = float(fw_m.group(1))
+        except (ValueError, IndexError):
+            pass
+    width = None
+    body_w = re.search(
+        r"(\d+(?:\.\d+)?)\s*mm\s+wide(?!\s+(?:[A-Za-z0-9_-]+\s+){0,3}"
+        r"(?:keyway|keyed|key\b|slot|groove|slit|notch|fillet|chamfer|"
+        r"channel|rib|fin|tab|tenon|mortise|hole|cutout|recess))",
+        description, re.IGNORECASE,
+    )
+    if body_w:
+        try:
+            width = float(body_w.group(1))
+        except (ValueError, IndexError):
+            width = None
+    if width is None:
+        width = _find([
+            r"width\s*[=:]\s*(\d+(?:\.\d+)?)\s*mm",
+            r"(\d+(?:\.\d+)?)\s*mm\s+width",
+        ])
     if width:
         spec["width_mm"] = width
 

@@ -78,6 +78,36 @@ namespace AriaPanel
 
         public static void RecordSuccess(string intent, JObject args)
         {
+            // Same intent-vs-args invariant as the SW addin RecipeDb —
+            // refuse to persist a recipe that contradicts its own intent
+            // (e.g. blind=false stored under cut_extrude_blind). Without
+            // this guard a single odd-shape success poisons the cache and
+            // every subsequent matching intent replays the bad combo.
+            if (intent != null && args != null)
+            {
+                bool intentBlind = intent.IndexOf("blind",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+                bool intentThrough = intent.IndexOf("through",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+                if (intentBlind && args["blind"] != null
+                    && args["blind"].Type == JTokenType.Boolean
+                    && !args["blind"].Value<bool>())
+                {
+                    Rhino.RhinoApp.WriteLine($"AriaRhino RecipeDb: REJECTED "
+                        + $"'{intent}' — intent says blind but args have "
+                        + "blind=false. Not poisoning the cache.");
+                    return;
+                }
+                if (intentThrough && args["blind"] != null
+                    && args["blind"].Type == JTokenType.Boolean
+                    && args["blind"].Value<bool>())
+                {
+                    Rhino.RhinoApp.WriteLine($"AriaRhino RecipeDb: REJECTED "
+                        + $"'{intent}' — intent says through-all but args "
+                        + "have blind=true. Not poisoning the cache.");
+                    return;
+                }
+            }
             lock (_lock)
             {
                 _store[intent] = args;

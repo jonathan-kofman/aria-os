@@ -63,7 +63,14 @@ namespace AriaSW
             try
             {
                 _listener = new HttpListener();
+                // Bind both hostnames. Windows HTTP.sys filters by Host header
+                // at the kernel layer BEFORE our handler runs, so a single
+                // "localhost" prefix rejects 127.0.0.1 requests with HTTP 400
+                // Bad Hostname. Adding both is required so any client (script,
+                // browser, dashboard) reaches us regardless of how they spell
+                // the loopback address.
                 _listener.Prefixes.Add($"http://localhost:{Port}/");
+                _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
                 _listener.Start();
                 _running = true;
                 _thread = new Thread(AcceptLoop)
@@ -72,7 +79,7 @@ namespace AriaSW
                     Name = "AriaSW-HttpListener",
                 };
                 _thread.Start();
-                AriaSwAddin.FileLog($"HttpListener: listening on http://localhost:{Port}/");
+                AriaSwAddin.FileLog($"HttpListener: listening on http://localhost:{Port}/ and http://127.0.0.1:{Port}/");
             }
             catch (Exception ex)
             {

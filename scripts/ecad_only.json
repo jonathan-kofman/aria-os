@@ -1,0 +1,3 @@
+{
+  "goal": "4-layer 60x60mm quadcopter flight controller PCB with STM32, IMU, baro, USB-C, XT60, GPS header, telemetry header, ESC headers, decoupling caps"
+}

@@ -1,0 +1,12 @@
+{
+  "goal": "FPV drone for Ukraine - 5\" 4S 1500mAh, FC + frame, full DXF + GD&T + design rationale",
+  "pcb_goal": "4-layer 60x60mm quadcopter flight controller PCB with STM32, IMU, baro, USB-C, XT60",
+  "frame_goal": "5 inch FPV X-frame, 4 motor mounts, battery slot, 3mm carbon fiber",
+  "mcad_cad": "solidworks",
+  "quality_tier": "fast",
+  "bundle_name": "drone_ukraine_v6",
+  "motor_count": 4,
+  "prop_size_in": 5.0,
+  "battery_capacity_mah": 1500,
+  "battery_cells": 4
+}
